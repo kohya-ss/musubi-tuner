@@ -33,7 +33,7 @@ import torch
 import torch.nn as nn
 
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
-from musubi_tuner.minimax_h3.media import H3Record, H3Task
+from musubi_tuner.minimax_h3.media import TEXT_VISUAL_FPS, H3Record, H3Task
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,9 @@ def build_presentation(
 
         visual = _require_visual(visuals, reference.path, f"reference video {reference.path}")
         frames = visual.frames
-        timestamps = list(visual.timestamps) if visual.timestamps is not None else [index / 2.0 for index in range(len(frames))]
+        timestamps = (
+            list(visual.timestamps) if visual.timestamps is not None else [index / TEXT_VISUAL_FPS for index in range(len(frames))]
+        )
         if len(frames) % 2:
             frames = torch.cat((frames, frames[-1:]), dim=0)
             timestamps.append(timestamps[-1])
@@ -461,8 +463,8 @@ def encode_h3_presentation(processor, model, presentation: H3Presentation) -> tu
         processor_args["video_metadata"] = [
             {
                 "total_num_frames": int(video.shape[0]),
-                "fps": 2.0,
-                "duration": float(video.shape[0]) / 2.0,
+                "fps": float(TEXT_VISUAL_FPS),
+                "duration": float(video.shape[0]) / TEXT_VISUAL_FPS,
                 "frames_indices": list(range(video.shape[0])),
                 "height": int(video.shape[1]),
                 "width": int(video.shape[2]),

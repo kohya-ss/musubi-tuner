@@ -29,13 +29,14 @@ from musubi_tuner.minimax_h3.generation_inputs import (
     encode_visual_conditions,
     fl_condition_entries,
     load_generation_record,
-    module_device_dtype,
     parse_one_frame_options,
 )
 from musubi_tuner.minimax_h3.media import (
     H3_AUDIO_SPEC,
     TARGET_FPS,
+    PyAVH3MediaDecoder,
     audio_latent_frames,
+    module_device_dtype,
     parse_inline_references,
     reject_one_frame_audio_references,
     video_latent_frames,
@@ -73,7 +74,6 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_teacher_conditions,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
-from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts

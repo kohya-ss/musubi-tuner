@@ -38,7 +38,6 @@ def _load_training_module(monkeypatch):
         encode_visual_conditions=noop,
         fl_condition_entries=noop,
         load_generation_record=noop,
-        module_device_dtype=noop,
         parse_one_frame_options=noop,
     )
     _stub(
@@ -46,7 +45,9 @@ def _load_training_module(monkeypatch):
         "musubi_tuner.minimax_h3.media",
         H3_AUDIO_SPEC=object(),
         TARGET_FPS=24,
+        PyAVH3MediaDecoder=object,
         audio_latent_frames=noop,
+        module_device_dtype=noop,
         parse_inline_references=noop,
         reject_one_frame_audio_references=noop,
         video_latent_frames=noop,
@@ -82,7 +83,6 @@ def _load_training_module(monkeypatch):
         VIDEO_VAE_ENCODE_DTYPE=torch.bfloat16,
         load_video_vae=noop,
     )
-    _stub(monkeypatch, "musubi_tuner.minimax_h3_cache_latents", PyAVH3MediaDecoder=object)
 
     def add_audio_train_args(parser):
         parser.add_argument("--audio_loss_weight", type=float, default=1.0)
@@ -206,12 +206,6 @@ def _load_generation_module(monkeypatch):
         VIDEO_VAE_DECODE_DTYPE=torch.float16,
         VIDEO_VAE_ENCODE_DTYPE=torch.bfloat16,
         load_video_vae=noop,
-    )
-    _stub(
-        monkeypatch,
-        "musubi_tuner.minimax_h3_cache_latents",
-        PyAVH3MediaDecoder=object,
-        fingerprint_file=noop,
     )
     spec = importlib.util.spec_from_file_location(
         target,

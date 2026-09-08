@@ -31,7 +31,9 @@ from musubi_tuner.minimax_h3.generation_inputs import (
 from musubi_tuner.minimax_h3.media import (
     TARGET_FPS,
     H3Record,
+    PyAVH3MediaDecoder,
     audio_latent_frames,
+    fingerprint_file,
     reject_one_frame_audio_references,
     video_latent_frames,
 )
@@ -70,7 +72,6 @@ from musubi_tuner.minimax_h3.text_encoder import (
     validate_text_rows,
 )
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
-from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder, fingerprint_file
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.utils.device_utils import clean_memory_on_device

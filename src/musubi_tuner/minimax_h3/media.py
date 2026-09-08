@@ -3,14 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 import json
+import math
 from pathlib import Path
-from typing import Callable, Literal, Mapping, Optional, Sequence
+from typing import Callable, Literal, Mapping, Optional, Protocol, Sequence
 
 import av
+import numpy as np
+from PIL import Image
+import torch
 
 from musubi_tuner.dataset.audio_utils import AudioSource as H3AudioSource
-from musubi_tuner.dataset.audio_utils import AudioSpec
+from musubi_tuner.dataset.audio_utils import AudioSpec, decode_audio, slice_audio_window
 from musubi_tuner.dataset.datasources import ContentDatasource
+from musubi_tuner.dataset.media_utils import load_video
 
 
 H3Task = Literal["t2va", "fl2va", "ref2va"]
@@ -23,6 +28,15 @@ AUDIO_TERMINAL_TOLERANCE_SAMPLES = 800
 # with a one-frame (image) target, reference videos keep their full released span instead of
 # being capped by the target duration (shared by generation and the one-frame caches)
 ONE_FRAME_REFERENCE_FRAME_CAP = 15 * TARGET_FPS
+# released reference canvas: short edge and pixel budget of decoded reference videos, on a
+# 32-pixel grid (the caches and generation decode references through the same policy)
+CANVAS_MULTIPLE = 32
+BASE_SHORT_EDGE = 768
+MAX_PIXELS = 768 * 1344
+# reference videos enter the Qwen3-VL presentation as 2 fps frame samples (the released
+# text-visual clock); the stride converts from the native 24 fps decode
+TEXT_VISUAL_FPS = 2
+TEXT_VISUAL_FRAME_STRIDE = TARGET_FPS // TEXT_VISUAL_FPS
 
 
 @dataclass(frozen=True)
@@ -293,6 +307,143 @@ def parse_inline_references(
     """
     raw_references = [_inline_reference_data(spec, f"{context}[{index}]") for index, spec in enumerate(specs)]
     return _parse_references(raw_references, base_directory, context, probe)
+
+
+def round_to_canvas_multiple(value: float, multiple: int = CANVAS_MULTIPLE) -> int:
+    return max(multiple, round(value / multiple) * multiple)
+
+
+def adapt_reference_canvas(width: int, height: int) -> tuple[int, int]:
+    """The released reference-video canvas for a source aspect ratio: BASE_SHORT_EDGE on the
+    short side, scaled down to MAX_PIXELS, on the CANVAS_MULTIPLE grid."""
+    ratio = width / height
+    if ratio >= 1.0:
+        nominal_width, nominal_height = BASE_SHORT_EDGE * ratio, BASE_SHORT_EDGE
+    else:
+        nominal_width, nominal_height = BASE_SHORT_EDGE, BASE_SHORT_EDGE / ratio
+    if nominal_width * nominal_height > MAX_PIXELS:
+        scale = math.sqrt(MAX_PIXELS / (nominal_width * nominal_height))
+        nominal_width *= scale
+        nominal_height *= scale
+    return round_to_canvas_multiple(nominal_width), round_to_canvas_multiple(nominal_height)
+
+
+def resize_frames(frames: Sequence[np.ndarray], size: tuple[int, int]) -> torch.Tensor:
+    """LANCZOS-resize decoded RGB(A) frames to exactly (width, height) as a uint8 [F,H,W,3] tensor."""
+    width, height = size
+    resized = [
+        torch.from_numpy(np.asarray(Image.fromarray(frame[..., :3]).resize((width, height), Image.Resampling.LANCZOS)).copy())
+        for frame in frames
+    ]
+    return torch.stack(resized)
+
+
+class H3MediaDecoder(Protocol):
+    def decode_audio(
+        self,
+        source: H3AudioSource,
+        *,
+        start_sample: int,
+        sample_count: int,
+        require_exact: bool,
+    ) -> torch.Tensor: ...
+
+    def decode_reference_visual(
+        self,
+        reference: H3Reference,
+        *,
+        target_frame_count: int,
+        target_size: tuple[int, int],
+    ) -> torch.Tensor: ...
+
+
+class PyAVH3MediaDecoder:
+    """Decodes MiniMax-H3 reference media (target media is decoded by the shared dataset layer)."""
+
+    def __init__(self, terminal_tolerance_samples: int = AUDIO_TERMINAL_TOLERANCE_SAMPLES):
+        self.terminal_tolerance_samples = terminal_tolerance_samples
+
+    def decode_audio(
+        self,
+        source: H3AudioSource,
+        *,
+        start_sample: int,
+        sample_count: int,
+        require_exact: bool,
+    ) -> torch.Tensor:
+        if start_sample < 0 or sample_count <= 0:
+            raise ValueError("MiniMax-H3 audio window must have a nonnegative start and positive length")
+        waveform = decode_audio(source, sample_rate=AUDIO_SAMPLE_RATE, channels=2)
+        return slice_audio_window(
+            waveform,
+            start_sample=start_sample,
+            sample_count=sample_count,
+            pad_tolerance=self.terminal_tolerance_samples,
+            require_exact=require_exact,
+            context=str(source.path),
+        )
+
+    def decode_reference_visual(
+        self,
+        reference: H3Reference,
+        *,
+        target_frame_count: int,
+        target_size: tuple[int, int],
+    ) -> torch.Tensor:
+        if reference.type == "image":
+            with Image.open(reference.path) as image:
+                frame = np.asarray(image.convert("RGB"))
+            height, width = frame.shape[:2]
+            target_area = target_size[0] * target_size[1]
+            scale = min(1.0, math.sqrt(target_area / (width * height)))
+            size = round_to_canvas_multiple(width * scale), round_to_canvas_multiple(height * scale)
+            return resize_frames([frame], size)
+
+        if reference.type != "video":
+            raise ValueError(f"Reference type {reference.type!r} has no visual stream")
+        frames = load_video(str(reference.path), target_fps=TARGET_FPS, fps_resample_mode="timestamps")
+        usable_frames = min(len(frames), target_frame_count)
+        if usable_frames < 5:
+            raise ValueError(f"MiniMax-H3 reference video requires at least 5 frames: {reference.path}")
+        usable_frames = 5 + ((usable_frames - 5) // 17) * 17
+        frames = frames[:usable_frames]
+        source_height, source_width = frames[0].shape[:2]
+        width, height = adapt_reference_canvas(source_width, source_height)
+        if source_width * source_height < width * height:
+            width = round_to_canvas_multiple(source_width)
+            height = round_to_canvas_multiple(source_height)
+        return resize_frames(frames, (width, height))
+
+
+def prepare_pixels(frames: torch.Tensor | np.ndarray) -> torch.Tensor:
+    """Decoded [F,H,W,C] pixels (uint8, or floats in [0,1]) to the VAE's [1,3,F,H,W] in [-1,1]; alpha is dropped."""
+    frames = torch.as_tensor(frames)
+    if frames.ndim != 4 or frames.shape[-1] < 3:
+        raise ValueError(f"MiniMax-H3 decoded video must be [F,H,W,C], got {tuple(frames.shape)}")
+    frames = frames[..., :3]
+    if frames.dtype == torch.uint8:
+        frames = frames.float().div_(127.5).sub_(1.0)
+    elif frames.is_floating_point():
+        if not torch.all((frames >= 0) & (frames <= 1)):
+            raise ValueError("Floating MiniMax-H3 decoded pixels must be in [0,1]")
+        frames = frames.float().mul_(2.0).sub_(1.0)
+    else:
+        raise ValueError(f"Unsupported MiniMax-H3 decoded pixel dtype: {frames.dtype}")
+    return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
+
+
+def module_device_dtype(module: torch.nn.Module, fallback_dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
+    """Device and floating dtype of a module's first floating tensor (the VAEs move between devices)."""
+    for tensor in (*module.parameters(), *module.buffers()):
+        if tensor.is_floating_point():
+            return tensor.device, tensor.dtype
+    return torch.device("cpu"), fallback_dtype
+
+
+def fingerprint_file(path: str | Path) -> str:
+    """Lightweight file identity (size + mtime) for cache-staleness checks; deliberately not a content hash."""
+    stat = Path(path).resolve().stat()
+    return f"stat:{stat.st_size}:{stat.st_mtime_ns}"
 
 
 def reject_one_frame_audio_references(record: H3Record) -> None:

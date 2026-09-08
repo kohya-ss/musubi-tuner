@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import hashlib
 from pathlib import Path
 
 import torch
 
+from musubi_tuner.minimax_h3.media import fingerprint_file
 from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, get_split_weight_filenames
 
 
@@ -21,6 +23,18 @@ def resolve_safetensors_files(path: str | Path) -> list[Path]:
     if split_filenames is not None:
         return [Path(filename) for filename in split_filenames]
     return [path]
+
+
+def fingerprint_checkpoint(path: str | Path) -> str:
+    """Identity of a (possibly sharded) checkpoint for cache-staleness checks: shard names + file fingerprints."""
+    files = resolve_safetensors_files(Path(path).resolve())
+    digest = hashlib.sha256()
+    for file in files:
+        digest.update(file.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(fingerprint_file(file).encode("ascii"))
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
 
 
 def load_safetensors_metadata(files: Iterable[str | Path]) -> dict[str, str]:

@@ -12,16 +12,20 @@ from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
 from musubi_tuner.minimax_h3.media import (
     ONE_FRAME_REFERENCE_FRAME_CAP,
     TARGET_FPS,
+    TEXT_VISUAL_FPS,
+    TEXT_VISUAL_FRAME_STRIDE,
+    H3MediaDecoder,
     H3Record,
     audio_latent_frames,
     load_h3_jsonl_records,
+    module_device_dtype,
     parse_inline_references,
+    prepare_pixels,
     waveform_samples,
 )
 from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, one_frame_condition_role
 from musubi_tuner.minimax_h3.text_encoder import H3TextVisual
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_ENCODE_DTYPE, encode_video_condition
-from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
 
 
 VIDEO_VAE_SPATIAL_RATIO = 16
@@ -71,16 +75,6 @@ def load_image_frames(path: str | Path, *, width: int, height: int) -> torch.Ten
     return pixels.unsqueeze(0)
 
 
-def prepare_pixels(frames: torch.Tensor) -> torch.Tensor:
-    if frames.ndim != 4 or frames.shape[-1] != 3:
-        raise ValueError(f"MiniMax-H3 condition pixels must be [F,H,W,3], got {tuple(frames.shape)}")
-    if frames.dtype == torch.uint8:
-        frames = frames.float().div(127.5).sub(1.0)
-    else:
-        frames = frames.float().mul(2.0).sub(1.0)
-    return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
-
-
 def load_generation_record(args, *, ref_base_directory: str | Path | None = None) -> H3Record:
     """The H3 record of a generation request; ``--ref`` paths resolve from ref_base_directory
     (the CLI resolves them from the working directory, training samples from the prompt file)."""
@@ -127,7 +121,7 @@ def fl_condition_entries(args) -> tuple[tuple[str, str], ...]:
     return tuple((one_frame_condition_role(index), path) for index, path in enumerate(paths))
 
 
-def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecoder):
+def decode_generation_visuals(args, record: H3Record, decoder: H3MediaDecoder):
     raw_visuals = {}
     text_visuals = {}
     if args.task == "t2va":
@@ -157,19 +151,12 @@ def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecode
         if reference.type == "image":
             text_visuals[reference.path] = H3TextVisual(frames)
         else:
-            sampled = frames[::12]
+            sampled = frames[::TEXT_VISUAL_FRAME_STRIDE]
             text_visuals[reference.path] = H3TextVisual(
                 sampled,
-                tuple(index / 2.0 for index in range(sampled.shape[0])),
+                tuple(index / TEXT_VISUAL_FPS for index in range(sampled.shape[0])),
             )
     return raw_visuals, text_visuals
-
-
-def module_device_dtype(module, fallback_dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
-    for tensor in (*module.parameters(), *module.buffers()):
-        if tensor.is_floating_point():
-            return tensor.device, tensor.dtype
-    return torch.device("cpu"), fallback_dtype
 
 
 @torch.no_grad()

@@ -5,24 +5,18 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-import hashlib
 import json
 import logging
-import math
 import os
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
-from PIL import Image
 from safetensors import safe_open
 import torch
 
 import musubi_tuner.cache_latents as cache_latents
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
-from musubi_tuner.dataset.audio_utils import decode_audio as decode_audio_waveform
-from musubi_tuner.dataset.audio_utils import slice_audio_window
 from musubi_tuner.dataset.cache_io import (
     append_audio_present_entry,
     append_one_frame_control_indices_entry,
@@ -31,22 +25,22 @@ from musubi_tuner.dataset.cache_io import (
 )
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ImageDataset, ItemInfo, VideoDataset
-from musubi_tuner.dataset.media_utils import load_video
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode, load_audio_vae
-from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
+from musubi_tuner.minimax_h3.checkpoint import fingerprint_checkpoint
 from musubi_tuner.minimax_h3.packing import ONE_FRAME_AUDIO_LATENT_FRAMES, ONE_FRAME_VIDEO_LATENT_FRAMES, one_frame_condition_role
 from musubi_tuner.minimax_h3.media import (
-    AUDIO_SAMPLE_RATE,
-    AUDIO_TERMINAL_TOLERANCE_SAMPLES,
     H3_AUDIO_SPEC,
     ONE_FRAME_REFERENCE_FRAME_CAP,
-    H3AudioSource,
+    H3MediaDecoder,
     H3Record,
-    H3Reference,
     H3Task,
+    PyAVH3MediaDecoder,
     TARGET_FPS,
     audio_latent_frames,
+    fingerprint_file,
     h3_records_from_datasource,
+    module_device_dtype,
+    prepare_pixels,
     reject_one_frame_audio_references,
     video_latent_frames,
     waveform_samples,
@@ -63,118 +57,11 @@ from musubi_tuner.utils.model_utils import dtype_to_str
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-CANVAS_MULTIPLE = 32
-BASE_SHORT_EDGE = 768
-MAX_PIXELS = 768 * 1344
-
 
 @dataclass(frozen=True)
 class H3LatentCachePayload:
     tensors: dict[str, torch.Tensor]
     metadata: dict[str, str]
-
-
-class H3MediaDecoder(Protocol):
-    def decode_audio(
-        self,
-        source: H3AudioSource,
-        *,
-        start_sample: int,
-        sample_count: int,
-        require_exact: bool,
-    ) -> torch.Tensor: ...
-
-    def decode_reference_visual(
-        self,
-        reference: H3Reference,
-        *,
-        target_frame_count: int,
-        target_size: tuple[int, int],
-    ) -> torch.Tensor: ...
-
-
-def _round_to_multiple(value: float, multiple: int = CANVAS_MULTIPLE) -> int:
-    return max(multiple, round(value / multiple) * multiple)
-
-
-def _adapt_canvas(width: int, height: int) -> tuple[int, int]:
-    ratio = width / height
-    if ratio >= 1.0:
-        nominal_width, nominal_height = BASE_SHORT_EDGE * ratio, BASE_SHORT_EDGE
-    else:
-        nominal_width, nominal_height = BASE_SHORT_EDGE, BASE_SHORT_EDGE / ratio
-    if nominal_width * nominal_height > MAX_PIXELS:
-        scale = math.sqrt(MAX_PIXELS / (nominal_width * nominal_height))
-        nominal_width *= scale
-        nominal_height *= scale
-    return _round_to_multiple(nominal_width), _round_to_multiple(nominal_height)
-
-
-def _resize_frames(frames: Sequence[np.ndarray], size: tuple[int, int]) -> torch.Tensor:
-    width, height = size
-    resized = [
-        torch.from_numpy(np.asarray(Image.fromarray(frame[..., :3]).resize((width, height), Image.Resampling.LANCZOS)).copy())
-        for frame in frames
-    ]
-    return torch.stack(resized)
-
-
-class PyAVH3MediaDecoder:
-    """Decodes MiniMax-H3 reference media (target media is decoded by the shared dataset layer)."""
-
-    def __init__(self, terminal_tolerance_samples: int = AUDIO_TERMINAL_TOLERANCE_SAMPLES):
-        self.terminal_tolerance_samples = terminal_tolerance_samples
-
-    def decode_audio(
-        self,
-        source: H3AudioSource,
-        *,
-        start_sample: int,
-        sample_count: int,
-        require_exact: bool,
-    ) -> torch.Tensor:
-        if start_sample < 0 or sample_count <= 0:
-            raise ValueError("MiniMax-H3 audio window must have a nonnegative start and positive length")
-        waveform = decode_audio_waveform(source, sample_rate=AUDIO_SAMPLE_RATE, channels=2)
-        return slice_audio_window(
-            waveform,
-            start_sample=start_sample,
-            sample_count=sample_count,
-            pad_tolerance=self.terminal_tolerance_samples,
-            require_exact=require_exact,
-            context=str(source.path),
-        )
-
-    def decode_reference_visual(
-        self,
-        reference: H3Reference,
-        *,
-        target_frame_count: int,
-        target_size: tuple[int, int],
-    ) -> torch.Tensor:
-        if reference.type == "image":
-            with Image.open(reference.path) as image:
-                frame = np.asarray(image.convert("RGB"))
-            height, width = frame.shape[:2]
-            target_area = target_size[0] * target_size[1]
-            scale = min(1.0, math.sqrt(target_area / (width * height)))
-            size = _round_to_multiple(width * scale), _round_to_multiple(height * scale)
-            return _resize_frames([frame], size)
-
-        if reference.type != "video":
-            raise ValueError(f"Reference type {reference.type!r} has no visual stream")
-        frames = load_video(str(reference.path), target_fps=TARGET_FPS, fps_resample_mode="timestamps")
-        usable_frames = min(len(frames), target_frame_count)
-        if usable_frames < 5:
-            raise ValueError(f"MiniMax-H3 reference video requires at least 5 frames: {reference.path}")
-        usable_frames = 5 + ((usable_frames - 5) // 17) * 17
-        frames = frames[:usable_frames]
-        source_height, source_width = frames[0].shape[:2]
-        width, height = _adapt_canvas(source_width, source_height)
-        if source_width * source_height < width * height:
-            width = _round_to_multiple(source_width)
-            height = _round_to_multiple(source_height)
-        return _resize_frames(frames, (width, height))
 
 
 def _validate_task_record(record: H3Record, task: H3Task) -> None:
@@ -201,43 +88,20 @@ def _validate_task_record(record: H3Record, task: H3Task) -> None:
         raise ValueError("MiniMax-H3 Ref2VA requires at least one visual reference")
 
 
-def _model_device_dtype(model: torch.nn.Module, fallback_dtype: torch.dtype) -> tuple[torch.device, torch.dtype]:
-    for tensor in (*model.parameters(), *model.buffers()):
-        if tensor.is_floating_point():
-            return tensor.device, tensor.dtype
-    return torch.device("cpu"), fallback_dtype
-
-
-def _prepare_pixels(frames: torch.Tensor | np.ndarray) -> torch.Tensor:
-    frames = torch.as_tensor(frames)
-    if frames.ndim != 4 or frames.shape[-1] < 3:
-        raise ValueError(f"MiniMax-H3 decoded video must be [F,H,W,C], got {tuple(frames.shape)}")
-    frames = frames[..., :3]
-    if frames.dtype == torch.uint8:
-        frames = frames.float().div_(127.5).sub_(1.0)
-    elif frames.is_floating_point():
-        if not torch.all((frames >= 0) & (frames <= 1)):
-            raise ValueError("Floating MiniMax-H3 decoded pixels must be in [0,1]")
-        frames = frames.float().mul_(2.0).sub_(1.0)
-    else:
-        raise ValueError(f"Unsupported MiniMax-H3 decoded pixel dtype: {frames.dtype}")
-    return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
-
-
 def _encode_target_video(video_vae, pixels: torch.Tensor, cache_seed: int, item_key: str) -> torch.Tensor:
-    device, dtype = _model_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
+    device, dtype = module_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
     return encode_video_target(video_vae, pixels.to(device=device, dtype=dtype), cache_seed, item_key)
 
 
 def _encode_condition_video(video_vae, pixels: torch.Tensor) -> torch.Tensor:
-    device, dtype = _model_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
+    device, dtype = module_device_dtype(video_vae, VIDEO_VAE_ENCODE_DTYPE)
     return encode_video_condition(video_vae, pixels.to(device=device, dtype=dtype))
 
 
 def _encode_audio(audio_vae, waveform: torch.Tensor) -> torch.Tensor:
     if waveform.shape[0] != 2:
         raise ValueError(f"MiniMax-H3 decoded audio must be stereo [2,L], got {tuple(waveform.shape)}")
-    device, dtype = _model_device_dtype(audio_vae, torch.float32)
+    device, dtype = module_device_dtype(audio_vae, torch.float32)
     return encode_audio_mode(audio_vae, waveform.unsqueeze(0).to(device=device, dtype=dtype))
 
 
@@ -355,7 +219,7 @@ def build_latent_tensors(
     if not audio_present and torch.any(target_waveform != 0):
         raise ValueError("MiniMax-H3 silence placeholder waveform must be all zeros when audio_present is False")
 
-    target_pixels = _prepare_pixels(target_frames)
+    target_pixels = prepare_pixels(target_frames)
     canonical_item_key = f"{record.video_path}#{crop_start_frame}:{frame_count}"
     target_video = _encode_target_video(video_vae, target_pixels, cache_seed, canonical_item_key)[0]
     if target_video.shape[1] != expected_video_frames:
@@ -372,7 +236,7 @@ def build_latent_tensors(
     append_audio_present_entry(tensors, audio_present)
     if task == "fl2va":
         for role, frame in (("first", target_frames[:1]), ("last", target_frames[-1:])):
-            condition = _encode_condition_video(video_vae, _prepare_pixels(frame))[0]
+            condition = _encode_condition_video(video_vae, prepare_pixels(frame))[0]
             tensors[_visual_key(role, condition)] = condition
     elif task == "ref2va":
         _encode_reference_conditions(
@@ -426,7 +290,7 @@ def _encode_reference_conditions(
             )
             if reference.type == "video":
                 video_latent_frames(visual_frames.shape[0])
-            condition = _encode_condition_video(video_vae, _prepare_pixels(visual_frames))[0]
+            condition = _encode_condition_video(video_vae, prepare_pixels(visual_frames))[0]
             tensors[_visual_key(f"{role_prefix}_{reference.type}", condition)] = condition
 
         if reference.audio is not None:
@@ -523,7 +387,7 @@ def build_one_frame_latent_tensors(
                 f"MiniMax-H3 one-frame control count {len(control_frames)} does not match {len(control_indices)} control indices"
             )
 
-    target_pixels = _prepare_pixels(image_frames)
+    target_pixels = prepare_pixels(image_frames)
     canonical_item_key = f"{item_key}#1f"
     target_video = _encode_target_video(video_vae, target_pixels, cache_seed, canonical_item_key)[0]
     if target_video.shape[1] != ONE_FRAME_VIDEO_LATENT_FRAMES:
@@ -544,7 +408,7 @@ def build_one_frame_latent_tensors(
                     f"MiniMax-H3 one-frame control size {control.shape[1]}x{control.shape[0]} does not match"
                     f" the target {width}x{height} (controls are resized to the bucket resolution)"
                 )
-            condition = _encode_condition_video(video_vae, _prepare_pixels(control.unsqueeze(0)))[0]
+            condition = _encode_condition_video(video_vae, prepare_pixels(control.unsqueeze(0)))[0]
             tensors[_visual_key(role, condition)] = condition
     if references:
         _encode_reference_conditions(
@@ -579,23 +443,6 @@ def build_one_frame_latent_tensors(
         one_frame_control_indices=control_indices,
     )
     return H3LatentCachePayload(tensors=tensors, metadata=metadata)
-
-
-def fingerprint_file(path: str | Path) -> str:
-    """Lightweight file identity (size + mtime) for cache-staleness checks; deliberately not a content hash."""
-    stat = Path(path).resolve().stat()
-    return f"stat:{stat.st_size}:{stat.st_mtime_ns}"
-
-
-def fingerprint_checkpoint(path: str | Path) -> str:
-    files = resolve_safetensors_files(Path(path).resolve())
-    digest = hashlib.sha256()
-    for file in files:
-        digest.update(file.name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(fingerprint_file(file).encode("ascii"))
-        digest.update(b"\0")
-    return f"sha256:{digest.hexdigest()}"
 
 
 def record_media_paths(record: H3Record) -> set[Path]:
