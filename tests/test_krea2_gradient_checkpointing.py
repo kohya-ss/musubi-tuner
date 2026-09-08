@@ -1,11 +1,10 @@
 """Tests for SingleStreamDiT's gradient-checkpointing activation CPU offload.
 
 Krea 2 accepted --gradient_checkpointing_cpu_offload for interface parity with every other
-architecture in this codebase but silently dropped it (see
-docs/superpowers/specs/2026-09-08-krea2-gradient-checkpointing-cpu-offload-design.md for the
-real-hardware OOM this caused). These tests cover the interface toggle, that plain checkpointing
-still works once the flag exists, and that the CPU-offload round-trip doesn't strand output on
-the wrong device or corrupt gradients.
+architecture in this codebase but silently dropped it, causing linear per-step GPU memory growth
+during long gradient-enabled rollouts. These tests cover the interface toggle, that plain
+checkpointing still works once the flag exists, and that the CPU-offload round-trip doesn't
+strand output on the wrong device or corrupt gradients.
 """
 
 import pytest
@@ -80,4 +79,24 @@ def test_checkpointed_forward_and_backward_still_work_without_offload():
     output.square().mean().backward()
     grad = model.blocks[0].attn.wq.weight.grad
     assert grad is not None
+    assert torch.isfinite(grad).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="activation CPU offloading requires CUDA")
+def test_activation_cpu_offloading_round_trip_preserves_device_and_gradients():
+    device = torch.device("cuda")
+    model = _tiny_model().to(device)
+    model.train()
+    model.enable_gradient_checkpointing(cpu_offload=True)
+
+    img, context, t, pos, mask = _forward_inputs(model, device=device)
+    output = model(img=img, context=context, t=t, pos=pos, mask=mask)
+
+    assert output.device.type == "cuda"
+    assert torch.isfinite(output).all()
+
+    output.square().mean().backward()
+    grad = model.blocks[0].attn.wq.weight.grad
+    assert grad is not None
+    assert grad.device.type == "cuda"
     assert torch.isfinite(grad).all()
