@@ -67,10 +67,12 @@ class ItemInfo:
         # np.ndarray for video, list[np.ndarray] for image with multiple controls
         self.control_content: Optional[Union[np.ndarray, list[np.ndarray]]] = None
 
-        # provenance: the index of the originating datasource record (image and video datasets)
-        # and, for video crops, the start frame of the crop in target-fps space
-        self.frame_pos: Optional[int] = None
+        # provenance: the index of the originating dataset in its DatasetGroup, the index of the
+        # originating datasource record (image and video datasets) and, for video crops, the
+        # start frame of the crop in target-fps space
+        self.dataset_index: Optional[int] = None
         self.datasource_index: Optional[int] = None
+        self.frame_pos: Optional[int] = None
 
         # audio (audio-capable architectures): waveform window [channels, samples] aligned to
         # the crop, and whether it came from real audio (False: silence placeholder)
@@ -141,6 +143,9 @@ class BaseDataset(torch.utils.data.Dataset):
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
+        # position in the owning DatasetGroup (stamped by the group), carried by every ItemInfo
+        # so cache scripts can find the dataset an item came from
+        self.dataset_index: Optional[int] = None
 
         if not self.enable_bucket:
             self.bucket_no_upscale = False
@@ -242,6 +247,7 @@ class BaseDataset(torch.utils.data.Dataset):
                 for future in completed_futures:
                     item_key, caption = future.result()
                     item_info = ItemInfo(item_key, caption, (0, 0), (0, 0))
+                    item_info.dataset_index = self.dataset_index
                     item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                     data.append(item_info)
 
@@ -434,6 +440,7 @@ class ImageDataset(BaseDataset):
                     item_info = ItemInfo(
                         item_key, caption, original_size, bucket_reso, content=image if len(images) == 1 else images
                     )
+                    item_info.dataset_index = self.dataset_index
                     item_info.datasource_index = datasource_index
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
 
@@ -873,8 +880,9 @@ class VideoDataset(BaseDataset):
                             item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
                         item_info.control_content = cropped_control  # None is allowed
                         item_info.fp_latent_window_size = self.fp_latent_window_size
-                        item_info.frame_pos = int(crop_pos)
+                        item_info.dataset_index = self.dataset_index
                         item_info.datasource_index = datasource_index
+                        item_info.frame_pos = int(crop_pos)
 
                         if self.audio_spec is not None:
                             sample_count = self.audio_spec.samples_per_crop(target_frame)
@@ -1023,7 +1031,8 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
         super().__init__(datasets)
         self.datasets: list[Union[ImageDataset, VideoDataset]] = datasets
         self.num_train_items = 0
-        for dataset in self.datasets:
+        for index, dataset in enumerate(self.datasets):
+            dataset.dataset_index = index
             self.num_train_items += dataset.num_train_items
 
     def set_current_epoch(self, epoch):
