@@ -368,3 +368,52 @@ def test_h3_training_sample_preserves_valid_frame_count(tmp_path: Path, monkeypa
     )
 
     assert captured["frame_count"] == 56
+
+
+def test_video_latent_cache_honours_enable_bucket(tmp_path: Path):
+    """A video dataset with bucketing off must cache at its single configured bucket.
+
+    ImageDataset.retrieve_latent_cache_batches and both prepare_for_training pass
+    enable_bucket / bucket_no_upscale to BucketSelector; the video caching path used
+    to build its selector with the defaults instead. A block asking for one bucket
+    therefore had its latents cached at an area-derived one, while get_metadata()
+    recorded enable_bucket: false either way.
+    """
+    dataset = VideoDataset(
+        resolution=(1792, 768),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    assert list(dataset.retrieve_latent_cache_batches(1)) == []
+
+    selector = dataset.datasource.bucket_selector
+    assert selector.bucket_resolutions == [(1792, 768)]
+    assert selector.get_bucket_resolution((3840, 1080)) == (1792, 768)
+
+
+def test_video_latent_cache_still_buckets_when_asked_to(tmp_path: Path):
+    """The other half of the contract: enable_bucket=True keeps the area search."""
+    dataset = VideoDataset(
+        resolution=(1792, 768),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    assert list(dataset.retrieve_latent_cache_batches(1)) == []
+
+    assert len(dataset.datasource.bucket_selector.bucket_resolutions) > 1

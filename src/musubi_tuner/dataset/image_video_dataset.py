@@ -775,8 +775,8 @@ class VideoDataset(BaseDataset):
         return metadata
 
     def retrieve_latent_cache_batches(self, num_workers: int):
-        buckset_selector = BucketSelector(self.resolution, architecture=self.architecture)
-        self.datasource.set_bucket_selector(buckset_selector)
+        bucket_selector = BucketSelector(self.resolution, self.enable_bucket, self.bucket_no_upscale, self.architecture)
+        self.datasource.set_bucket_selector(bucket_selector)
         if self.source_fps is not None:
             self.datasource.set_source_and_target_fps(self.source_fps, self.target_fps)
         else:
@@ -927,7 +927,7 @@ class VideoDataset(BaseDataset):
                 frame_size = (video[0].shape[1], video[0].shape[0])
 
                 # resize if necessary
-                bucket_reso = buckset_selector.get_bucket_resolution(frame_size)
+                bucket_reso = bucket_selector.get_bucket_resolution(frame_size)
                 video = [resize_image_to_bucket(frame, bucket_reso) for frame in video]
 
                 # resize control if necessary
