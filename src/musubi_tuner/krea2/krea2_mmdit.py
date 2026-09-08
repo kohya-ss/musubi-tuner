@@ -344,15 +344,17 @@ class SingleStreamDiT(nn.Module):
 
         # musubi training hooks
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         self.blocks_to_swap = 0
         self.offloader = None
 
     def enable_gradient_checkpointing(self, cpu_offload: bool = False):
-        # cpu_offload is accepted for interface parity; not implemented for K2 yet.
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = cpu_offload
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     # Block swap (CPU offloading of the main SingleStreamBlocks). Mirrors the other
     # musubi architectures: the trainer calls enable_block_swap + move_to_device_except_swap_blocks
