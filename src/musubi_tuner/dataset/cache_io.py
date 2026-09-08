@@ -51,8 +51,8 @@ AUDIO_PRESENT_KEY = "audio_present_float32"
 #   loads tensors; the trainer converts it to a RoPE time override at layout-build time.
 ONE_FRAME_TARGET_INDEX_KEY = "one_frame_target_index_int64"
 
-# - ONE_FRAME_CONTROL_INDICES_KEY holds an int64 [K] tensor (K = 1..2) with the 24 fps
-#   pixel-frame indices of the one-frame visual conditions, in packed (first, last) order.
+# - ONE_FRAME_CONTROL_INDICES_KEY holds an int64 [K] tensor (K >= 1) with the 24 fps
+#   pixel-frame indices of the one-frame visual conditions, in cond_{i} slot order.
 #   Present only when the cache carries condition latents; same tensor-not-metadata rationale.
 ONE_FRAME_CONTROL_INDICES_KEY = "one_frame_control_indices_int64"
 
@@ -68,8 +68,8 @@ def append_one_frame_target_index_entry(sd: dict[str, torch.Tensor], target_inde
 
 
 def append_one_frame_control_indices_entry(sd: dict[str, torch.Tensor], control_indices: list[int]):
-    if not 1 <= len(control_indices) <= 2:
-        raise ValueError(f"MiniMax-H3 one-frame control indices must have 1 or 2 entries, got {len(control_indices)}")
+    if len(control_indices) < 1:
+        raise ValueError("MiniMax-H3 one-frame control indices must have at least one entry")
     if any(index < 0 for index in control_indices):
         raise ValueError(f"MiniMax-H3 one-frame control indices must be nonnegative, got {control_indices}")
     sd[ONE_FRAME_CONTROL_INDICES_KEY] = torch.tensor(list(control_indices), dtype=torch.int64)
@@ -562,7 +562,7 @@ def save_latent_cache_minimax_h3(
 
     target_pattern = re.compile(r"^latents_(\d+)x(\d+)x(\d+)_(.+)$")
     audio_pattern = re.compile(r"^latents_audio_32x2x(\d+)_(.+)$")
-    visual_condition_pattern = re.compile(r"^latents_(?:first|last|ref_\d{3}_(?:image|video))_(\d+)x(\d+)x(\d+)_(.+)$")
+    visual_condition_pattern = re.compile(r"^latents_(?:first|last|cond_\d{3}|ref_\d{3}_(?:image|video))_(\d+)x(\d+)x(\d+)_(.+)$")
     audio_condition_pattern = re.compile(r"^latents_ref_\d{3}_audio_32x2x(\d+)_(.+)$")
 
     target_count = 0
@@ -580,10 +580,8 @@ def save_latent_cache_minimax_h3(
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
         if key == ONE_FRAME_CONTROL_INDICES_KEY:
-            if tensor.ndim != 1 or not 1 <= tensor.shape[0] <= 2 or tensor.dtype != torch.int64 or bool((tensor < 0).any()):
-                raise ValueError(
-                    f"MiniMax-H3 {ONE_FRAME_CONTROL_INDICES_KEY} must be a nonnegative int64 [K] tensor with K in 1..2"
-                )
+            if tensor.ndim != 1 or tensor.shape[0] < 1 or tensor.dtype != torch.int64 or bool((tensor < 0).any()):
+                raise ValueError(f"MiniMax-H3 {ONE_FRAME_CONTROL_INDICES_KEY} must be a nonnegative int64 [K] tensor with K >= 1")
             normalized[key] = tensor.detach().cpu().contiguous()
             continue
 

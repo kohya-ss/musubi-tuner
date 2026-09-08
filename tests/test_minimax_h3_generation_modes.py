@@ -237,8 +237,41 @@ def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
         output=str(tmp_path / "out.png"),
     )
 
-    with pytest.raises(ValueError, match=r"got 2 control_index entries for 1 condition frames \(first_frame\)"):
+    with pytest.raises(ValueError, match=r"got 2 control_index entries for 1 condition images \(.*first\.png\)"):
         validate_prompt_args(args)
+
+
+def test_one_frame_fl2va_accepts_an_ordered_condition_image_list(tmp_path):
+    conditions = []
+    for name in ("char", "mid", "end"):
+        path = tmp_path / f"{name}.png"
+        path.touch()
+        conditions.append(str(path))
+    base = dict(task="fl2va", frame_count=1, output=str(tmp_path / "out.png"))
+
+    validate_prompt_args(
+        _session_args(tmp_path, **base, condition_image=conditions, one_frame="target_index=24,control_index=0;24;48")
+    )
+    # --first_frame / --last_frame alias the first two slots and cannot be combined with the list
+    with pytest.raises(ValueError, match="not both"):
+        validate_prompt_args(
+            _session_args(
+                tmp_path,
+                **base,
+                condition_image=conditions[:1],
+                first_frame=conditions[0],
+                one_frame="target_index=24,control_index=0;24",
+            )
+        )
+    # ... and the list is a one-frame feature
+    with pytest.raises(ValueError, match="applies to one-frame targets"):
+        validate_prompt_args(_session_args(tmp_path, task="fl2va", condition_image=conditions))
+    # the prompt-line form
+    assert parse_prompt_line("x --ci a.png --ci b.png --of control_index=0;48") == {
+        "prompt": "x",
+        "condition_image": ["a.png", "b.png"],
+        "one_frame": "control_index=0;48",
+    }
 
 
 def test_from_file_records_invalid_lines_without_aborting_the_batch(tmp_path, monkeypatch, caplog):

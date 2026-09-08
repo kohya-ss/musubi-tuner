@@ -448,9 +448,9 @@ def test_generation_validation_gates_the_one_frame_mode(tmp_path):
             one_frame="target_index=24,control_index=0",
         )
     )
-    with pytest.raises(ValueError, match="one entry per provided frame"):
+    with pytest.raises(ValueError, match="one entry per condition image"):
         validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, first_frame=str(first)))
-    with pytest.raises(ValueError, match="one entry per provided frame"):
+    with pytest.raises(ValueError, match="one entry per condition image"):
         validate_generation_args(
             _generation_args(
                 tmp_path,

@@ -170,7 +170,7 @@ def _h3_image_dataset(tmp_path: Path, **overrides):
         # 1..2 nonnegative entries (controls without indices are untimed references, accepted)
         ({"fp_1f_clean_indices": [0]}, "explicit fp_1f_target_index"),
         ({"fp_1f_clean_indices": [0], "fp_1f_target_index": 24}, "requires control images"),
-        ({"fp_1f_clean_indices": [0, 1, 2], "fp_1f_target_index": 24}, "1 or 2 entries"),
+        ({"fp_1f_clean_indices": [], "fp_1f_target_index": 24}, "at least one entry"),
         ({"fp_1f_clean_indices": [-1], "fp_1f_target_index": 24}, "nonnegative"),
     ],
 )

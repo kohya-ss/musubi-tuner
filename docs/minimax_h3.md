@@ -346,7 +346,7 @@ All entries in one run use the training `--task`. T2VA JSON entries use the comm
 ]
 ```
 
-FL2VA entries additionally use `first_frame` and `last_frame`; the common `image_path` and `end_image_path` names are accepted as aliases. Ref2VA entries use `reference_jsonl`, optional `reference_index`, and an optional `prompt` override. Ref2VA keeps the same ordered JSONL schema as caching and standalone generation.
+FL2VA entries additionally use `first_frame` and `last_frame`; the common `image_path` and `end_image_path` names are accepted as aliases, and one-frame samples may instead give the ordered condition list with `--ci` (see `docs/minimax_h3_1f.md`). Ref2VA entries use `reference_jsonl`, optional `reference_index`, and an optional `prompt` override. Ref2VA keeps the same ordered JSONL schema as caching and standalone generation.
 
 Ref2VA entries may instead carry inline references with the same `--ref` spec strings as generation (see [Generation](#generation)): the `ref` key holds the ordered spec list (in `.txt` prompt files, repeat `--ref` on the line; `--rj` likewise sets `reference_jsonl` per line), the entry's prompt is the caption, and `reference_index` does not apply. `ref` and `reference_jsonl` are mutually exclusive per entry. Relative `ref` paths — and relative `reference_jsonl` paths, when the file exists there — resolve from the prompt file's directory. Because prompt lines split on ` --`, a caption containing that character sequence cannot be expressed in `.txt` prompt files (a pre-existing limitation).
 
@@ -502,6 +502,7 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 | `--fs`, `--fsa` | `--h3_shift_video`, `--h3_shift_audio` |
 | `--ofps`, `--skb` | `--output_fps`, `--stretch_keep_bands` |
 | `--i`, `--ei` | `--first_frame`, `--last_frame` (end image) |
+| `--ci` | `--condition_image` (one-frame FL2VA; repeatable, ordered; replaces the session-level list) |
 | `--ref` | `--ref` (repeatable; replaces the session-level list) |
 | `--of` | `--one_frame` |
 | `--o` | output filename inside the output directory |

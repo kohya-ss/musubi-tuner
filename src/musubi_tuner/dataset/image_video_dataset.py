@@ -325,7 +325,7 @@ class ImageDataset(BaseDataset):
 
         if self.architecture == ARCHITECTURE_MINIMAX_H3:
             # one-frame (image) training: t2va targets (K=0), fl2va editing/inbetween targets with
-            # 1..2 time-annotated control images (fp_1f_clean_indices, 24 fps pixel-frame indices),
+            # K>=1 time-annotated control images (fp_1f_clean_indices, 24 fps pixel-frame indices),
             # or ref2va targets whose control images are untimed references (no indices, any
             # count within the Ref2VA limits). Whether control data is present is only known after
             # datasource construction (JSONL control_path), so indices<->controls is validated there.
@@ -337,8 +337,8 @@ class ImageDataset(BaseDataset):
                     " no_resize_control and control_resolution are not supported"
                 )
             if fp_1f_clean_indices is not None:
-                if not 1 <= len(fp_1f_clean_indices) <= 2:
-                    raise ValueError(f"MiniMax-H3 fp_1f_clean_indices must have 1 or 2 entries, got {len(fp_1f_clean_indices)}")
+                if len(fp_1f_clean_indices) < 1:
+                    raise ValueError("MiniMax-H3 fp_1f_clean_indices must have at least one entry")
                 if any(index < 0 for index in fp_1f_clean_indices):
                     raise ValueError(f"MiniMax-H3 fp_1f_clean_indices must be nonnegative, got {fp_1f_clean_indices}")
                 if fp_1f_target_index is None:
@@ -453,7 +453,7 @@ class ImageDataset(BaseDataset):
                             bucket_reso.append(self.fp_1f_no_post)
                         bucket_reso = tuple(bucket_reso)
                     elif self.architecture == ARCHITECTURE_MINIMAX_H3 and self.fp_1f_clean_indices is not None:
-                        # split by the control count so K=0/1/2 items never share a batch
+                        # split by the control count so items with different K never share a batch
                         bucket_reso = (*bucket_reso, len(self.fp_1f_clean_indices))
 
                     if controls is not None:
@@ -585,9 +585,9 @@ class ImageDataset(BaseDataset):
                     bucket_reso.append(self.fp_1f_no_post)
                 bucket_reso = tuple(bucket_reso)
             elif self.architecture == ARCHITECTURE_MINIMAX_H3 and self.fp_1f_clean_indices is not None:
-                # split by the control count so K=0/1/2 items never share a batch (K is uniform per
-                # dataset, so the dataset-level setting is authoritative; a stale cache with the
-                # wrong condition keys fails in the trainer with a re-cache hint)
+                # split by the control count so items with different K never share a batch (K is
+                # uniform per dataset, so the dataset-level setting is authoritative; a stale cache
+                # with the wrong condition keys fails in the trainer with a re-cache hint)
                 bucket_reso = (*bucket_reso, len(self.fp_1f_clean_indices))
             # Split the bucket by control latents so that every item in a batch has the same number of
             # control images AND matching per-control shapes. The collator stacks latents_control_{i}
