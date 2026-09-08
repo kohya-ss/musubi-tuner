@@ -6,6 +6,7 @@ import gc
 import time
 from typing import Callable, List, Optional, Tuple
 import torch
+import torch._dynamo  # for the residency guards' @torch._dynamo.disable (torch.compile'd blocks)
 import torch.nn as nn
 
 
@@ -622,6 +623,9 @@ class ModelOffloader(Offloader):
         _synchronize_device(self.device)
 
     def _create_residency_guard(self, blocks: list[nn.Module], block_index: int):
+        # Blocks are often torch.compile'd; keep dynamo out of the guard so it runs as plain Python
+        # (it moves weights between devices, which is not traceable) instead of being traced or skipped.
+        @torch._dynamo.disable()
         def residency_guard(module, args):
             del args
             # On a normal forward the model's loop has already called wait_for_block, so this is a
@@ -992,6 +996,11 @@ class LoRAStreamOffloader:
                 if hook is not None:
                     self.remove_handles.append(block.register_full_backward_hook(hook))
 
+            # ...and a residency guard on each block's forward, which also fires on gradient-checkpoint
+            # recompute. See _residency_guard_for_backward for why the backward hooks alone are not enough.
+            for i, block in enumerate(blocks):
+                self.remove_handles.append(block.register_forward_pre_hook(self._create_residency_guard(i)))
+
         print(
             f"LoRAStreamOffloader[{block_type}]: H2D-only block swap. "
             f"{self.S} streaming / {num_blocks} blocks, ring={self.B}, pinned={use_pinned_memory}. "
@@ -1264,6 +1273,50 @@ class LoRAStreamOffloader:
             return None
 
         return backward_hook
+
+    def _is_resident(self, block_index: int) -> bool:
+        """True if this block's streamed weights are currently bound to their GPU ring slot."""
+        if self.S == 0 or not self.is_stream[block_index]:
+            return True  # never streamed: permanently on the device
+        return self.in_slot[self.rank[block_index] % self.B] == block_index
+
+    def _residency_guard_for_backward(self, block_index: int):
+        """Stream a block back in when a backward pass traverses the stack more than once.
+
+        The hooks assume one backward traversal per forward traversal. Going down the stack, each
+        block's backward hook waits in the *previous* block, so every block is covered except the one
+        the traversal starts at -- which a single-graph backward does not need, because the forward
+        left the top of the stack resident.
+
+        It breaks when one backward walks *several* forward graphs (a loss summing terms that each ran
+        their own forward through these blocks, e.g. a multi-step rollout). Autograd finishes the first
+        graph's traversal, which leaves the ring parked at the *bottom* of the stack, then starts the
+        next graph at the top, where the weights are bound back to their CPU masters. With gradient
+        checkpointing the failure lands inside the recompute, as a kernel handed a host pointer, far
+        from the actual cause.
+
+        Loading the block is enough: the traversal below it is then covered by the ordinary hooks,
+        whose wait_for_block already self-heals a slot that holds the wrong block.
+        """
+        prev_ctx = self._wait_ctx
+        self._wait_ctx = "bwd"  # off the forward loop -- do not count this as a forward-pass boundary
+        try:
+            self.wait_for_block(block_index)
+        finally:
+            self._wait_ctx = prev_ctx
+
+    def _create_residency_guard(self, block_index: int):
+        @torch._dynamo.disable()
+        def residency_guard(module, args):
+            del module, args
+            # On a normal forward the model's loop has already called wait_for_block, so the block is
+            # resident and this is a cheap list lookup. It only bites during a backward's recompute --
+            # see _residency_guard_for_backward.
+            if self.ring_param is not None and not self._is_resident(block_index):
+                self._residency_guard_for_backward(block_index)
+            return None
+
+        return residency_guard
 
     # ------------------------------------------------------------------ debug timing
 

@@ -7,6 +7,10 @@ blocks (distillation objectives, auxiliary/regularizer terms, multi-sample rollo
 traverse the stack once per graph -- and every traversal after the first ran against blocks the ring
 had already moved back to host.
 
+LoRAStreamOffloader (--block_swap_h2d_only) has the same blind spot for a different reason: going
+down the stack each block's backward hook waits in the *previous* block, so the only block nothing
+covers is the one a traversal starts at -- harmless for a single graph, fatal for the second one.
+
 Found by a downstream extension's GPU smoke test (boo-musubi-tuner's
 notes/tdm-distill-smoke-test.md): with gradient checkpointing the failure surfaces inside the
 recompute as a kernel receiving a host pointer, which points nowhere near the real cause.
@@ -55,19 +59,30 @@ class _Stack(nn.Module):
         return x
 
 
-def _build_stack_with_offloader():
+def _build_stack_with_offloader(h2d_only=False, compile_blocks=False):
     torch.manual_seed(0)
     stack = _Stack().to("cuda")
-    config = BlockSwapConfig(device=torch.device("cuda"), supports_backward=True)
+    config = BlockSwapConfig(device=torch.device("cuda"), supports_backward=True, h2d_only=h2d_only, use_pinned_memory=h2d_only)
     stack.offloader = create_offloader("test", stack.blocks, NUM_BLOCKS, BLOCKS_TO_SWAP, config)
     stack.offloader.prepare_block_devices_before_forward(stack.blocks)
+    if compile_blocks:
+        # Mirrors model_utils.compile_transformer: blocks are compiled *after* the offloader
+        # registered its hooks, and the ModuleList entries are replaced by the OptimizedModule wrappers.
+        for i, block in enumerate(stack.blocks):
+            stack.blocks[i] = torch.compile(block)
     return stack
 
 
+# Both offloader implementations are selected by the same BlockSwapConfig, and both have to survive a
+# backward that walks several forward graphs. h2d_only=True is what --block_swap_h2d_only training uses.
+both_offloaders = pytest.mark.parametrize("h2d_only", [False, True], ids=["model_offloader", "h2d_only"])
+
+
 @requires_cuda
-def test_backward_over_two_forward_graphs():
+@both_offloaders
+def test_backward_over_two_forward_graphs(h2d_only):
     """One backward, two independently-built graphs over the same swapped blocks."""
-    stack = _build_stack_with_offloader()
+    stack = _build_stack_with_offloader(h2d_only)
 
     x1 = torch.randn(2, DIM, device="cuda", requires_grad=True)
     out1 = stack(x1)
@@ -85,7 +100,8 @@ def test_backward_over_two_forward_graphs():
 
 
 @requires_cuda
-def test_backward_over_two_forward_graphs_matches_no_swap_gradients():
+@both_offloaders
+def test_backward_over_two_forward_graphs_matches_no_swap_gradients(h2d_only):
     """The re-seated ring must not just avoid crashing -- it must produce the same gradients."""
     torch.manual_seed(0)
     reference = _Stack().to("cuda")
@@ -95,7 +111,7 @@ def test_backward_over_two_forward_graphs_matches_no_swap_gradients():
     ref_x1, ref_x2 = x1.clone().requires_grad_(True), x2.clone().requires_grad_(True)
     (reference(ref_x1).sum() + reference(ref_x2).sum()).backward()
 
-    stack = _build_stack_with_offloader()
+    stack = _build_stack_with_offloader(h2d_only)
     swap_x1, swap_x2 = x1.clone().requires_grad_(True), x2.clone().requires_grad_(True)
     out1 = stack(swap_x1)
     stack.offloader.prepare_block_devices_before_forward(stack.blocks)
@@ -125,20 +141,61 @@ def test_single_graph_backward_never_reseats_the_ring():
 
 
 @requires_cuda
-def test_forward_after_forward_without_reset_is_recovered():
+@both_offloaders
+def test_forward_after_forward_without_reset_is_recovered(h2d_only):
     """A second forward with no explicit reset in between must also work.
 
     Trainers that call the model several times per step (rather than once) hit the same stale-ring
     problem on the forward side; the guard covers it for free, since it re-seats to the
     start-of-forward window when it trips at block 0.
     """
-    stack = _build_stack_with_offloader()
+    stack = _build_stack_with_offloader(h2d_only)
 
     x1 = torch.randn(2, DIM, device="cuda", requires_grad=True)
     out1 = stack(x1)
     x2 = torch.randn(2, DIM, device="cuda", requires_grad=True)  # no prepare_block_devices call here
     out2 = stack(x2)
 
+    (out1.sum() + out2.sum()).backward()
+
+    assert x1.grad is not None and torch.isfinite(x1.grad).all()
+    assert x2.grad is not None and torch.isfinite(x2.grad).all()
+
+
+@requires_cuda
+def test_h2d_only_single_graph_backward_never_streams_off_the_hook_path():
+    """The h2d_only guard must stay a no-op on the ordinary one-forward-one-backward path.
+
+    Its loads are real H2D transfers off the prefetch schedule, so a guard that fired on the common
+    case would stall the compute stream on every block.
+    """
+    stack = _build_stack_with_offloader(h2d_only=True)
+    calls = []
+    original = stack.offloader._residency_guard_for_backward
+    stack.offloader._residency_guard_for_backward = lambda idx: (calls.append(idx), original(idx))[1]
+
+    x = torch.randn(2, DIM, device="cuda", requires_grad=True)
+    stack(x).sum().backward()
+
+    assert calls == [], f"guard streamed blocks in on a single-graph backward at blocks {calls}"
+
+
+@requires_cuda
+@both_offloaders
+def test_backward_over_two_forward_graphs_with_compiled_blocks(h2d_only):
+    """The guard is a forward pre-hook, so it has to survive torch.compile'ing the blocks.
+
+    Real training compiles every block (--compile), and the guard moves weights between devices --
+    something dynamo cannot trace. It is @torch._dynamo.disable'd for that reason; this test fails if
+    that ever stops holding and the guard gets traced away or errors out.
+    """
+    stack = _build_stack_with_offloader(h2d_only, compile_blocks=True)
+
+    x1 = torch.randn(2, DIM, device="cuda", requires_grad=True)
+    out1 = stack(x1)
+    stack.offloader.prepare_block_devices_before_forward(stack.blocks)
+    x2 = torch.randn(2, DIM, device="cuda", requires_grad=True)
+    out2 = stack(x2)
     (out1.sum() + out2.sum()).backward()
 
     assert x1.grad is not None and torch.isfinite(x1.grad).all()
