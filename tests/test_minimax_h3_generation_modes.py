@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 from pathlib import Path
@@ -20,6 +21,17 @@ from musubi_tuner.minimax_h3_generate_video import (
 )
 
 
+def _parser_defaults() -> dict[str, object]:
+    # the script reads plain argparse attributes, so the fake args start from the real parser
+    # defaults and only spell out the values the tests choose
+    parser = generate.setup_parser()
+    return {
+        action.dest: action.default
+        for action in parser._actions
+        if action.dest != "help" and action.default is not argparse.SUPPRESS
+    }
+
+
 def _session_args(tmp_path, *, task="t2va", **overrides):
     paths = {}
     for name in ("dit", "video_vae", "audio_vae", "text_encoder"):
@@ -27,12 +39,14 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
         path.touch()
         paths[name] = str(path)
     values = {
+        **_parser_defaults(),
         **paths,
         "task": task,
         "prompt": "a test prompt",
         "text_cache": None,
         "first_frame": None,
         "last_frame": None,
+        "condition_image": None,
         "reference_jsonl": None,
         "reference_index": 0,
         "ref": None,

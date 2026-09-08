@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from musubi_tuner.minimax_h3.sampling import write_image
 from musubi_tuner.minimax_h3_generate_video import (
     _one_frame_time_overrides,
     load_cached_text_conditioning,
+    setup_parser,
     validate_generation_args,
 )
 
@@ -287,6 +289,17 @@ def test_joint_output_uses_a_replaceable_mux_boundary(tmp_path):
     }
 
 
+def _parser_defaults() -> dict[str, object]:
+    # the script reads plain argparse attributes, so the fake args start from the real parser
+    # defaults and only spell out the values the tests choose
+    parser = setup_parser()
+    return {
+        action.dest: action.default
+        for action in parser._actions
+        if action.dest != "help" and action.default is not argparse.SUPPRESS
+    }
+
+
 def _generation_args(tmp_path, *, task="t2va", **overrides):
     paths = {}
     for name in ("dit", "video_vae", "audio_vae", "text_encoder"):
@@ -294,6 +307,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         path.touch()
         paths[name] = str(path)
     values = {
+        **_parser_defaults(),
         **paths,
         "task": task,
         "prompt": "a test prompt",
@@ -314,6 +328,8 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "seed": 1,
         "output": str(tmp_path / "output.mp4"),
         "output_type": "video",
+        "output_name": None,
+        "condition_image": None,
         "blocks_to_swap": 0,
         "h3_shift_video": 12.0,
         "h3_shift_audio": 3.0,
@@ -385,10 +401,10 @@ def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_pa
             task="ref2va",
             prompt="a cat sings",
             ref=["refs/face.png", "refs/style.webp"],
-            ref_base_directory=str(tmp_path),
             reference_jsonl=None,
             reference_index=0,
-        )
+        ),
+        ref_base_directory=str(tmp_path),
     )
 
     assert record.caption == "a cat sings"

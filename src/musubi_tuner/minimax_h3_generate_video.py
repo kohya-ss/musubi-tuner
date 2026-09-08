@@ -125,8 +125,7 @@ def _explicit_output_name(args: argparse.Namespace, *, directory_output: bool) -
     if args.output_type in ("images", "latent_images"):
         return None
     if directory_output:
-        output_name = getattr(args, "output_name", None)
-        return Path(output_name) if output_name else None
+        return Path(args.output_name) if args.output_name else None
     if _output_is_directory(args.output):
         return None
     return Path(args.output)
@@ -134,42 +133,38 @@ def _explicit_output_name(args: argparse.Namespace, *, directory_output: bool) -
 
 def validate_session_args(args: argparse.Namespace) -> None:
     """Validate arguments that hold for the whole invocation (model paths, mode selection)."""
-    mode_flags = [
-        bool(getattr(args, "interactive", False)),
-        bool(getattr(args, "from_file", None)),
-        bool(getattr(args, "latent_path", None)),
-    ]
+    mode_flags = [bool(args.interactive), bool(args.from_file), bool(args.latent_path)]
     if sum(mode_flags) > 1:
         raise ValueError("MiniMax-H3 --interactive, --from_file, and --latent_path are mutually exclusive")
 
-    if getattr(args, "latent_path", None):
+    if args.latent_path:
         if args.output_type not in ("video", "images"):
             raise ValueError("MiniMax-H3 --latent_path decoding supports --output_type video or images only")
         for path in args.latent_path:
             _require_path(path, "latent_path")
-        _require_path(getattr(args, "video_vae", None), "video_vae")
+        _require_path(args.video_vae, "video_vae")
         return
 
     if not args.task:
         raise ValueError("MiniMax-H3 generation requires --task")
     if args.task not in {"t2va", "fl2va", "ref2va"}:
         raise ValueError("MiniMax-H3 --task must be t2va, fl2va, or ref2va")
-    for label in ("dit", "video_vae", "audio_vae"):
-        _require_path(getattr(args, label, None), label)
+    for label, value in (("dit", args.dit), ("video_vae", args.video_vae), ("audio_vae", args.audio_vae)):
+        _require_path(value, label)
 
-    multi_prompt = bool(getattr(args, "interactive", False)) or bool(getattr(args, "from_file", None))
+    multi_prompt = bool(args.interactive) or bool(args.from_file)
     if multi_prompt:
-        if getattr(args, "text_cache", None):
+        if args.text_cache:
             raise ValueError("MiniMax-H3 --interactive and --from_file do not accept --text_cache")
-        if getattr(args, "trajectory_dir", None):
+        if args.trajectory_dir:
             raise ValueError("MiniMax-H3 --interactive and --from_file do not accept --trajectory_dir")
-        _require_path(getattr(args, "text_encoder", None), "text_encoder")
+        _require_path(args.text_encoder, "text_encoder")
     else:
-        if getattr(args, "text_cache", None) is not None:
+        if args.text_cache is not None:
             _require_path(args.text_cache, "text_cache")
         else:
-            _require_path(getattr(args, "text_encoder", None), "text_encoder")
-    if getattr(args, "from_file", None):
+            _require_path(args.text_encoder, "text_encoder")
+    if args.from_file:
         _require_path(args.from_file, "from_file")
 
     if not 0 <= args.blocks_to_swap <= 48:
@@ -230,13 +225,11 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
             )
     if args.steps <= 0:
         raise ValueError("MiniMax-H3 --steps must be positive")
-    for label in ("h3_shift_video", "h3_shift_audio"):
-        value = float(getattr(args, label))
-        if not 0.01 <= value <= 100.0:
+    for label, value in (("h3_shift_video", args.h3_shift_video), ("h3_shift_audio", args.h3_shift_audio)):
+        if not 0.01 <= float(value) <= 100.0:
             raise ValueError(f"MiniMax-H3 --{label} must be in [0.01,100.0], got {value}")
-    for label in ("h3_visual_cond_clean", "h3_audio_cond_clean"):
-        value = float(getattr(args, label))
-        if not 0.0 <= value <= 1.0:
+    for label, value in (("h3_visual_cond_clean", args.h3_visual_cond_clean), ("h3_audio_cond_clean", args.h3_audio_cond_clean)):
+        if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
     if args.output_type in ("images", "latent_images"):
         # --output is a directory holding an auto-named per-generation subdirectory; a
@@ -263,14 +256,14 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
     if args.trajectory_dir and args.output_type == "latent":
         raise ValueError("MiniMax-H3 --trajectory_dir decodes per-step estimates and cannot combine with --output_type latent")
 
-    condition_images = getattr(args, "condition_image", None)
+    condition_images = args.condition_image
     if args.task == "t2va":
         if not args.prompt:
             raise ValueError("MiniMax-H3 T2VA requires --prompt")
         if args.first_frame or args.last_frame or condition_images or args.reference_jsonl or args.ref:
             raise ValueError("MiniMax-H3 T2VA does not accept condition/first/last/reference inputs")
     elif args.task == "fl2va":
-        if getattr(args, "text_cache", None) is not None:
+        if args.text_cache is not None:
             raise ValueError("MiniMax-H3 FL2VA generation does not accept --text_cache")
         if not args.prompt:
             raise ValueError("MiniMax-H3 FL2VA requires --prompt")
@@ -580,7 +573,7 @@ def _configure_lora_weights(transformer, args, device: torch.device, *, prequant
     """
     if not args.lora_weight:
         return []
-    if prequantized or getattr(args, "lora_runtime_attach", False):
+    if prequantized or args.lora_runtime_attach:
         return _apply_lora_weights(transformer, args, device)
     if not args.convrot_int8:
         _merge_lora_weights(transformer, args)
@@ -628,7 +621,7 @@ def _load_transformer(args: argparse.Namespace, device: torch.device) -> tuple[t
     else:
         transformer.to(device)
     transformer.eval().requires_grad_(False)
-    if getattr(args, "compile", False):
+    if args.compile:
         # mirrors minimax_h3_train_network.compile_transformer: ConvRot INT8 Linears are
         # excluded (custom autograd.Function + autotuned Triton kernels are not
         # dynamo-traceable), as are the Linears of swapped blocks
@@ -959,7 +952,7 @@ def _resolve_output_path(args: argparse.Namespace, seed: int, *, directory_mode:
     if directory_mode or images or _output_is_directory(args.output):
         output_dir = Path(args.output).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_name = getattr(args, "output_name", None) if directory_mode else None
+        output_name = args.output_name if directory_mode else None
         return _dedupe_output_path(output_dir / (output_name or _auto_output_name(args, seed)))
     return _dedupe_output_path(Path(args.output).expanduser())
 
@@ -1378,7 +1371,7 @@ def process_latent_decode(args: argparse.Namespace, device: torch.device) -> Non
         source = Path(path).expanduser()
         loaded.append((source, *_load_latent_file(source)))
     if any(audio_latents is not None for _, _, audio_latents, _, _ in loaded):
-        _require_path(getattr(args, "audio_vae", None), "audio_vae")
+        _require_path(args.audio_vae, "audio_vae")
     shared = H3SharedModels(device=device)
     for source, video_latents, audio_latents, frame_count, metadata in loaded:
         logger.info("Decoding MiniMax-H3 latents from %s", source)
@@ -1617,6 +1610,8 @@ def setup_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = setup_parser().parse_args()
+    # not a command-line option: the per-line --o name of the multi-prompt modes, set by
+    # apply_overrides; defined here so every namespace reaching the output helpers has it
     args.output_name = None
     if args.prompt:
         args.prompt = args.prompt.replace("\\n", "\n")

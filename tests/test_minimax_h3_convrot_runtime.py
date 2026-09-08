@@ -45,6 +45,7 @@ def _load_training_module(monkeypatch):
         monkeypatch,
         "musubi_tuner.minimax_h3.media",
         H3_AUDIO_SPEC=object(),
+        TARGET_FPS=24,
         audio_latent_frames=noop,
         parse_inline_references=noop,
         reject_one_frame_audio_references=noop,
@@ -238,15 +239,15 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     int8 = SimpleNamespace(is_convrot_int8=True)
 
     # plain BF16 base: one-time destructive CPU merge
-    args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False)
+    args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False, lora_runtime_attach=False)
     assert generate._configure_lora_weights(bf16, args, device, prequantized=False) == []
     # pre-quantized INT8 base (auto-detected): runtime additive branches
     assert generate._configure_lora_weights(int8, args, device, prequantized=True) is attached
     # BF16 base + --convrot_int8: merged during the streaming load, nothing to do here
-    dynamic_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True)
+    dynamic_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True, lora_runtime_attach=False)
     assert generate._configure_lora_weights(int8, dynamic_args, device, prequantized=False) == []
     # no LoRA: nothing happens on any route
-    no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False)
+    no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False, lora_runtime_attach=False)
     assert generate._configure_lora_weights(bf16, no_lora, device, prequantized=False) == []
     # --lora_runtime_attach overrides both merge routes with runtime branches (the merge
     # rounds small-magnitude LoRAs -- e.g. teacher matching -- out of the BF16 weights)
