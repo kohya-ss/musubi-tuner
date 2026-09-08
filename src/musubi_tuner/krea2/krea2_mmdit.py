@@ -21,6 +21,7 @@ from musubi_tuner.modules.attention import AttentionParams, attention as common_
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
 from musubi_tuner.modules.convrot_int8_utils import block_has_convrot_patched_linear
 from musubi_tuner.modules.nvfp4_utils import block_has_nvfp4_patched_linear, quantized_linear_swap_tensor_selector
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
@@ -451,12 +452,18 @@ class SingleStreamDiT(nn.Module):
                 self.offloader.wait_for_block(index)
 
             if self.gradient_checkpointing and self.training:
-                combined = torch.utils.checkpoint.checkpoint(block, combined, tvec, freqs, attn_params, use_reentrant=False)
+                forward_fn = block
+                if self.activation_cpu_offloading:
+                    forward_fn = create_cpu_offloading_wrapper(forward_fn, img.device)
+                combined = torch.utils.checkpoint.checkpoint(forward_fn, combined, tvec, freqs, attn_params, use_reentrant=False)
             else:
                 combined = block(combined, tvec, freqs, attn_params)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, index)
+
+        if combined.device != img.device:
+            combined = combined.to(img.device)
 
         final = self.last(combined, t)
         output = final[:, :imglen, :]  # image tokens are the leading slice now
