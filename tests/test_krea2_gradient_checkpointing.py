@@ -7,11 +7,14 @@ checkpointing still works once the flag exists, and that the CPU-offload round-t
 strand output on the wrong device or corrupt gradients.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
+from musubi_tuner.krea2 import krea2_mmdit, krea2_sampling
 from musubi_tuner.krea2.krea2_mmdit import SingleMMDiTConfig, SingleStreamDiT
-from musubi_tuner.krea2 import krea2_sampling
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper as real_create_cpu_offloading_wrapper
 
 
 def _tiny_model() -> SingleStreamDiT:
@@ -100,3 +103,32 @@ def test_activation_cpu_offloading_round_trip_preserves_device_and_gradients():
     assert grad is not None
     assert grad.device.type == "cuda"
     assert torch.isfinite(grad).all()
+
+
+def test_cpu_offloading_wrapper_is_actually_invoked_per_block():
+    """Proves the offload wrapper is really wired into the block loop, not just that the flag
+    is set. A spy on create_cpu_offloading_wrapper (delegating to the real implementation) must
+    be called once per block with device=img.device when the flag is on, and not at all when off.
+    This is what catches a reverted/no-op wiring that the other tests can't distinguish."""
+    model = _tiny_model()
+    model.train()
+    device = torch.device("cpu")
+
+    with patch.object(krea2_mmdit, "create_cpu_offloading_wrapper", wraps=real_create_cpu_offloading_wrapper) as spy:
+        model.enable_gradient_checkpointing(cpu_offload=True)
+        img, context, t, pos, mask = _forward_inputs(model, device=device)
+        output = model(img=img, context=context, t=t, pos=pos, mask=mask)
+        assert torch.isfinite(output).all()
+
+    assert spy.call_count == len(model.blocks)
+    for call in spy.call_args_list:
+        called_device = call.args[1] if len(call.args) > 1 else call.kwargs["device"]
+        assert called_device == img.device
+
+    with patch.object(krea2_mmdit, "create_cpu_offloading_wrapper", wraps=real_create_cpu_offloading_wrapper) as spy:
+        model.enable_gradient_checkpointing(cpu_offload=False)
+        img, context, t, pos, mask = _forward_inputs(model, device=device)
+        output = model(img=img, context=context, t=t, pos=pos, mask=mask)
+        assert torch.isfinite(output).all()
+
+    assert spy.call_count == 0

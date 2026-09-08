@@ -183,14 +183,14 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 
 - `--fp8_base` and `--fp8_scaled` reduce DiT memory usage. **Both must be specified together** (plain fp8 without scaled is rejected, because it would cast the norms to fp8 and break the model). fp8 is applied to the 28 main blocks only; the text-fusion transformer stays bf16.
 - `--blocks_to_swap N` offloads some of the main blocks to CPU. The maximum is **26** (28 blocks − 2).
-- `--gradient_checkpointing` is available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+- `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
 <summary>日本語</summary>
 
 - `--fp8_base`と`--fp8_scaled`でDiTのメモリ使用量を削減します。**両方を同時に指定する必要があります**（scaledなしのplain fp8は、normをfp8にキャストしてモデルを壊すため拒否されます）。fp8は28個のメインブロックのみに適用され、text-fusion transformerはbf16のまま保持されます。
 - `--blocks_to_swap N`で一部のメインブロックをCPUにオフロードします。最大値は **26**（28ブロック − 2）です。
-- メモリ節約のために`--gradient_checkpointing`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
+- メモリ節約のために`--gradient_checkpointing`と`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
 </details>
 
