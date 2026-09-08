@@ -36,6 +36,7 @@ def _load_training_module(monkeypatch):
         decode_generation_visuals=noop,
         encode_audio_conditions=noop,
         encode_visual_conditions=noop,
+        fl_condition_entries=noop,
         load_generation_record=noop,
         module_device_dtype=noop,
         parse_one_frame_options=noop,
@@ -194,6 +195,7 @@ def _load_generation_module(monkeypatch):
         decode_generation_visuals=noop,
         encode_audio_conditions=noop,
         encode_visual_conditions=noop,
+        fl_condition_entries=noop,
         load_generation_record=noop,
         parse_one_frame_options=noop,
     )

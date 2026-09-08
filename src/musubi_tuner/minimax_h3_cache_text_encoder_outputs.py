@@ -30,6 +30,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
     wrap_ref_teacher_caption,
     wrap_subject_reference_caption,
 )
+from musubi_tuner.minimax_h3.packing import one_frame_condition_role
 from musubi_tuner.minimax_h3.media import (
     ONE_FRAME_REFERENCE_FRAME_CAP,
     H3AudioSource,
@@ -257,7 +258,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "--one_frame",
         action="store_true",
         help="experimental one-frame (image) training caches: accept image datasets. --task t2va encodes plain"
-        " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals;"
+        " caption presentations; --task fl2va embeds the bucket-resized control images as <Picture i> visuals (in"
+        " fp_1f_clean_indices order);"
         " --task ref2va embeds the per-item references (image_jsonl_file references, or control images without"
         " fp_1f_clean_indices) in the Ref2VA presentation",
     )
@@ -433,10 +435,10 @@ def main() -> None:
                     control_indices = item.fp_1f_clean_indices
                     if not control_indices or controls is None or len(controls) != len(control_indices):
                         raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control images: {item.item_key}")
-                    for role, control in zip(("first", "last"), controls):
+                    for index, control in enumerate(controls):
                         # the dataset keeps RGBA controls as-is; drop alpha the same way the
                         # latent path does (_prepare_pixels), the processor accepts only RGB
-                        visuals[role] = H3TextVisual(torch.as_tensor(control)[..., :3].unsqueeze(0))
+                        visuals[one_frame_condition_role(index)] = H3TextVisual(torch.as_tensor(control)[..., :3].unsqueeze(0))
                     control_paths = control_paths_by_dir.get(cache_dir_key, {}).get(item.item_key)
                     if control_paths is None or len(control_paths) != len(control_indices):
                         raise ValueError(f"MiniMax-H3 fl2va one-frame item is missing its control paths: {item.item_key}")

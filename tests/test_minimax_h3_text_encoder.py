@@ -90,6 +90,20 @@ def test_fl2va_presentation_numbers_a_lone_picture_one_for_either_role(tmp_path:
         build_presentation(record, "fl2va", {})
 
 
+def test_one_frame_fl2va_presentation_numbers_the_cond_slots_in_order(tmp_path: Path):
+    record = _record(tmp_path)
+
+    # the same <Picture i> numbering as the released first/last builder, over the ordered cond_ slots
+    presentation = build_presentation(record, "fl2va", {"cond_002": _visual(1), "cond_000": _visual(1), "cond_001": _visual(1)})
+    assert presentation.text == "".join(f"<Picture {index}>: {IMAGE_PLACEHOLDER}" for index in (1, 2, 3)) + record.caption
+    assert len(presentation.images) == 3
+
+    with pytest.raises(ValueError, match="contiguous"):
+        build_presentation(record, "fl2va", {"cond_001": _visual(1)})
+    with pytest.raises(ValueError, match="cannot mix"):
+        build_presentation(record, "fl2va", {"first": _visual(1), "cond_000": _visual(1)})
+
+
 def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path: Path):
     image = tmp_path / "face.png"
     video = tmp_path / "motion.mp4"

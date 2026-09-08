@@ -9,12 +9,12 @@
 
 - The target is one video latent token plus the two audio latent frames the joint layout requires. The audio is a byproduct and is never decoded; the output is a PNG (`--output` must use `.png`).
 - The single-token VAE decode duplicates the latent to a pseudo two-token clip and keeps pixel frame 0 (a solo token decode breaks down; the duplication decodes within ~1-2 dB of a true two-token decode). This happens inside the VAE automatically.
-- All tasks are available: `t2va` (plain image), `fl2va` with one or two condition images (editing/inbetween-style probes), and `ref2va` (reference-driven images, including single-image novel-view generation).
+- All tasks are available: `t2va` (plain image), `fl2va` with one or more condition images (editing/inbetween-style probes; one or two is the released API, three or more is experimental), and `ref2va` (reference-driven images, including single-image novel-view generation).
 - `--trajectory_dir` writes per-step PNGs instead of per-step videos.
 - Standalone `audio` references are rejected in one-frame mode (their window is defined by the target duration, which a single frame does not have); video references keep their embedded audio.
 - The released 5-15 s duration gate does not apply; `--allow_experimental_duration` is not needed.
 
-Training on one-frame targets is available for plain image LoRA (T2VA), for editing/inbetween LoRA with 1-2 control images (FL2VA), and for reference-conditioned image LoRA (Ref2VA); see [One-frame training](#one-frame-training-t2va-image-lora), [One-frame editing training](#one-frame-editing-training-fl2va-control-images), and [One-frame reference training](#one-frame-reference-training-ref2va-image-references) below.
+Training on one-frame targets is available for plain image LoRA (T2VA), for editing/inbetween LoRA with time-annotated control images (FL2VA), and for reference-conditioned image LoRA (Ref2VA); see [One-frame training](#one-frame-training-t2va-image-lora), [One-frame editing training](#one-frame-editing-training-fl2va-control-images), and [One-frame reference training](#one-frame-reference-training-ref2va-image-references) below.
 
 ## Time semantics: `--one_frame`
 
@@ -25,7 +25,7 @@ Training on one-frame targets is available for plain image LoRA (T2VA), for edit
 Positions on H3's rotary time axis are expressed as **0-based 24 fps pixel-frame indices** on a nominal timeline (one pixel frame = 5/3 rotary units = 1/24 s). All times are relative to the target-block cursor, which itself moves with the text length — only relative placement carries meaning.
 
 - `target_index` (default 0) places the generated frame.
-- `control_index` places the FL2VA condition images, in `--first_frame`/`--last_frame` order, `;`-separated. It is required when condition images are present and rejected otherwise.
+- `control_index` places the FL2VA condition images, in `--condition_image` order (or `--first_frame`, `--last_frame`), `;`-separated. It is required when condition images are present and rejected otherwise.
 - There is no separate duration parameter: "frame 24 of a 10-second video" is `control_index=0;240` with `target_index=24`.
 
 The base model reads these times as a real signal: an FL2VA anchor at the target's exact time is reproduced almost verbatim (anchor snapping), and intermediate positions interpolate when the caption follows the official alignment-line prompt format. For plain T2VA the index is nearly inert for the base model but remains a trainable input.
@@ -47,15 +47,23 @@ python minimax_h3_generate_video.py \
   --output output.png
 ```
 
-## Conditioned images (FL2VA, one or two pictures)
+## Conditioned images (FL2VA, one or more pictures)
 
-One-frame FL2VA accepts `--first_frame` and/or `--last_frame` — a single picture is officially in-distribution for the FL2VA checkpoint (its released API takes zero, one, or two pictures). The text presentation numbers `<Picture i>` over the pictures that are present, so a lone last frame is still `<Picture 1>`; the first/last distinction is carried by the rotary times alone.
+One-frame FL2VA takes an **ordered list of condition images**: the repeatable `--condition_image` (`--ci` in prompt lines), or `--first_frame` / `--last_frame` as aliases for the first two slots (the two forms cannot be mixed). The pictures are numbered `<Picture i>` in list order and placed on the time axis by `control_index` in the same order; unlike video FL2VA there are no "first"/"last" roles in one-frame mode — a slot's meaning comes from its time alone, so a lone `--last_frame` is still `<Picture 1>`.
+
+One or two pictures is officially in-distribution for the FL2VA checkpoint (its released API takes zero, one, or two pictures). **Three or more pictures is experimental**: community reports show the FL2VA model reads additional pictures as further timed anchors (e.g. first, middle, last) at inference, and Musubi Tuner exposes the same layout for generation and training; effects on quality are yours to verify.
 
 ```bash
 # generate "frame 24" of a nominal clip anchored by one condition image at frame 0
 ... --task fl2va --frame_count 1 \
   --first_frame anchor.png \
   --one_frame "target_index=24,control_index=0" \
+  --prompt "..." --output frame24.png
+
+# three anchors: frames 0, 48 and 96, generating frame 24 (experimental)
+... --task fl2va --frame_count 1 \
+  --condition_image a.png --condition_image b.png --condition_image c.png \
+  --one_frame "target_index=24,control_index=0;48;96" \
   --prompt "..." --output frame24.png
 ```
 
@@ -154,7 +162,7 @@ The LoRA metadata records `ss_minimax_h3_one_frame` for provenance. The resultin
 > [!WARNING]
 > Experimental. This trains the base model's timed-anchor pathway directly; read the index guidance below before building a dataset.
 
-With `--task fl2va`, an image dataset pairs each target image with 1-2 **time-annotated control images**: the controls become FL2VA condition latents (and `<Picture i>` visuals in the text presentation), and their positions on the rotary time axis come from the dataset config. This trains editing LoRAs (control = source image, target = edited image) and inbetween/中割り LoRAs (controls = endpoint frames, target = an intermediate frame).
+With `--task fl2va`, an image dataset pairs each target image with one or more **time-annotated control images**: the controls become FL2VA condition latents (and `<Picture i>` visuals in the text presentation), and their positions on the rotary time axis come from the dataset config. This trains editing LoRAs (control = source image, target = edited image) and inbetween/中割り LoRAs (controls = endpoint frames, target = an intermediate frame; optionally with additional intermediate anchors, see below).
 
 ### Dataset configuration
 
@@ -169,8 +177,8 @@ fp_1f_target_index = 24       # target position — REQUIRED when controls are p
 ```
 
 - `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line. `fp_1f_clean_indices` is what makes the controls timed FL2VA anchors; the same control images without indices are untimed Ref2VA references instead (see the reference training section below).
-- `fp_1f_clean_indices` gives one index per control image, in packed (first, last) order: control 0 is the "first" slot, control 1 the "last" slot. With one control only the "first" slot is used; the slot name carries no time meaning of its own — only the indices do.
-- Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
+- `fp_1f_clean_indices` gives one index per control image, in control order (`image_0.png` / `control_path_0` first): the controls become the ordered condition slots `cond_000`, `cond_001`, ... and `<Picture 1>`, `<Picture 2>`, ... in the same order. A slot has no time meaning of its own — only the indices do. Any number of controls is accepted; one or two matches the released FL2VA API, **three or more is experimental** (a first/middle/last triple for inbetween training, for example) and its benefit should be checked with an A/B against the two-anchor form.
+- Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when time-annotated controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
 - The alpha channel of RGBA control images is ignored (dropped before both VAE and text-encoder processing) — unlike FramePack one-frame training, it does not act as a mask.
 - Time-order is unconstrained: an anchor **after** the target (`fp_1f_clean_indices = [120]`, `fp_1f_target_index = 24`) trains an L2VA-style LoRA (generate the image that precedes an end state). Note the official pipeline stretches a lone last picture to the canvas at inference while training resizes to the bucket — a minor known divergence.
 
@@ -182,15 +190,16 @@ The base model's strongest prior is **verbatim anchor copying at coinciding time
 
 ### Caching and training
 
-Same commands as plain image training with `--task fl2va` instead of `--task t2va` on both cache scripts and the trainer. The latent cache additionally holds the condition latents (`latents_first`, plus `latents_last` for two controls) and the control indices as a tensor entry; the text cache embeds the bucket-resized control images in the FL2VA presentation. Changing `fp_1f_target_index` or `fp_1f_clean_indices` re-caches latents only (`--skip_existing` detects it); changing control image files re-caches both.
+Same commands as plain image training with `--task fl2va` instead of `--task t2va` on both cache scripts and the trainer. The latent cache additionally holds the condition latents (`latents_cond_000`, `latents_cond_001`, ... in control order) and the control indices as a tensor entry; the text cache embeds the bucket-resized control images in the FL2VA presentation. Changing `fp_1f_target_index` or `fp_1f_clean_indices` re-caches latents only (`--skip_existing` detects it); changing control image files re-caches both. One-frame FL2VA latent caches written before the ordered `cond_` slots (they used `latents_first`/`latents_last`) are rebuilt automatically by `--skip_existing`, and the trainer rejects them with a re-cache hint if they are used as-is.
 
 The guidance-loss recommendation from plain image training applies unchanged. Training-time samples mirror the generation CLI: provide the condition image(s) and the placement per prompt line:
 
 ```text
 Official-format caption... --w 1024 --h 1024 --f 1 --s 30 --i source.png --of target_index=24,control_index=0
+Official-format caption... --w 1024 --h 1024 --f 1 --s 30 --ci a.png --ci b.png --ci c.png --of target_index=24,control_index=0;48;96
 ```
 
-(`--i` is the first/only condition, `--ei` the last; `control_index` takes one `;`-separated entry per provided image, and is required.)
+(`--ci` is the ordered condition list, repeatable; `--i` / `--ei` alias its first two slots and cannot be mixed with `--ci`; `control_index` takes one `;`-separated entry per condition image, and is required.)
 
 ## One-frame reference training (Ref2VA, image references)
 

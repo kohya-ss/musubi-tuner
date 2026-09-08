@@ -1047,7 +1047,7 @@ def test_one_frame_batch_requires_a_valid_index_tensor(index):
         _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
 
 
-def _one_frame_fl_batch(target_index: int = 24, control_indices: list[int] | None = None, roles=("first",)):
+def _one_frame_fl_batch(target_index: int = 24, control_indices: list[int] | None = None, roles=("cond_000",)):
     batch = _one_frame_batch(target_index=target_index)
     for role in roles:
         batch[f"latents_{role}"] = torch.zeros(1, 24, 1, 4, 4)
@@ -1058,10 +1058,16 @@ def _one_frame_fl_batch(target_index: int = 24, control_indices: list[int] | Non
 
 @pytest.mark.parametrize(
     ("roles", "control_indices"),
-    [(("first",), [0]), (("first", "last"), [0, 48]), (("first",), [120])],
+    [
+        (("cond_000",), [0]),
+        (("cond_000", "cond_001"), [0, 48]),
+        (("cond_000",), [120]),
+        (("cond_000", "cond_001", "cond_002"), [0, 24, 48]),
+    ],
 )
 def test_one_frame_fl2va_batch_builds_condition_time_overrides(monkeypatch, roles, control_indices):
-    # the last case places the lone control AFTER the target (l2va-style) — ordering is free
+    # the third case places the lone control AFTER the target (l2va-style) — ordering is free;
+    # the last one is a three-condition (inbetween with a middle anchor) batch
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="fl2va", one_frame=True)
     trainer.handle_model_specific_args(args)
@@ -1107,13 +1113,16 @@ def test_one_frame_fl2va_batch_requires_a_valid_control_indices_tensor(indices):
         _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
 
 
-def test_one_frame_fl2va_batch_rejects_a_lone_last_condition():
+@pytest.mark.parametrize("roles", [("first",), ("last",), ("first", "last"), ("cond_001",)])
+def test_one_frame_fl2va_batch_rejects_legacy_or_gapped_condition_keys(roles):
+    # one-frame caches carry the ordered cond_000... keys; first/last are the video layout (a
+    # pre-cond one-frame cache), and a gap means a broken cache -- both ask for re-caching
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="fl2va", one_frame=True)
     trainer.handle_model_specific_args(args)
-    batch = _one_frame_fl_batch(control_indices=[0], roles=("last",))
+    batch = _one_frame_fl_batch(control_indices=[0] * len(roles), roles=roles)
 
-    with pytest.raises(ValueError, match="latents_first"):
+    with pytest.raises(ValueError, match="latents_cond_000|contiguous cond_000"):
         _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
 
 
@@ -1121,7 +1130,7 @@ def test_one_frame_fl2va_batch_requires_matching_condition_and_index_counts():
     trainer = MiniMaxH3NetworkTrainer()
     args = _trainer_args(task="fl2va", one_frame=True)
     trainer.handle_model_specific_args(args)
-    batch = _one_frame_fl_batch(control_indices=[0, 48], roles=("first",))
+    batch = _one_frame_fl_batch(control_indices=[0, 48], roles=("cond_000",))
 
     with pytest.raises(ValueError, match="re-run latent caching"):
         _one_frame_process_batch(trainer, args, batch, _RecordingTransformer())
@@ -1206,9 +1215,7 @@ def test_one_frame_coinciding_control_and_target_indices_warn_once(monkeypatch, 
     monkeypatch.setattr(train_module, "_coinciding_one_frame_indices_warned", False)
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            _one_frame_process_batch(
-                trainer, args, _one_frame_fl_batch(control_indices=[24], roles=("first",)), _RecordingTransformer()
-            )
+            _one_frame_process_batch(trainer, args, _one_frame_fl_batch(control_indices=[24]), _RecordingTransformer())
 
     warnings = [record for record in caplog.records if "verbatim anchor copying" in record.getMessage()]
     assert len(warnings) == 1
@@ -1293,18 +1300,38 @@ def test_one_frame_sample_normalization_parses_the_of_option():
             "REF2VA one-frame training sample does not accept control_index",
         ),
         ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --f 1"),
-        # fl2va one-frame: control_index is mandatory, one entry per provided frame
+        # fl2va one-frame: control_index is mandatory, one entry per condition image
         (
             {"task": "fl2va"},
             {"prompt": "x", "frame_count": 1, "first_frame": "a.png", "last_frame": "b.png"},
-            "one entry per provided frame",
+            "one entry per condition image",
         ),
         (
             {"task": "fl2va"},
             {"prompt": "x", "frame_count": 1, "first_frame": "a.png", "one_frame": "control_index=0;48"},
-            "one entry per provided frame",
+            "one entry per condition image",
         ),
-        ({"task": "fl2va"}, {"prompt": "x", "frame_count": 1, "one_frame": "control_index=0"}, "first_frame and/or last_frame"),
+        (
+            {"task": "fl2va"},
+            {"prompt": "x", "frame_count": 1, "control_image_path": ["a.png", "b.png"], "one_frame": "control_index=0"},
+            "one entry per condition image",
+        ),
+        ({"task": "fl2va"}, {"prompt": "x", "frame_count": 1, "one_frame": "control_index=0"}, "requires condition images"),
+        # --ci is the ordered one-frame list; --i/--ei alias its first two slots and cannot be mixed in
+        (
+            {"task": "fl2va"},
+            {
+                "prompt": "x",
+                "frame_count": 1,
+                "control_image_path": ["a.png"],
+                "first_frame": "b.png",
+                "one_frame": "control_index=0;1",
+            },
+            "not both",
+        ),
+        # ... and it is a one-frame feature (video FL2VA samples take first/last)
+        ({"task": "fl2va"}, {"prompt": "x", "frame_count": 124, "control_image_path": ["a.png"]}, "applies to one-frame targets"),
+        ({}, {"prompt": "x", "frame_count": 1, "control_image_path": ["a.png"]}, "does not accept condition"),
     ],
 )
 def test_one_frame_sample_normalization_rejects_invalid_requests(args_overrides, sample, message):
@@ -1334,6 +1361,27 @@ def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
     assert sample["frame_count"] == 1
     assert sample["one_frame_target_index"] == 24
     assert sample["one_frame_control_indices"] == (0,)
+    assert sample["condition_image"] is None
+
+    # the ordered --ci list (sampling_prompts parses it as control_image_path), three conditions
+    conditions = []
+    for name in ("a", "b", "c"):
+        path = tmp_path / f"{name}.png"
+        path.touch()
+        conditions.append(str(path))
+    sample = _normalize_h3_sample_parameter(
+        args,
+        {
+            "prompt": "an inbetween",
+            "frame_count": 1,
+            "control_image_path": conditions,
+            "one_frame": "target_index=24,control_index=0;24;48",
+            "width": 64,
+            "height": 64,
+        },
+    )
+    assert sample["condition_image"] == conditions
+    assert sample["one_frame_control_indices"] == (0, 24, 48)
 
 
 def test_one_frame_ref2va_sample_normalization_accepts_inline_refs(tmp_path):
@@ -1805,14 +1853,14 @@ def test_guidance_loss_uncond_layout_carries_one_frame_fl_condition_roles(tmp_pa
     monkeypatch.setattr(torch, "rand", lambda shape, **kwargs: torch.tensor([0.25], device=kwargs.get("device")))
     monkeypatch.setattr(torch, "randn_like", lambda tensor, *args, **kwargs: torch.zeros_like(tensor))
 
-    batch = _one_frame_fl_batch(control_indices=[0], roles=("first",))
+    batch = _one_frame_fl_batch(control_indices=[0])
     _, metrics = _one_frame_process_batch(trainer, args, batch, transformer)
 
     assert len(transformer.calls) == 2
     uncond_call, cond_call = transformer.calls
     for call in (uncond_call, cond_call):
         assert call["layout"].task == "fl2va"
-        assert tuple(segment.role for segment in call["layout"].segments if segment.kind == "visual_condition") == ("first",)
+        assert tuple(segment.role for segment in call["layout"].segments if segment.kind == "visual_condition") == ("cond_000",)
     assert uncond_call["layout"].time_overrides == cond_call["layout"].time_overrides
     assert uncond_call["layout"].time_overrides.condition_times == (0.0,)
     assert metrics["guidance/applied"] == 1.0

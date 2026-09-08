@@ -18,7 +18,7 @@ from musubi_tuner.minimax_h3.media import (
     parse_inline_references,
     waveform_samples,
 )
-from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry
+from musubi_tuner.minimax_h3.packing import H3ReferenceGeometry, H3VideoGeometry, one_frame_condition_role
 from musubi_tuner.minimax_h3.text_encoder import H3TextVisual
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_ENCODE_DTYPE, encode_video_condition
 from musubi_tuner.minimax_h3_cache_latents import PyAVH3MediaDecoder
@@ -100,15 +100,40 @@ def load_generation_record(args) -> H3Record:
     return record
 
 
+def fl_condition_entries(args) -> tuple[tuple[str, str], ...]:
+    """The FL2VA condition images of a generation request as ordered (role, path) pairs.
+
+    Video targets take the released ``first``/``last`` anchors (``--first_frame`` /
+    ``--last_frame``). One-frame targets take an ordered list of any length: the repeatable
+    ``--condition_image`` (``--ci`` in prompt lines), or, as aliases for the first two slots,
+    ``--first_frame`` / ``--last_frame``; the roles are the ``cond_{i}`` slots and the times come
+    from ``--one_frame control_index`` in the same order.
+    """
+    first_frame = getattr(args, "first_frame", None)
+    last_frame = getattr(args, "last_frame", None)
+    condition_images = getattr(args, "condition_image", None) or ()
+    if getattr(args, "frame_count", None) != 1:
+        if condition_images:
+            raise ValueError(
+                "MiniMax-H3 --condition_image applies to one-frame targets (--frame_count 1); video FL2VA takes"
+                " --first_frame and/or --last_frame"
+            )
+        return tuple((role, path) for role, path in (("first", first_frame), ("last", last_frame)) if path)
+    if condition_images and (first_frame or last_frame):
+        raise ValueError(
+            "MiniMax-H3 one-frame FL2VA takes either --condition_image entries or --first_frame/--last_frame, not both"
+        )
+    paths = list(condition_images) if condition_images else [path for path in (first_frame, last_frame) if path]
+    return tuple((one_frame_condition_role(index), path) for index, path in enumerate(paths))
+
+
 def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecoder):
     raw_visuals = {}
     text_visuals = {}
     if args.task == "t2va":
         return raw_visuals, text_visuals
     if args.task == "fl2va":
-        for role, path in (("first", args.first_frame), ("last", args.last_frame)):
-            if path is None:
-                continue
+        for role, path in fl_condition_entries(args):
             frames = load_image_frames(path, width=args.width, height=args.height)
             raw_visuals[role] = frames
             text_visuals[role] = H3TextVisual(frames)
@@ -160,9 +185,8 @@ def encode_visual_conditions(args, record, raw_visuals, video_vae):
         return H3VideoGeometry(*latent.shape[2:])
 
     if args.task == "fl2va":
-        for role in ("first", "last"):
-            if role in raw_visuals:
-                visual_geometries.append(encode_visual(raw_visuals[role]))
+        for role, _ in fl_condition_entries(args):
+            visual_geometries.append(encode_visual(raw_visuals[role]))
     elif args.task == "ref2va":
         for index, reference in enumerate(record.references):
             if reference.type in {"image", "video"}:

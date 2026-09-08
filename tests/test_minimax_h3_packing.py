@@ -369,27 +369,27 @@ def test_one_frame_layout_validation_rules():
         H3TimeOverrides(condition_times=(-1.0,), target_time=0.0)
 
 
-def test_one_frame_fl2va_layout_supports_one_or_two_roled_conditions():
+def test_one_frame_fl2va_layout_takes_any_number_of_ordered_cond_slots():
     condition = H3VideoGeometry(1, 4, 4)
     overrides = H3TimeOverrides(condition_times=(0.0,), target_time=FRAME_RESCALE * 24)
 
-    for role in ("first", "last"):
-        layout = _one_frame_layout("fl2va", conditions=(condition,), roles=(role,), overrides=overrides)
-        assert [segment.role for segment in layout.segments] == ["text", role, "target_audio", "target_video"]
-
-    both = H3TimeOverrides(condition_times=(0.0, FRAME_RESCALE * 240), target_time=FRAME_RESCALE * 24)
-    layout = _one_frame_layout("fl2va", conditions=(condition, condition), overrides=both)
-    assert [segment.role for segment in layout.segments] == ["text", "first", "last", "target_audio", "target_video"]
+    # one-frame conditions are ordered cond_{i} slots placed by their time overrides; the video
+    # first/last role names (which select anchor times) do not apply
+    for count in (1, 2, 3, 5):
+        times = H3TimeOverrides(condition_times=tuple(float(index) for index in range(count)), target_time=FRAME_RESCALE * 24)
+        layout = _one_frame_layout("fl2va", conditions=(condition,) * count, overrides=times)
+        expected_roles = [f"cond_{index:03d}" for index in range(count)]
+        assert [segment.role for segment in layout.segments] == ["text", *expected_roles, "target_audio", "target_video"]
+        # explicit roles are accepted when they are exactly the derived ones (the uncond rebuild passes them back)
+        assert _one_frame_layout("fl2va", conditions=(condition,) * count, roles=tuple(expected_roles), overrides=times) == layout
 
     with pytest.raises(ValueError, match="one condition time override per condition"):
-        _one_frame_layout("fl2va", conditions=(condition,), roles=("first",))
+        _one_frame_layout("fl2va", conditions=(condition,))
     with pytest.raises(ValueError, match="one condition time override per condition"):
         _one_frame_layout("fl2va", conditions=(condition, condition), overrides=overrides)
-    with pytest.raises(ValueError, match="explicit condition roles"):
-        _one_frame_layout("fl2va", conditions=(condition,), overrides=overrides)
-    with pytest.raises(ValueError, match="first, last, or first\\+last"):
-        _one_frame_layout("fl2va", conditions=(condition, condition), roles=("last", "first"), overrides=both)
-    with pytest.raises(ValueError, match="one or two visual conditions"):
+    with pytest.raises(ValueError, match="ordered"):
+        _one_frame_layout("fl2va", conditions=(condition,), roles=("first",), overrides=overrides)
+    with pytest.raises(ValueError, match="at least one visual condition"):
         _one_frame_layout("fl2va", overrides=H3TimeOverrides(condition_times=(), target_time=0.0))
 
 
