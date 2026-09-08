@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 import torch
 
+from musubi_tuner.dataset.media_utils import resize_image_to_bucket
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode
 from musubi_tuner.minimax_h3.media import (
     ONE_FRAME_REFERENCE_FRAME_CAP,
@@ -69,10 +70,17 @@ def dummy_record(prompt: str) -> H3Record:
 
 
 def load_image_frames(path: str | Path, *, width: int, height: int) -> torch.Tensor:
+    """An FL2VA condition image as a uint8 [1,H,W,3] frame on the target canvas.
+
+    The image is fitted the way the dataset layer fits training targets and control images
+    (``resize_image_to_bucket``: scale to cover the canvas, then center crop), so a LoRA sees
+    its conditions preprocessed exactly as during training. The released Diffusers pipeline
+    instead stretches the first picture onto the canvas and cover-crops the rest; training
+    parity is preferred here, the stretch never being a no-op with an explicit canvas.
+    """
     with Image.open(path) as image:
-        image = image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
-        pixels = torch.from_numpy(np.asarray(image).copy())
-    return pixels.unsqueeze(0)
+        pixels = resize_image_to_bucket(np.asarray(image.convert("RGB")), (width, height))
+    return torch.from_numpy(np.ascontiguousarray(pixels)).unsqueeze(0)
 
 
 def load_generation_record(args, *, ref_base_directory: str | Path | None = None) -> H3Record:

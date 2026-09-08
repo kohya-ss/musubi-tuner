@@ -444,7 +444,11 @@ For FL2VA, keep the FL2VA base and replace the task inputs:
 --task fl2va --prompt "..." --first_frame first.png --last_frame last.png
 ```
 
-The official prompt guide treats I2VA (first frame only) and L2VA (last frame only) as FL2VA variants, and the released FL2VA base supports both: pass only `--first_frame` to develop forward from the image, or only `--last_frame` to converge onto it. The lone picture is `<Picture 1>` in either case — the released prompt builder numbers the pictures that are present — and the first/last distinction is carried by the rotary anchor times (a lone last frame keeps its end-of-video anchor), so the prompt should use the matching official instruction line: the I2VA "at 0.00 seconds ... fully referenced" form, or the L2VA alignment form anchoring `<Picture 1>` at the final second mark. (BF16 or ConvRot INT8) and an ordered JSONL record:
+Condition images are fitted to the `--width`/`--height` canvas the way training fits controls to the bucket: scaled to cover the canvas, then center-cropped (never stretched), so a LoRA sees its conditions preprocessed exactly as during training. Pass images with the canvas aspect ratio to keep the whole picture.
+
+The official prompt guide treats I2VA (first frame only) and L2VA (last frame only) as FL2VA variants, and the released FL2VA base supports both: pass only `--first_frame` to develop forward from the image, or only `--last_frame` to converge onto it. The lone picture is `<Picture 1>` in either case — the released prompt builder numbers the pictures that are present — and the first/last distinction is carried by the rotary anchor times (a lone last frame keeps its end-of-video anchor), so the prompt should use the matching official instruction line: the I2VA "at 0.00 seconds ... fully referenced" form, or the L2VA alignment form anchoring `<Picture 1>` at the final second mark.
+
+For Ref2VA, use the Ref2VA base (BF16 or ConvRot INT8) and an ordered JSONL record:
 
 ```text
 --task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors --reference_jsonl /data/h3/ref2va.jsonl --reference_index 0
