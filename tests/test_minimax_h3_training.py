@@ -103,10 +103,15 @@ def test_h3_epoch_end_stays_silent_unless_audio_supervision_was_expected(caplog,
 
 class _Accelerator:
     device = torch.device("cpu")
+    is_local_main_process = True
 
     @staticmethod
     def autocast():
         return nullcontext()
+
+    @staticmethod
+    def unwrap_model(model):
+        return model
 
 
 class _RecordingTransformer:
@@ -125,11 +130,14 @@ class _RecordingTransformer:
 
 def _parser_defaults() -> dict[str, object]:
     parser = minimax_h3_setup_parser(setup_parser_common())
-    return {
+    defaults = {
         action.dest: action.default
         for action in parser._actions
         if action.dest != "help" and action.default is not argparse.SUPPRESS
     }
+    # set_defaults() entries without an option of their own (e.g. fp8_scaled) are not actions
+    defaults.update(parser._defaults)
+    return defaults
 
 
 # the trainer reads plain argparse attributes, so the fake args start from the real parser defaults:

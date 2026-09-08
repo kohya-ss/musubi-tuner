@@ -81,14 +81,14 @@ def prepare_pixels(frames: torch.Tensor) -> torch.Tensor:
     return frames.permute(3, 0, 1, 2).unsqueeze(0).contiguous()
 
 
-def load_generation_record(args) -> H3Record:
+def load_generation_record(args, *, ref_base_directory: str | Path | None = None) -> H3Record:
+    """The H3 record of a generation request; ``--ref`` paths resolve from ref_base_directory
+    (the CLI resolves them from the working directory, training samples from the prompt file)."""
     if args.task in {"t2va", "fl2va"}:
         return dummy_record(args.prompt or "")
 
-    ref_specs = getattr(args, "ref", None)
-    if ref_specs:
-        base_directory = Path(getattr(args, "ref_base_directory", None) or Path.cwd())
-        references = parse_inline_references(ref_specs, base_directory)
+    if args.ref:
+        references = parse_inline_references(args.ref, Path(ref_base_directory or Path.cwd()))
         return H3Record(video_path=Path("."), caption=args.prompt or "", references=references, label="--ref")
 
     records = load_h3_jsonl_records(args.reference_jsonl, "ref2va")
@@ -109,10 +109,10 @@ def fl_condition_entries(args) -> tuple[tuple[str, str], ...]:
     ``--first_frame`` / ``--last_frame``; the roles are the ``cond_{i}`` slots and the times come
     from ``--one_frame control_index`` in the same order.
     """
-    first_frame = getattr(args, "first_frame", None)
-    last_frame = getattr(args, "last_frame", None)
-    condition_images = getattr(args, "condition_image", None) or ()
-    if getattr(args, "frame_count", None) != 1:
+    first_frame = args.first_frame
+    last_frame = args.last_frame
+    condition_images = args.condition_image or ()
+    if args.frame_count != 1:
         if condition_images:
             raise ValueError(
                 "MiniMax-H3 --condition_image applies to one-frame targets (--frame_count 1); video FL2VA takes"
@@ -144,7 +144,7 @@ def decode_generation_visuals(args, record: H3Record, decoder: PyAVH3MediaDecode
     else:
         # cap reference videos by the real target duration in native 24 fps frames; a
         # temporal stretch makes that duration exceed frame_count generated frames
-        reference_frame_cap = args.frame_count * TARGET_FPS // getattr(args, "output_fps", TARGET_FPS)
+        reference_frame_cap = args.frame_count * TARGET_FPS // args.output_fps
     for reference in record.references:
         if reference.type not in {"image", "video"}:
             continue
@@ -218,7 +218,7 @@ def encode_audio_conditions(
         else:
             # standalone audio spans the target duration (stretched when --output_fps lowers the
             # sampling rate); one-frame generation rejects it upstream
-            frames = audio_latent_frames(args.frame_count, output_fps=getattr(args, "output_fps", TARGET_FPS))
+            frames = audio_latent_frames(args.frame_count, output_fps=args.output_fps)
             require_exact = False
         waveform = decoder.decode_audio(
             reference.audio,
