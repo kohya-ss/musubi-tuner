@@ -127,11 +127,6 @@ def test_trainer_warns_turbo_lora_without_sample_prompts(caplog):
     assert "turbo_dit" in caplog.text.lower() or "turbo_lora" in caplog.text.lower()
 
 
-def test_trainer_rejects_turbo_lora_with_compile():
-    with pytest.raises(ValueError, match="compile"):
-        _handle_args(_trainer_args(turbo_lora="turbo_lora.safetensors", compile=True, sample_prompts="p.txt"))
-
-
 import torch
 from safetensors.torch import save_file
 
@@ -143,7 +138,7 @@ class _FakeAccelerator:
         return m
 
 
-def test_ensure_turbo_lora_network_builds_once_and_starts_disabled(tiny_k2_model, tmp_path):
+def test_build_turbo_lora_network_starts_disabled_and_frozen(tiny_k2_model, tmp_path):
     from musubi_tuner.krea2_train_network import Krea2NetworkTrainer
     from musubi_tuner.networks import lora_krea2
 
@@ -158,12 +153,10 @@ def test_ensure_turbo_lora_network_builds_once_and_starts_disabled(tiny_k2_model
     args = _trainer_args(turbo_lora=str(lora_path), turbo_lora_multiplier=1.0)
     accelerator = _FakeAccelerator()
 
-    network1 = trainer._ensure_turbo_lora_network(args, accelerator, model)
-    assert all(not lora.enabled for lora in network1.unet_loras)
-    assert all(not p.requires_grad for p in network1.parameters())
-
-    network2 = trainer._ensure_turbo_lora_network(args, accelerator, model)
-    assert network1 is network2  # built once, cached
+    network = trainer._build_turbo_lora_network(args, accelerator, model)
+    assert network is trainer._turbo_lora_network
+    assert all(not lora.enabled for lora in network.unet_loras)
+    assert all(not p.requires_grad for p in network.parameters())
 
 
 def test_turbo_lora_composes_additively_with_trainee_lora(tiny_k2_model, tmp_path):
@@ -202,7 +195,7 @@ def test_turbo_lora_composes_additively_with_trainee_lora(tiny_k2_model, tmp_pat
     args = _trainer_args(turbo_lora=str(lora_path), turbo_lora_multiplier=1.0)
     accelerator = _FakeAccelerator()
 
-    turbo_network = trainer._ensure_turbo_lora_network(args, accelerator, model)
+    turbo_network = trainer._build_turbo_lora_network(args, accelerator, model)
     assert torch.equal(linear_module(x), trainee_out)  # still disabled: no change yet
 
     turbo_network.set_enabled(True)
@@ -227,6 +220,7 @@ def test_on_before_after_sample_images_toggle_turbo_lora(tiny_k2_model, tmp_path
     trainer = Krea2NetworkTrainer()
     args = _trainer_args(turbo_lora=str(lora_path), turbo_dit=None, sample_prompts="p.txt")
     accelerator = _FakeAccelerator()
+    trainer._build_turbo_lora_network(args, accelerator, model)
 
     trainer.on_before_sample_images(accelerator, args, 0, 0, None, model, trainee, [], torch.float32)
     assert trainer._turbo_lora_network is not None
@@ -234,6 +228,53 @@ def test_on_before_after_sample_images_toggle_turbo_lora(tiny_k2_model, tmp_path
 
     trainer.on_after_sample_images(accelerator, args, 0, 0, None, model, trainee, [], torch.float32)
     assert all(not lora.enabled for lora in trainer._turbo_lora_network.unet_loras)
+
+
+def test_build_network_eagerly_builds_turbo_lora(tiny_k2_model, tmp_path, monkeypatch):
+    from musubi_tuner.krea2_train_network import Krea2NetworkTrainer
+    from musubi_tuner.networks import lora_krea2
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+
+    model = tiny_k2_model
+    trainee = lora_krea2.create_arch_network(1.0, 4, 4, None, None, model)
+    trainee.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+    lora_path = tmp_path / "turbo_lora.safetensors"
+    save_file(trainee.state_dict(), str(lora_path))
+
+    monkeypatch.setattr(
+        NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: trainee
+    )
+
+    trainer = Krea2NetworkTrainer()
+    args = _trainer_args(turbo_lora=str(lora_path), compile=True)
+    accelerator = _FakeAccelerator()
+
+    result = trainer._build_network(args, accelerator, model, None, torch.float32)
+
+    assert result is trainee
+    assert trainer._turbo_lora_network is not None
+    assert all(not lora.enabled for lora in trainer._turbo_lora_network.unet_loras)
+    for lora in trainer._turbo_lora_network.unet_loras:
+        assert "_orig_mod" not in lora.lora_name
+
+
+def test_build_network_skips_turbo_lora_when_not_set(tiny_k2_model, monkeypatch):
+    from musubi_tuner.krea2_train_network import Krea2NetworkTrainer
+    from musubi_tuner.training.trainer_base import NetworkTrainer
+
+    model = tiny_k2_model
+    monkeypatch.setattr(
+        NetworkTrainer, "_build_network", lambda self, args, accelerator, transformer, vae, weight_dtype: "stub-network"
+    )
+
+    trainer = Krea2NetworkTrainer()
+    args = _trainer_args(turbo_lora=None)
+    accelerator = _FakeAccelerator()
+
+    result = trainer._build_network(args, accelerator, model, None, torch.float32)
+
+    assert result == "stub-network"
+    assert trainer._turbo_lora_network is None
 
 
 def test_do_inference_turbo_mu_pinned_for_turbo_lora():
