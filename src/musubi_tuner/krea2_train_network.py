@@ -86,6 +86,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
             # defensive getattr(args, "block_swap_h2d_only", False) pattern just below.
             nvfp4_columnwise_chunk_rows=getattr(args, "nvfp4_columnwise_chunk_rows", 1024),
             turbo_dit=args.turbo_dit,
+            turbo_lora=getattr(args, "turbo_lora", None),
             scaled_mm_available=nvfp4_scaled_mm_available(),
             cuda_available=torch.cuda.is_available(),
             device_capability=device_capability,
@@ -94,25 +95,36 @@ class Krea2NetworkTrainer(NetworkTrainer):
             require_block_swap_h2d_only_with_nvfp4=True,
         )
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
-        # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
-        # generation during training swap the base weights to Turbo (LoRA, hooked on the live
-        # Linears, applies on top automatically) and use the Turbo sampling schedule.
+        # checkpoint and run inference on the distilled Turbo. --turbo_dit (a full separate
+        # Turbo checkpoint) swaps the base weights to Turbo for sample generation (the trainee
+        # LoRA stays hooked and applies on top automatically). --turbo_lora instead composes a
+        # second, frozen LoRA network live on top of RAW, alongside the trainee LoRA -- see
+        # _ensure_turbo_lora_network -- and never touches the base weights at all, so it is not
+        # bound by --turbo_dit's block-swap/quantization restrictions below (only mutual
+        # exclusion with --turbo_dit itself, enforced above by
+        # krea2_utils.validate_krea2_quantization_args).
+        turbo_lora = getattr(args, "turbo_lora", None)
+        # --turbo_dit_cache (M1 resident weight-swap mode) only has meaning for --turbo_dit's
+        # full weight swap; --turbo_lora has no memory-mode concept of its own (its LoRA network
+        # is small and stays resident, unconditionally, once built).
         if args.turbo_dit_cache and not args.turbo_dit:
             raise ValueError("--turbo_dit_cache (M1, resident Turbo weights) requires --turbo_dit.")
-        # Turbo sample generation swaps the base weights from outside the model, which is unsafe
-        # under block swap: the offloader (esp. --block_swap_h2d_only's LoRAStreamOffloader) keeps
-        # its own CPU master and streams it to the GPU, so an external weight swap does NOT reach
-        # the weights the forward actually uses -> RAW/Turbo mix (bf16: loss drift; fp8: pure noise
-        # from RAW weight x Turbo scale_weight). Restrict Turbo sampling to the block-swap-disabled
-        # case (it is an optional, VRAM-permitting convenience); with block swap, sample on RAW.
+        # --turbo_dit swaps the base weights from outside the model, which is unsafe under block
+        # swap: the offloader (esp. --block_swap_h2d_only's LoRAStreamOffloader) keeps its own
+        # CPU master and streams it to the GPU, so an external weight swap does NOT reach the
+        # weights the forward actually uses -> RAW/Turbo mix (bf16: loss drift; fp8: pure noise
+        # from RAW weight x Turbo scale_weight). Restrict Turbo-DiT sampling to the
+        # block-swap-disabled case. --turbo_lora never swaps weights (only composes a LoRA hook,
+        # the same mechanism the trainee LoRA already uses under block swap), so it is not
+        # restricted here -- untested in practice, but expected to compose the same way.
         if args.turbo_dit and args.blocks_to_swap:
             raise ValueError(
                 "--turbo_dit (Turbo sample generation) is not supported together with --blocks_to_swap: "
                 "the block-swap offloader manages the base weights and an external swap would mix RAW/Turbo. "
                 "Use Turbo sampling without block swap (VRAM permitting), or omit --turbo_dit to sample on RAW."
             )
-        if args.turbo_dit and not args.sample_prompts:
-            logger.warning("--turbo_dit is set but --sample_prompts is not; Turbo is only used for sample generation.")
+        if (args.turbo_dit or turbo_lora) and not args.sample_prompts:
+            logger.warning("--turbo_dit/--turbo_lora is set but --sample_prompts is not; Turbo is only used for sample generation.")
 
     def process_sample_prompts(
         self,
@@ -575,6 +587,26 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         help="M1 memory mode for --turbo_dit: keep the (fp8-quantized at startup) Turbo weights resident in "
         "CPU RAM and ping-pong-swap them in (~1x extra CPU, faster). Default (M2) streams Turbo from disk each "
         "sample step (re-quantizing if fp8) for ~0x steady CPU at the cost of per-validation load time.",
+    )
+    parser.add_argument(
+        "--turbo_lora",
+        type=str,
+        default=None,
+        help="Turbo LoRA safetensors path, as an alternative to --turbo_dit. Recommended K2 "
+        "LoRA workflow: train on RAW (--dit), generate samples with Turbo. When set, sample "
+        "generation composes this LoRA live on top of the RAW base weights, alongside the LoRA "
+        "being trained -- both apply simultaneously as separate hooks; RAW weights are never "
+        "modified or merged into. Uses the Turbo schedule (fixed mu=1.15; set CFG off (--l 1) "
+        "and a low step count (--s 8) in the sample prompt). Disabled again after each sample "
+        "step (stays loaded, just inactive). Mutually exclusive with --turbo_dit. Independent "
+        "of --turbo_dit_cache, which only applies to --turbo_dit. Fully optional: omit to "
+        "sample on RAW.",
+    )
+    parser.add_argument(
+        "--turbo_lora_multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to the Turbo LoRA's delta when composing it with the trainee LoRA.",
     )
     return parser
 
