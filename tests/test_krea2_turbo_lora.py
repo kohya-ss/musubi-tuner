@@ -19,6 +19,7 @@ def _trainer_args(**overrides):
         turbo_lora_multiplier=1.0,
         blocks_to_swap=0,
         sample_prompts=None,
+        compile=False,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -77,6 +78,11 @@ def test_trainer_accepts_turbo_lora_alone():
 def test_trainer_warns_turbo_lora_without_sample_prompts(caplog):
     _handle_args(_trainer_args(turbo_lora="turbo_lora.safetensors", sample_prompts=None))
     assert "turbo_dit" in caplog.text.lower() or "turbo_lora" in caplog.text.lower()
+
+
+def test_trainer_rejects_turbo_lora_with_compile():
+    with pytest.raises(ValueError, match="compile"):
+        _handle_args(_trainer_args(turbo_lora="turbo_lora.safetensors", compile=True, sample_prompts="p.txt"))
 
 
 import torch
