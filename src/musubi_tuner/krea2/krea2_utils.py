@@ -236,6 +236,7 @@ def validate_krea2_quantization_args(
     scaled_mm_available: bool,
     cuda_available: bool,
     device_capability: Optional[tuple],
+    turbo_lora: Optional[str] = None,
     blocks_to_swap: int = 0,
     block_swap_h2d_only: bool = False,
     require_block_swap_h2d_only_with_nvfp4: bool = True,
@@ -244,8 +245,16 @@ def validate_krea2_quantization_args(
     inference so there is exactly one copy of this logic.
 
     Composes the generic checks in ``modules.quantization_utils`` (mutual exclusivity,
-    NVFP4 runtime requirements) with the Krea2-specific ones (``turbo_dit`` incompatibility,
-    ``convrot_int8_bwd`` requiring ``convrot_int8``, the chunk-rows multiple-of-128 rule).
+    NVFP4 runtime requirements) with the Krea2-specific ones (``turbo_dit`` incompatibility
+    with quantization and with ``turbo_lora``, ``convrot_int8_bwd`` requiring ``convrot_int8``,
+    the chunk-rows multiple-of-128 rule).
+
+    ``turbo_lora`` composes a second LoRA hook live on top of RAW at sample time (see
+    ``Krea2NetworkTrainer._ensure_turbo_lora_network``) rather than swapping any base weight,
+    so unlike ``turbo_dit`` it is NOT restricted against ``convrot_int8``/``nvfp4`` here --
+    only against ``turbo_dit`` itself (combining the two turbo sources is not a meaningful
+    workflow: a Turbo LoRA is meant to apply on top of RAW, not on top of an already-distilled
+    Turbo checkpoint).
 
     ``require_block_swap_h2d_only_with_nvfp4`` defaults to True (the trainer's requirement:
     the default block-swap offloader doesn't know about NVFP4's training-only columnwise
@@ -262,6 +271,8 @@ def validate_krea2_quantization_args(
         raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
     if nvfp4 and turbo_dit:
         raise ValueError("--nvfp4 is not supported together with --turbo_dit yet; omit one of them.")
+    if turbo_dit and turbo_lora:
+        raise ValueError("--turbo_dit and --turbo_lora are mutually exclusive: choose one turbo source for sample generation.")
     validate_quantization_scheme_args(
         fp8_scaled=fp8_scaled,
         convrot_int8=convrot_int8,
