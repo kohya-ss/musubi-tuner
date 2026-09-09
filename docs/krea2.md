@@ -292,6 +292,8 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 
 > **`--turbo_dit` cannot be combined with `--blocks_to_swap`.** Turbo sampling swaps the base weights in place, which is only safe without the block-swap offloader. If you use block swap, omit `--turbo_dit` and sample on the RAW model instead.
 
+**Alternative: `--turbo_lora`.** If you only have Krea's official Turbo release in LoRA-delta form (rather than a merged Turbo checkpoint), pass `--turbo_lora path/to/turbo_lora.safetensors` instead of `--turbo_dit`. Unlike `--turbo_dit`, this never touches the RAW base weights at all: the Turbo LoRA is composed live as a second, independent LoRA hook on top of RAW, active at the same time as the LoRA being trained (both apply simultaneously, `base + trainee_delta + turbo_delta` -- no merge, no weight swap). `--turbo_lora_multiplier` (default `1.0`) scales its delta. The Turbo LoRA is built once (lazily, on the first sample step) and then just enabled/disabled around each sample pass -- no per-step disk I/O. The same Turbo schedule applies (fixed `mu = 1.15`, CFG off, low step count -- see the sample prompt guidance above). `--turbo_lora` is mutually exclusive with `--turbo_dit` (combining a Turbo LoRA with an already-distilled Turbo checkpoint isn't a meaningful workflow). Unlike `--turbo_dit`, `--turbo_lora` is **not** restricted against `--blocks_to_swap`, `--convrot_int8`, or `--nvfp4` -- because it never touches base weights, it is expected to compose the same way the trainee's own LoRA already does under those settings (untested in practice; report an issue if you hit a problem). `--turbo_lora` is **not** supported together with `--compile`. `--turbo_dit_cache` has no effect on `--turbo_lora` -- it only applies to `--turbo_dit`'s memory-mode choice.
+
 <details>
 <summary>日本語</summary>
 
@@ -307,6 +309,8 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 - **`--turbo_dit_cache`（常駐）**: Turboの重みを起動時に一度量子化してCPU RAMに常駐させ、サンプルごとにスワップインします。**高速**ですが、実行中ずっと **DiTサイズの約1倍** のCPU RAMを追加で使用します。
 
 > **`--turbo_dit`は`--blocks_to_swap`と併用できません。** Turboサンプリングはベースの重みをその場で入れ替えるため、block swapのオフローダーがない場合にのみ安全です。block swapを使う場合は`--turbo_dit`を省略し、RAWモデルでサンプリングしてください。
+
+**代替手段: `--turbo_lora`。** マージ済みのTurboチェックポイントではなく、KreaのTurbo公式リリースがLoRA差分形式でしか手元にない場合は、`--turbo_dit`の代わりに`--turbo_lora path/to/turbo_lora.safetensors`を指定します。`--turbo_dit`と異なり、RAWのbase重みには一切触れません。Turbo LoRAは、学習中のLoRAと同時に適用される、独立した2つ目のLoRAフックとしてRAWの上にライブ合成されます（`base + trainee_delta + turbo_delta`、マージも重みの入れ替えもありません）。`--turbo_lora_multiplier`（デフォルト`1.0`）でそのdeltaの強さを調整できます。Turbo LoRAは（最初のサンプルステップで）一度だけ遅延構築され、以降は各サンプルパスの前後で有効化/無効化されるだけです（ディスクI/Oは発生しません）。Turboのスケジュール（固定`mu = 1.15`、CFGオフ、少ないステップ数。上記のサンプルプロンプトの指定を参照）は同様に適用されます。`--turbo_lora`は`--turbo_dit`と併用できません（Turbo LoRAを既に蒸留済みのTurboチェックポイントと組み合わせるのは意味のあるワークフローではないためです）。`--turbo_dit`と異なり、`--turbo_lora`は`--blocks_to_swap`・`--convrot_int8`・`--nvfp4`との併用を制限していません——base重みに一切触れないため、これらの設定下でも学習中のLoRA自身と同様に動作すると想定しています（実運用での検証は未実施です。問題があれば報告してください）。`--turbo_lora`は`--compile`と併用できません。`--turbo_dit_cache`は`--turbo_lora`には影響しません（`--turbo_dit`のメモリモード選択にのみ適用されます）。
 
 </details>
 
