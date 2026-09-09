@@ -129,6 +129,23 @@ class Krea2NetworkTrainer(NetworkTrainer):
                 "the block-swap offloader manages the base weights and an external swap would mix RAW/Turbo. "
                 "Use Turbo sampling without block swap (VRAM permitting), or omit --turbo_dit to sample on RAW."
             )
+        # --turbo_lora's LoRANetwork is built lazily on the first sample step (see
+        # _ensure_turbo_lora_network), i.e. after compile_transformer has already run (compile
+        # happens well before the training/sampling loop). torch.compile wraps each block in an
+        # OptimizedModule, so post-compile module paths gain an "_orig_mod" segment; every
+        # lora_name the lazily-built Turbo LoRA network derives against the live (compiled) model
+        # would then mismatch the modules_dim keys loaded from the (uncompiled-name) checkpoint,
+        # and LoRANetwork.apply_to raises "No LoRA modules found" -- crashing training mid-flight
+        # at the first sample step rather than at startup. --turbo_dit does not have this problem:
+        # _named_live_tensors already strips "_orig_mod" for its weight-swap path, but --turbo_lora
+        # has no equivalent workaround yet, so reject the combination up front instead.
+        if turbo_lora and args.compile:
+            raise ValueError(
+                "--turbo_lora is not supported together with --compile: the Turbo LoRA network is built lazily "
+                "on the first sample step, after torch.compile has already renamed module paths (adding "
+                "'_orig_mod'), so its LoRA module names would not match the checkpoint's uncompiled names. "
+                "Omit --compile, or sample Turbo via --turbo_dit instead."
+            )
         if (args.turbo_dit or turbo_lora) and not args.sample_prompts:
             logger.warning("--turbo_dit/--turbo_lora is set but --sample_prompts is not; Turbo is only used for sample generation.")
 
