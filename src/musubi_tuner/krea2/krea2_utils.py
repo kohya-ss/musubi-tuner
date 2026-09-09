@@ -250,7 +250,7 @@ def validate_krea2_quantization_args(
     the chunk-rows multiple-of-128 rule).
 
     ``turbo_lora`` composes a second LoRA hook live on top of RAW at sample time (see
-    ``Krea2NetworkTrainer._ensure_turbo_lora_network``) rather than swapping any base weight,
+    ``Krea2NetworkTrainer._build_turbo_lora_network``) rather than swapping any base weight,
     so unlike ``turbo_dit`` it is NOT restricted against ``convrot_int8``/``nvfp4`` here --
     only against ``turbo_dit`` itself (combining the two turbo sources is not a meaningful
     workflow: a Turbo LoRA is meant to apply on top of RAW, not on top of an already-distilled

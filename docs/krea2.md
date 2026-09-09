@@ -331,7 +331,7 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 `--turbo_dit` to compose a Turbo LoRA live on top of RAW (`base + trainee_delta + turbo_delta`)
 rather than swapping in a full Turbo checkpoint. `--turbo_lora_multiplier` (default `1.0`)
 scales its delta. Built once at startup; toggled on/off around each sample pass. Mutually
-exclusive with `--turbo_dit`. `--turbo_dit_cache` has no effect on it.
+exclusive with `--turbo_dit`. Cannot be combined with `--turbo_dit_cache` (that flag requires `--turbo_dit`).
 
 This LoRA is a rank-extracted delta between the released raw and turbo checkpoints, not an
 official Krea artifact — it approximates the turbo weights, which is why the Turbo schedule
@@ -357,7 +357,7 @@ official Krea artifact — it approximates the turbo weights, which is why the T
 を指定すると、フルのTurboチェックポイントを入れ替える代わりに、RAWの上でTurbo LoRAをライブ合成します
 （`base + trainee_delta + turbo_delta`）。`--turbo_lora_multiplier`（デフォルト`1.0`）でdeltaの強さを
 調整できます。起動時に一度だけ構築され、各サンプルパスの前後で有効/無効を切り替えます。`--turbo_dit`
-とは併用できません。`--turbo_dit_cache`はこれには影響しません。
+とは併用できません。`--turbo_dit_cache`（`--turbo_dit`が必須のオプション）との併用もできません。
 
 このLoRAは公開されているraw/turboチェックポイント間から抽出したランク近似deltaであり、Krea公式のLoRA
 ではありません——turboの重みを近似しているため、Turboのスケジュール（固定`mu = 1.15`、CFGオフ、少ない
