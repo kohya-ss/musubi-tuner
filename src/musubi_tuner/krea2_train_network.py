@@ -224,8 +224,10 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # mu interpolation endpoints (krea2 sample defaults minres=256, maxres=1280).
         x1 = (256 // align) ** 2
         x2 = (1280 // align) ** 2
-        # The distilled Turbo checkpoint was trained at a fixed mu=1.15; the RAW checkpoint
-        # uses resolution-aware mu interpolation. When sampling on Turbo (--turbo_dit), pin mu.
+        # The distilled Turbo checkpoint was trained at a fixed mu=1.15; the RAW checkpoint uses
+        # resolution-aware mu interpolation. --turbo_dit swaps in that checkpoint directly;
+        # --turbo_lora is a rank-extracted delta between the released raw/turbo checkpoints, so
+        # it approximates the same fixed-mu weights. Pin mu for either.
         turbo_mu = 1.15 if (args.turbo_dit or getattr(args, "turbo_lora", None)) else None
         ts = krea2_sampling.timesteps(img.shape[1], sample_steps, x1, x2, y1=0.5, y2=1.15, mu=turbo_mu)
 
@@ -580,6 +582,19 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         help="M1 memory mode for --turbo_dit: keep the (fp8-quantized at startup) Turbo weights resident in "
         "CPU RAM and ping-pong-swap them in (~1x extra CPU, faster). Default (M2) streams Turbo from disk each "
         "sample step (re-quantizing if fp8) for ~0x steady CPU at the cost of per-validation load time.",
+    )
+    parser.add_argument(
+        "--turbo_lora",
+        type=str,
+        default=None,
+        help="Turbo LoRA safetensors path: composed live on top of RAW, alongside the LoRA "
+        "being trained. Alternative to --turbo_dit (mutually exclusive with it). See docs/krea2.md.",
+    )
+    parser.add_argument(
+        "--turbo_lora_multiplier",
+        type=float,
+        default=1.0,
+        help="Multiplier for the Turbo LoRA's delta.",
     )
     return parser
 
