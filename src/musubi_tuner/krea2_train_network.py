@@ -225,8 +225,10 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # mu interpolation endpoints (krea2 sample defaults minres=256, maxres=1280).
         x1 = (256 // align) ** 2
         x2 = (1280 // align) ** 2
-        # The distilled Turbo checkpoint was trained at a fixed mu=1.15; the RAW checkpoint
-        # uses resolution-aware mu interpolation. When sampling on Turbo (--turbo_dit), pin mu.
+        # The distilled Turbo checkpoint was trained at a fixed mu=1.15; the RAW checkpoint uses
+        # resolution-aware mu interpolation. --turbo_dit swaps in that checkpoint directly;
+        # --turbo_lora is a rank-extracted delta between the released raw/turbo checkpoints, so
+        # it approximates the same fixed-mu weights. Pin mu for either.
         turbo_mu = 1.15 if (args.turbo_dit or getattr(args, "turbo_lora", None)) else None
         ts = krea2_sampling.timesteps(img.shape[1], sample_steps, x1, x2, y1=0.5, y2=1.15, mu=turbo_mu)
 
@@ -608,21 +610,14 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         "--turbo_lora",
         type=str,
         default=None,
-        help="Turbo LoRA safetensors path, as an alternative to --turbo_dit. Recommended K2 "
-        "LoRA workflow: train on RAW (--dit), generate samples with Turbo. When set, sample "
-        "generation composes this LoRA live on top of the RAW base weights, alongside the LoRA "
-        "being trained -- both apply simultaneously as separate hooks; RAW weights are never "
-        "modified or merged into. Uses the Turbo schedule (fixed mu=1.15; set CFG off (--l 1) "
-        "and a low step count (--s 8) in the sample prompt). Disabled again after each sample "
-        "step (stays loaded, just inactive). Mutually exclusive with --turbo_dit. Independent "
-        "of --turbo_dit_cache, which only applies to --turbo_dit. Fully optional: omit to "
-        "sample on RAW.",
+        help="Turbo LoRA safetensors path: composed live on top of RAW, alongside the LoRA "
+        "being trained. Alternative to --turbo_dit (mutually exclusive with it). See docs/krea2.md.",
     )
     parser.add_argument(
         "--turbo_lora_multiplier",
         type=float,
         default=1.0,
-        help="Multiplier applied to the Turbo LoRA's delta when composing it with the trainee LoRA.",
+        help="Multiplier for the Turbo LoRA's delta.",
     )
     return parser
 
