@@ -54,9 +54,7 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # so a single snapshot stays valid for the whole run).
         self._turbo_stash = None
         self._raw_stash = None
-        # --turbo_lora sampling composes a second, frozen LoRANetwork live on top of RAW,
-        # alongside the trainee network (see _ensure_turbo_lora_network) -- never a weight
-        # swap. Built once, lazily, on the first sample step; None until then.
+        # --turbo_lora: second, frozen LoRANetwork composed on RAW (see _build_turbo_lora_network).
         self._turbo_lora_network = None
 
     # region model specific
@@ -89,46 +87,26 @@ class Krea2NetworkTrainer(NetworkTrainer):
         if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
             raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
-        # checkpoint and run inference on the distilled Turbo. --turbo_dit makes sample
-        # generation during training swap the base weights to Turbo (LoRA, hooked on the live
-        # Linears, applies on top automatically) and use the Turbo sampling schedule.
+        # checkpoint and run inference on the distilled Turbo. --turbo_dit (a full separate
+        # Turbo checkpoint) swaps the base weights to Turbo for sample generation (the trainee
+        # LoRA stays hooked and applies on top automatically). --turbo_lora instead composes a
+        # second, frozen LoRA network live on top of RAW, alongside the trainee LoRA -- built
+        # eagerly in _build_network -- and never touches the base weights at all, so it is not
+        # bound by --turbo_dit's block-swap restriction below (only mutual exclusion with
+        # --turbo_dit itself, checked next).
+        turbo_lora = getattr(args, "turbo_lora", None)
+        if args.turbo_dit and turbo_lora:
+            raise ValueError("--turbo_dit and --turbo_lora are mutually exclusive: choose one turbo source for sample generation.")
         if args.turbo_dit_cache and not args.turbo_dit:
             raise ValueError("--turbo_dit_cache (M1, resident Turbo weights) requires --turbo_dit.")
-        # Turbo sample generation swaps the base weights from outside the model, which is unsafe
-        # under block swap: the offloader (esp. --block_swap_h2d_only's LoRAStreamOffloader) keeps
-        # its own CPU master and streams it to the GPU, so an external weight swap does NOT reach
-        # the weights the forward actually uses -> RAW/Turbo mix (bf16: loss drift; fp8: pure noise
-        # from RAW weight x Turbo scale_weight). Restrict Turbo sampling to the block-swap-disabled
-        # case (it is an optional, VRAM-permitting convenience); with block swap, sample on RAW.
+        # --turbo_dit swaps base weights from outside the model; the block-swap offloader's own
+        # CPU master never sees that swap, producing a RAW/Turbo weight mix. --turbo_lora never
+        # swaps weights (only composes a LoRA hook), so it is not restricted here.
         if args.turbo_dit and args.blocks_to_swap:
             raise ValueError(
                 "--turbo_dit (Turbo sample generation) is not supported together with --blocks_to_swap: "
                 "the block-swap offloader manages the base weights and an external swap would mix RAW/Turbo. "
                 "Use Turbo sampling without block swap (VRAM permitting), or omit --turbo_dit to sample on RAW."
-            )
-        turbo_lora = getattr(args, "turbo_lora", None)
-        # --turbo_lora composes a second, frozen LoRA network live on top of RAW, alongside the
-        # trainee LoRA (see _ensure_turbo_lora_network), and never touches the base weights, so
-        # it is not bound by --turbo_dit's block-swap restriction above -- only mutual exclusion
-        # with --turbo_dit itself (combining the two turbo sources is not a meaningful workflow).
-        if args.turbo_dit and turbo_lora:
-            raise ValueError("--turbo_dit and --turbo_lora are mutually exclusive: choose one turbo source for sample generation.")
-        # --turbo_lora's LoRANetwork is built lazily on the first sample step (see
-        # _ensure_turbo_lora_network), i.e. after compile_transformer has already run (compile
-        # happens well before the training/sampling loop). torch.compile wraps each block in an
-        # OptimizedModule, so post-compile module paths gain an "_orig_mod" segment; every
-        # lora_name the lazily-built Turbo LoRA network derives against the live (compiled) model
-        # would then mismatch the modules_dim keys loaded from the (uncompiled-name) checkpoint,
-        # and LoRANetwork.apply_to raises "No LoRA modules found" -- crashing training mid-flight
-        # at the first sample step rather than at startup. --turbo_dit does not have this problem:
-        # _named_live_tensors already strips "_orig_mod" for its weight-swap path, but --turbo_lora
-        # has no equivalent workaround yet, so reject the combination up front instead.
-        if turbo_lora and args.compile:
-            raise ValueError(
-                "--turbo_lora is not supported together with --compile: the Turbo LoRA network is built lazily "
-                "on the first sample step, after torch.compile has already renamed module paths (adding "
-                "'_orig_mod'), so its LoRA module names would not match the checkpoint's uncompiled names. "
-                "Omit --compile, or sample Turbo via --turbo_dit instead."
             )
         if (args.turbo_dit or turbo_lora) and not args.sample_prompts:
             logger.warning("--turbo_dit/--turbo_lora is set but --sample_prompts is not; Turbo is only used for sample generation.")
@@ -342,31 +320,28 @@ class Krea2NetworkTrainer(NetworkTrainer):
         for k, t in self._named_live_tensors(model).items():
             t.data = src[k]
 
-    def _ensure_turbo_lora_network(self, args: argparse.Namespace, accelerator: Accelerator, model):
-        """Build (once) and return the Turbo LoRA network, composed live on top of RAW.
-
-        Loads ``args.turbo_lora``'s weights, builds a second ``LoRANetwork`` from them (Krea 2
-        only ships one LoRA network module, ``lora_krea2``, so it is used directly regardless of
-        the trainee's own ``--network_module``), and ``apply_to()``s it onto ``model``. Because
-        ``LoRAModule.apply_to()`` wraps ``org_module.forward`` rather than merging weights, this
-        chains additively on top of whatever is already hooked (the trainee network) -- no base
-        weight is ever read or written. Frozen (``requires_grad_(False)``) since it is never
-        trained, and starts disabled: the caller enables/disables it per sample step.
-        """
-        if self._turbo_lora_network is not None:
-            return self._turbo_lora_network
+    def _build_turbo_lora_network(self, args: argparse.Namespace, accelerator: Accelerator, model):
+        """Build and apply the Turbo LoRA network (frozen, disabled) live on top of RAW."""
         logger.info(f"Krea 2: loading Turbo LoRA for sampling from {args.turbo_lora}")
         weights_sd = load_file(args.turbo_lora)
         turbo_network = lora_krea2.create_arch_network_from_weights(
             getattr(args, "turbo_lora_multiplier", 1.0), weights_sd, unet=model, for_inference=True
         )
         turbo_network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+        # strict=False: the current Turbo LoRA extraction carries non-essential keys; revisit
+        # once that extraction is investigated.
         turbo_network.load_weights(args.turbo_lora)
         turbo_network.requires_grad_(False)
         turbo_network.to(accelerator.device)
         turbo_network.set_enabled(False)
         self._turbo_lora_network = turbo_network
         return turbo_network
+
+    def _build_network(self, args, accelerator, transformer, vae, weight_dtype):
+        network = super()._build_network(args, accelerator, transformer, vae, weight_dtype)
+        if network is not None and getattr(args, "turbo_lora", None):
+            self._build_turbo_lora_network(args, accelerator, transformer)
+        return network
 
     def on_before_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype):
         if args.turbo_dit:
@@ -404,12 +379,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
                 gc.collect()
                 clean_memory_on_device(accelerator.device)
         elif getattr(args, "turbo_lora", None):
-            # Compose the Turbo LoRA live on top of RAW, alongside the trainee LoRA -- no
-            # weight is ever swapped or merged.
-            model = accelerator.unwrap_model(transformer)
-            turbo_network = self._ensure_turbo_lora_network(args, accelerator, model)
             logger.info("Krea 2: enabling Turbo LoRA for sampling")
-            turbo_network.set_enabled(True)
+            self._turbo_lora_network.set_enabled(True)
 
     def on_after_sample_images(self, accelerator, args, epoch, steps, vae, transformer, network, sample_parameters, dit_dtype):
         if args.turbo_dit:
