@@ -19,6 +19,7 @@ from torch import Tensor
 
 from musubi_tuner.modules.attention import AttentionParams, attention as common_attention
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig, create_offloader
+from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
@@ -344,15 +345,17 @@ class SingleStreamDiT(nn.Module):
 
         # musubi training hooks
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
         self.blocks_to_swap = 0
         self.offloader = None
 
     def enable_gradient_checkpointing(self, cpu_offload: bool = False):
-        # cpu_offload is accepted for interface parity; not implemented for K2 yet.
         self.gradient_checkpointing = True
+        self.activation_cpu_offloading = cpu_offload
 
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
+        self.activation_cpu_offloading = False
 
     # Block swap (CPU offloading of the main SingleStreamBlocks). Mirrors the other
     # musubi architectures: the trainer calls enable_block_swap + move_to_device_except_swap_blocks
@@ -439,12 +442,21 @@ class SingleStreamDiT(nn.Module):
                 self.offloader.wait_for_block(index)
 
             if self.gradient_checkpointing and self.training:
-                combined = torch.utils.checkpoint.checkpoint(block, combined, tvec, freqs, attn_params, use_reentrant=False)
+                forward_fn = block
+                if self.activation_cpu_offloading:
+                    # create_cpu_offloading_wrapper only recurses into tensors/list/tuple/dict; attn_params (a
+                    # dataclass) passes through untouched -- if AttentionParams ever becomes a NamedTuple this
+                    # would silently break.
+                    forward_fn = create_cpu_offloading_wrapper(forward_fn, img.device)
+                combined = torch.utils.checkpoint.checkpoint(forward_fn, combined, tvec, freqs, attn_params, use_reentrant=False)
             else:
                 combined = block(combined, tvec, freqs, attn_params)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.blocks, index)
+
+        if combined.device != img.device:
+            combined = combined.to(img.device)
 
         final = self.last(combined, t)
         output = final[:, :imglen, :]  # image tokens are the leading slice now
