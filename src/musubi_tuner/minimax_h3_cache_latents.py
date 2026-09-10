@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 import json
 import logging
@@ -15,12 +15,7 @@ import torch
 import musubi_tuner.cache_latents as cache_latents
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
-from musubi_tuner.dataset.cache_io import (
-    append_audio_present_entry,
-    append_one_frame_control_indices_entry,
-    append_one_frame_target_index_entry,
-    save_latent_cache_minimax_h3,
-)
+from musubi_tuner.dataset.cache_io import save_latent_cache_minimax_h3
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
 from musubi_tuner.minimax_h3.audio_vae import encode_audio_mode, load_audio_vae
@@ -35,7 +30,13 @@ from musubi_tuner.minimax_h3.cache_plan import (
     plan_h3_datasets,
 )
 from musubi_tuner.minimax_h3.checkpoint import fingerprint_checkpoint
-from musubi_tuner.minimax_h3.packing import ONE_FRAME_AUDIO_LATENT_FRAMES, ONE_FRAME_VIDEO_LATENT_FRAMES, one_frame_condition_role
+from musubi_tuner.minimax_h3.packing import (
+    FL_CONDITION_ROLES,
+    ONE_FRAME_AUDIO_LATENT_FRAMES,
+    ONE_FRAME_VIDEO_LATENT_FRAMES,
+    one_frame_condition_role,
+    reference_condition_role,
+)
 from musubi_tuner.minimax_h3.media import (
     H3_AUDIO_SPEC,
     ONE_FRAME_REFERENCE_FRAME_CAP,
@@ -58,7 +59,6 @@ from musubi_tuner.minimax_h3.video_vae import (
     encode_video_target,
     load_video_vae,
 )
-from musubi_tuner.utils.model_utils import dtype_to_str
 
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,34 @@ logging.basicConfig(level=logging.INFO)
 
 @dataclass(frozen=True)
 class H3LatentCachePayload:
-    tensors: dict[str, torch.Tensor]
+    """Everything one MiniMax-H3 latent cache stores, before the writer names the entries.
+
+    The conditions are keyed by their layout role (`first`/`last`, `cond_{i}`,
+    `ref_{i}_{image|video|audio}`); `save_latent_cache_minimax_h3` turns each field into the
+    `latents[_<role>]_<shape>_<dtype>` entry the trainer reads back as `latents[_<role>]`.
+    """
+
+    target_video: torch.Tensor  # [24,F,H,W]
+    target_audio: torch.Tensor  # [32,2,A]
+    audio_present: bool
     metadata: dict[str, str]
+    visual_conditions: dict[str, torch.Tensor] = field(default_factory=dict)  # role -> [24,F,H,W]
+    audio_conditions: dict[str, torch.Tensor] = field(default_factory=dict)  # role -> [32,2,A]
+    one_frame_target_index: int | None = None
+    one_frame_control_indices: tuple[int, ...] | None = None
+
+    def save(self, item: ItemInfo) -> None:
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=self.target_video,
+            target_audio=self.target_audio,
+            audio_present=self.audio_present,
+            visual_conditions=self.visual_conditions,
+            audio_conditions=self.audio_conditions,
+            one_frame_target_index=self.one_frame_target_index,
+            one_frame_control_indices=self.one_frame_control_indices,
+            metadata=self.metadata,
+        )
 
 
 def _validate_task_record(record: H3Record, task: H3Task) -> None:
@@ -110,21 +136,6 @@ def _encode_audio(audio_vae, waveform: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"MiniMax-H3 decoded audio must be stereo [2,L], got {tuple(waveform.shape)}")
     device, dtype = module_device_dtype(audio_vae, torch.float32)
     return encode_audio_mode(audio_vae, waveform.unsqueeze(0).to(device=device, dtype=dtype))
-
-
-def _visual_key(role: str, latent: torch.Tensor) -> str:
-    if latent.ndim != 4 or latent.shape[0] != 24:
-        raise ValueError(f"MiniMax-H3 visual latent must be [24,F,H,W], got {tuple(latent.shape)}")
-    _, frames, height, width = latent.shape
-    dtype_name = dtype_to_str(latent.dtype)
-    return f"latents_{role + '_' if role else ''}{frames}x{height}x{width}_{dtype_name}"
-
-
-def _audio_key(role: str, latent: torch.Tensor) -> str:
-    if latent.ndim != 3 or latent.shape[:2] != (32, 2):
-        raise ValueError(f"MiniMax-H3 audio latent must be [32,2,A], got {tuple(latent.shape)}")
-    dtype_name = dtype_to_str(latent.dtype)
-    return f"latents_{role + '_' if role else 'audio_'}32x2x{latent.shape[2]}_{dtype_name}"
 
 
 def _media_fingerprint_metadata(fingerprints: Mapping[Path, str]) -> str:
@@ -226,18 +237,15 @@ def build_latent_tensors(
     if target_audio.shape[2] != expected_audio_frames:
         raise ValueError(f"MiniMax-H3 audio VAE returned {target_audio.shape[2]} frames, expected {expected_audio_frames}")
 
-    tensors = {
-        _visual_key("", target_video): target_video,
-        _audio_key("", target_audio): target_audio,
-    }
-    append_audio_present_entry(tensors, audio_present)
+    visual_conditions: dict[str, torch.Tensor] = {}
+    audio_conditions: dict[str, torch.Tensor] = {}
     if task == "fl2va":
-        for role, frame in (("first", target_frames[:1]), ("last", target_frames[-1:])):
-            condition = _encode_condition_video(video_vae, prepare_pixels(frame))[0]
-            tensors[_visual_key(role, condition)] = condition
+        for role, frame in zip(FL_CONDITION_ROLES, (target_frames[:1], target_frames[-1:])):
+            visual_conditions[role] = _encode_condition_video(video_vae, prepare_pixels(frame))[0]
     elif task == "ref2va":
         _encode_reference_conditions(
-            tensors,
+            visual_conditions,
+            audio_conditions,
             record=record,
             reference_frame_cap=frame_count,
             target_size=(width, height),
@@ -255,11 +263,19 @@ def build_latent_tensors(
         audio_vae_fingerprint=audio_vae_fingerprint,
         media_fingerprints=media_fingerprints,
     )
-    return H3LatentCachePayload(tensors=tensors, metadata=metadata)
+    return H3LatentCachePayload(
+        target_video=target_video,
+        target_audio=target_audio,
+        audio_present=audio_present,
+        metadata=metadata,
+        visual_conditions=visual_conditions,
+        audio_conditions=audio_conditions,
+    )
 
 
 def _encode_reference_conditions(
-    tensors: dict[str, torch.Tensor],
+    visual_conditions: dict[str, torch.Tensor],
+    audio_conditions: dict[str, torch.Tensor],
     *,
     record: H3Record,
     reference_frame_cap: int,
@@ -277,7 +293,6 @@ def _encode_reference_conditions(
     one-frame targets do not have (callers reject them first).
     """
     for index, reference in enumerate(record.references):
-        role_prefix = f"ref_{index:03d}"
         visual_frames = None
         if reference.type in {"image", "video"}:
             visual_frames = media_decoder.decode_reference_visual(
@@ -287,8 +302,8 @@ def _encode_reference_conditions(
             )
             if reference.type == "video":
                 video_latent_frames(visual_frames.shape[0])
-            condition = _encode_condition_video(video_vae, prepare_pixels(visual_frames))[0]
-            tensors[_visual_key(f"{role_prefix}_{reference.type}", condition)] = condition
+            role = reference_condition_role(index, reference.type)
+            visual_conditions[role] = _encode_condition_video(video_vae, prepare_pixels(visual_frames))[0]
 
         if reference.audio is not None:
             if reference.type == "video":
@@ -306,8 +321,7 @@ def _encode_reference_conditions(
                 sample_count=reference_samples,
                 require_exact=require_exact,
             )
-            audio_latent = _encode_audio(audio_vae, waveform)[0]
-            tensors[_audio_key(f"{role_prefix}_audio", audio_latent)] = audio_latent
+            audio_conditions[reference_condition_role(index, "audio")] = _encode_audio(audio_vae, waveform)[0]
 
 
 def encode_one_frame_silence_latent(audio_vae) -> torch.Tensor:
@@ -383,6 +397,8 @@ def build_one_frame_latent_tensors(
             raise ValueError(
                 f"MiniMax-H3 one-frame control count {len(control_frames)} does not match {len(control_indices)} control indices"
             )
+        if any(int(index) < 0 for index in control_indices):
+            raise ValueError(f"MiniMax-H3 one-frame control indices must be nonnegative, got {list(control_indices)}")
 
     target_pixels = prepare_pixels(image_frames)
     canonical_item_key = f"{item_key}#1f"
@@ -390,13 +406,10 @@ def build_one_frame_latent_tensors(
     if target_video.shape[1] != ONE_FRAME_VIDEO_LATENT_FRAMES:
         raise ValueError(f"MiniMax-H3 video VAE returned {target_video.shape[1]} frames, expected {ONE_FRAME_VIDEO_LATENT_FRAMES}")
 
-    tensors = {
-        _visual_key("", target_video): target_video,
-        _audio_key("", silence_audio_latent): silence_audio_latent,
-    }
+    visual_conditions: dict[str, torch.Tensor] = {}
+    audio_conditions: dict[str, torch.Tensor] = {}
     if control_frames is not None:
         for index, control in enumerate(control_frames):
-            role = one_frame_condition_role(index)
             control = torch.as_tensor(control)
             if control.ndim != 3:
                 raise ValueError(f"MiniMax-H3 one-frame control must be [H,W,C], got {tuple(control.shape)}")
@@ -405,11 +418,12 @@ def build_one_frame_latent_tensors(
                     f"MiniMax-H3 one-frame control size {control.shape[1]}x{control.shape[0]} does not match"
                     f" the target {width}x{height} (controls are resized to the bucket resolution)"
                 )
-            condition = _encode_condition_video(video_vae, prepare_pixels(control.unsqueeze(0)))[0]
-            tensors[_visual_key(role, condition)] = condition
+            role = one_frame_condition_role(index)
+            visual_conditions[role] = _encode_condition_video(video_vae, prepare_pixels(control.unsqueeze(0)))[0]
     if references:
         _encode_reference_conditions(
-            tensors,
+            visual_conditions,
+            audio_conditions,
             record=record,
             reference_frame_cap=ONE_FRAME_REFERENCE_FRAME_CAP,
             target_size=(int(width), int(height)),
@@ -418,10 +432,6 @@ def build_one_frame_latent_tensors(
             audio_vae=audio_vae,
             media_decoder=media_decoder,
         )
-    append_audio_present_entry(tensors, False)
-    append_one_frame_target_index_entry(tensors, target_index)
-    if control_indices is not None:
-        append_one_frame_control_indices_entry(tensors, list(control_indices))
 
     if references:
         task: H3Task = "ref2va"
@@ -439,7 +449,16 @@ def build_one_frame_latent_tensors(
         one_frame_target_index=target_index,
         one_frame_control_indices=control_indices,
     )
-    return H3LatentCachePayload(tensors=tensors, metadata=metadata)
+    return H3LatentCachePayload(
+        target_video=target_video,
+        target_audio=silence_audio_latent,
+        audio_present=False,
+        metadata=metadata,
+        visual_conditions=visual_conditions,
+        audio_conditions=audio_conditions,
+        one_frame_target_index=target_index,
+        one_frame_control_indices=None if control_indices is None else tuple(int(index) for index in control_indices),
+    )
 
 
 def record_media_paths(record: H3Record) -> set[Path]:
@@ -660,7 +679,7 @@ def main() -> None:
             media_decoder=decoder,
         )
         logger.info("Saving MiniMax-H3 one-frame latent cache for %s to %s", item.item_key, item.latent_cache_path)
-        save_latent_cache_minimax_h3(item, payload.tensors, payload.metadata)
+        payload.save(item)
 
     def encode_video(item: ItemInfo, plan: H3DatasetPlan) -> None:
         inputs = video_inputs(item, plan)
@@ -682,7 +701,7 @@ def main() -> None:
             allow_experimental_duration=args.allow_experimental_duration,
         )
         logger.info("Saving MiniMax-H3 latent cache for %s to %s", item.item_key, item.latent_cache_path)
-        save_latent_cache_minimax_h3(item, payload.tensors, payload.metadata)
+        payload.save(item)
 
     def encode(batch: list[ItemInfo]) -> None:
         for item in batch:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -43,7 +42,9 @@ from musubi_tuner.minimax_h3.media import (
 )
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
+    FL_CONDITION_ROLES,
     FRAME_RESCALE,
+    H3ConditionRole,
     H3PackedLayout,
     H3ReferenceGeometry,
     H3TimeOverrides,
@@ -52,6 +53,7 @@ from musubi_tuner.minimax_h3.packing import (
     ONE_FRAME_VIDEO_LATENT_FRAMES,
     build_h3_layout,
     one_frame_condition_roles,
+    parse_condition_role,
 )
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
@@ -84,9 +86,6 @@ from musubi_tuner.utils import model_utils
 logger = logging.getLogger(__name__)
 
 
-_RUNTIME_REF_KEY = re.compile(r"^latents_ref_(\d{3})_(image|video|audio)$")
-# one-frame FL2VA condition latents (ordered cond_{i} slots); video FL2VA caches use latents_first/last
-_RUNTIME_COND_KEY = re.compile(r"^latents_cond_(\d{3})$")
 # validated --h3_teacher_condition_sigma_max for the endpoint (first,last) and clip (ref) teachers:
 # above it the conditioned content is unpredictable from the text (and the FL2VA weights stop
 # aligning a reference near ~0.85), so the band is better spent as a base-preservation anchor
@@ -304,9 +303,23 @@ def _warn_once_coinciding_indices(control_indices: list[int], target_index: int)
     )
 
 
-def _one_frame_condition_roles_in(batch: Mapping[str, Any]) -> tuple[str, ...]:
-    """The ordered cond_{i} roles whose latents the batch carries (empty for video FL2VA caches)."""
-    indices = sorted(int(match.group(1)) for key in batch if (match := _RUNTIME_COND_KEY.fullmatch(key)) is not None)
+def _condition_roles_in(batch: Mapping[str, Any]) -> dict[str, H3ConditionRole]:
+    """The condition latents the batch carries, keyed by role: every `latents_<role>` entry other
+    than the targets (`latents`, `latents_audio`), parsed with the packing vocabulary."""
+    roles = {}
+    for key in batch:
+        if key.startswith("latents_") and key != "latents_audio":
+            role = key.removeprefix("latents_")
+            try:
+                roles[role] = parse_condition_role(role)
+            except ValueError as error:
+                raise ValueError(f"MiniMax-H3 batch entry {key} is neither a target nor a known condition latent") from error
+    return roles
+
+
+def _one_frame_condition_roles_in(condition_roles: Mapping[str, H3ConditionRole]) -> tuple[str, ...]:
+    """The ordered cond_{i} roles among the batch's conditions (empty for video FL2VA caches)."""
+    indices = sorted(role.index for role in condition_roles.values() if role.family == "one_frame")
     if indices and indices != list(range(len(indices))):
         raise ValueError(f"MiniMax-H3 one-frame FL2VA condition latents must be the contiguous cond_000..., got {indices}")
     return one_frame_condition_roles(len(indices))
@@ -320,8 +333,9 @@ def _collect_fl_conditions(
     *,
     one_frame: bool = False,
 ) -> tuple[str, ...]:
-    fl_roles = tuple(role for role in ("first", "last") if f"latents_{role}" in batch)
-    cond_roles = _one_frame_condition_roles_in(batch)
+    condition_roles = _condition_roles_in(batch)
+    fl_roles = tuple(role for role in FL_CONDITION_ROLES if role in condition_roles)
+    cond_roles = _one_frame_condition_roles_in(condition_roles)
     if one_frame:
         # one-frame conditions are the ordered cond_{i} slots; their temporal positions are
         # carried by one_frame_control_indices, not by role names
@@ -334,7 +348,7 @@ def _collect_fl_conditions(
     else:
         if cond_roles:
             raise ValueError("MiniMax-H3 video FL2VA batch cannot carry one-frame cond_ condition latents; re-run latent caching")
-        if fl_roles != ("first", "last"):
+        if fl_roles != FL_CONDITION_ROLES:
             raise ValueError("MiniMax-H3 FL2VA batch requires both first and last conditions")
         roles = fl_roles
     for role in roles:
@@ -438,7 +452,8 @@ def _runtime_batch_plan(
         raise ValueError("MiniMax-H3 hidden states and token tags must share [B,L]")
     if token_tags.dtype != torch.int64 or not torch.all((token_tags == 0) | (token_tags == 1)):
         raise ValueError("MiniMax-H3 text token tags must be int64 values 0 or 1")
-    has_fl_condition = "latents_first" in batch or "latents_last" in batch or any(_RUNTIME_COND_KEY.fullmatch(key) for key in batch)
+    condition_roles = _condition_roles_in(batch)
+    has_fl_condition = any(role.family in {"fl", "one_frame"} for role in condition_roles.values())
     has_fl_teacher_text = "mmh3_teacher_hidden_states" in batch or "mmh3_teacher_token_tags" in batch
     has_ref_teacher_text = "mmh3_teacher_ref_hidden_states" in batch or "mmh3_teacher_ref_token_tags" in batch
     has_subject_ref_teacher_text = (
@@ -467,13 +482,14 @@ def _runtime_batch_plan(
                 f" --h3_teacher_conditions {teacher_conditions};"
                 f" re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions {teacher_conditions}"
             )
-    reference_roles = {}
-    for key, value in batch.items():
-        match = _RUNTIME_REF_KEY.fullmatch(key)
-        if match is not None:
-            if not isinstance(value, torch.Tensor):
-                raise ValueError(f"MiniMax-H3 condition {key} must be a tensor")
-            reference_roles.setdefault(int(match.group(1)), {})[match.group(2)] = value
+    reference_roles: dict[int, dict[str, torch.Tensor]] = {}
+    for name, role in condition_roles.items():
+        if role.family != "reference":
+            continue
+        value = batch[f"latents_{name}"]
+        if not isinstance(value, torch.Tensor):
+            raise ValueError(f"MiniMax-H3 condition latents_{name} must be a tensor")
+        reference_roles.setdefault(role.index, {})[role.reference_kind] = value
     if has_fl_condition and reference_roles:
         raise ValueError("MiniMax-H3 batch cannot mix FL2VA and Ref2VA condition roles")
 

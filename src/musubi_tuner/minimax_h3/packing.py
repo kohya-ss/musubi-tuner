@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -37,6 +38,17 @@ FRAME_RESCALE = 5.0 / 3.0
 
 H3ReferenceKind = Literal["image", "audio", "video"]
 H3SegmentKind = Literal["text", "visual_condition", "audio_condition", "target_audio", "target_video"]
+H3ConditionFamily = Literal["fl", "one_frame", "reference"]
+
+# Condition role vocabulary. A role names one condition block of a layout and, prefixed with
+# `latents_`, the cache/batch entry that carries its latent (see dataset/cache_io.py):
+# - the released video FL2VA anchors `first` / `last` (the name selects the anchor time)
+# - the ordered one-frame FL2VA slots `cond_{i:03d}` (times come from the control indices)
+# - the numbered Ref2VA reference rows `ref_{i:03d}_{image|video|audio}`
+FL_CONDITION_ROLES: tuple[str, ...] = ("first", "last")
+REFERENCE_KINDS: tuple[H3ReferenceKind, ...] = ("image", "video", "audio")
+_ONE_FRAME_CONDITION_ROLE = re.compile(r"^cond_(\d{3})$")
+_REFERENCE_CONDITION_ROLE = re.compile(r"^ref_(\d{3})_(image|video|audio)$")
 
 
 @dataclass(frozen=True)
@@ -101,6 +113,49 @@ def one_frame_condition_role(index: int) -> str:
 
 def one_frame_condition_roles(count: int) -> tuple[str, ...]:
     return tuple(one_frame_condition_role(index) for index in range(count))
+
+
+def reference_condition_role(index: int, kind: H3ReferenceKind) -> str:
+    """Role of the index-th Ref2VA reference's ``kind`` rows (``ref_000_image``, ``ref_001_audio``, ...).
+
+    A video reference with audio owns two roles (``_video`` and ``_audio``) under one index.
+    """
+    if index < 0:
+        raise ValueError(f"MiniMax-H3 reference index must be nonnegative, got {index}")
+    if kind not in REFERENCE_KINDS:
+        raise ValueError(f"Unsupported MiniMax-H3 reference kind: {kind}")
+    return f"ref_{index:03d}_{kind}"
+
+
+@dataclass(frozen=True)
+class H3ConditionRole:
+    """A parsed condition role name (see the vocabulary above).
+
+    ``index`` is the one-frame slot or reference number (None for the ``first``/``last``
+    anchors); ``reference_kind`` is the reference row type (None outside the reference family).
+    """
+
+    name: str
+    family: H3ConditionFamily
+    index: int | None = None
+    reference_kind: H3ReferenceKind | None = None
+
+    @property
+    def is_audio(self) -> bool:
+        return self.reference_kind == "audio"
+
+
+def parse_condition_role(role: str) -> H3ConditionRole:
+    """Parses a condition role name; raises ValueError for anything outside the vocabulary."""
+    if role in FL_CONDITION_ROLES:
+        return H3ConditionRole(role, "fl")
+    match = _ONE_FRAME_CONDITION_ROLE.fullmatch(role)
+    if match is not None:
+        return H3ConditionRole(role, "one_frame", index=int(match.group(1)))
+    match = _REFERENCE_CONDITION_ROLE.fullmatch(role)
+    if match is not None:
+        return H3ConditionRole(role, "reference", index=int(match.group(1)), reference_kind=match.group(2))
+    raise ValueError(f"Unsupported MiniMax-H3 condition role: {role}")
 
 
 @dataclass(frozen=True)
@@ -368,15 +423,14 @@ def build_h3_layout(
             append(role, "visual_condition", condition.row_count)
     elif task == "ref2va":
         for index, reference in enumerate(references):
-            prefix = f"ref_{index:03d}"
             if reference.kind == "image":
-                append(f"{prefix}_image", "visual_condition", reference.video.row_count)
+                append(reference_condition_role(index, "image"), "visual_condition", reference.video.row_count)
             elif reference.kind == "audio":
-                append(f"{prefix}_audio", "audio_condition", reference.audio_frames * STEREO_CHANNELS)
+                append(reference_condition_role(index, "audio"), "audio_condition", reference.audio_frames * STEREO_CHANNELS)
             else:
                 if reference.audio_frames:
-                    append(f"{prefix}_audio", "audio_condition", reference.audio_frames * STEREO_CHANNELS)
-                append(f"{prefix}_video", "visual_condition", reference.video.row_count)
+                    append(reference_condition_role(index, "audio"), "audio_condition", reference.audio_frames * STEREO_CHANNELS)
+                append(reference_condition_role(index, "video"), "visual_condition", reference.video.row_count)
     append("target_audio", "target_audio", target_audio_frames * STEREO_CHANNELS)
     append("target_video", "target_video", target_video.row_count)
 
@@ -399,9 +453,9 @@ def _fl_condition_roles(condition_roles: Sequence[str] | None, condition_count: 
     if condition_roles is None:
         if condition_count != 2:
             raise ValueError("MiniMax-H3 FL2VA layout with a single condition requires explicit condition roles")
-        return ("first", "last")
+        return FL_CONDITION_ROLES
     roles = tuple(condition_roles)
-    if roles not in {("first",), ("last",), ("first", "last")}:
+    if roles not in {("first",), ("last",), FL_CONDITION_ROLES}:
         raise ValueError(f"MiniMax-H3 FL2VA condition roles must be first, last, or first+last in order, got {roles}")
     if len(roles) != condition_count:
         raise ValueError(f"MiniMax-H3 FL2VA layout has {condition_count} conditions for {len(roles)} roles")
@@ -469,28 +523,27 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
             positions[segment.row_slice, 1:] = target_frame
     elif layout.task == "ref2va":
         for index, reference in enumerate(layout.references):
-            prefix = f"ref_{index:03d}"
             if reference.kind == "image":
-                segment = layout.segment(f"{prefix}_image")
+                segment = layout.segment(reference_condition_role(index, "image"))
                 frame, _ = _frame_grid(reference.video)
                 positions[segment.row_slice, 0] = cursor
                 positions[segment.row_slice, 1:] = frame
                 cursor += 1.0
             elif reference.kind == "audio":
-                segment = layout.segment(f"{prefix}_audio")
+                segment = layout.segment(reference_condition_role(index, "audio"))
                 positions[segment.row_slice] = _audio_grid(cursor, reference.audio_frames, *target_width_endpoints)
                 cursor += float(reference.audio_frames)
             else:
                 frame, width = _frame_grid(reference.video)
                 if reference.audio_frames:
-                    audio = layout.segment(f"{prefix}_audio")
+                    audio = layout.segment(reference_condition_role(index, "audio"))
                     positions[audio.row_slice] = _audio_grid(
                         cursor,
                         reference.audio_frames,
                         float(width[0]),
                         float(width[-1]),
                     )
-                video = layout.segment(f"{prefix}_video")
+                video = layout.segment(reference_condition_role(index, "video"))
                 positions[video.row_slice] = _video_grid(reference.video, cursor)
                 cursor += max(float(reference.audio_frames), sum(_video_t_spans(reference.video.frames)))
 

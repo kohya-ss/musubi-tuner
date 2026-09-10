@@ -9,19 +9,85 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.packing import (
+    FL_CONDITION_ROLES,
     FRAME_RESCALE,
     ONE_FRAME_AUDIO_LATENT_FRAMES,
     ONE_FRAME_VIDEO_LATENT_FRAMES,
+    H3ConditionRole,
     H3ReferenceGeometry,
     H3TimeOverrides,
     H3VideoGeometry,
     build_h3_layout,
     build_position_grid,
     build_timestep_rows,
+    one_frame_condition_role,
     pack_audio_rows,
     pack_video_rows,
+    parse_condition_role,
+    reference_condition_role,
     unpack_targets,
 )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("first", H3ConditionRole("first", "fl")),
+        ("last", H3ConditionRole("last", "fl")),
+        ("cond_000", H3ConditionRole("cond_000", "one_frame", index=0)),
+        ("cond_012", H3ConditionRole("cond_012", "one_frame", index=12)),
+        ("ref_000_image", H3ConditionRole("ref_000_image", "reference", index=0, reference_kind="image")),
+        ("ref_003_video", H3ConditionRole("ref_003_video", "reference", index=3, reference_kind="video")),
+        ("ref_003_audio", H3ConditionRole("ref_003_audio", "reference", index=3, reference_kind="audio")),
+    ],
+)
+def test_condition_roles_parse_the_cache_vocabulary(role: str, expected: H3ConditionRole):
+    parsed = parse_condition_role(role)
+
+    assert parsed == expected
+    assert parsed.is_audio == (role == "ref_003_audio")
+
+
+@pytest.mark.parametrize("role", ["", "audio", "cond_0", "cond_0000", "ref_000", "ref_000_text", "ref_00_image", "First"])
+def test_condition_roles_reject_names_outside_the_vocabulary(role: str):
+    with pytest.raises(ValueError, match="Unsupported MiniMax-H3 condition role"):
+        parse_condition_role(role)
+
+
+def test_condition_role_builders_round_trip_through_the_parser():
+    assert FL_CONDITION_ROLES == ("first", "last")
+    assert one_frame_condition_role(7) == "cond_007"
+    assert reference_condition_role(2, "audio") == "ref_002_audio"
+    for role in (*FL_CONDITION_ROLES, one_frame_condition_role(7), reference_condition_role(2, "audio")):
+        assert parse_condition_role(role).name == role
+    with pytest.raises(ValueError, match="nonnegative"):
+        reference_condition_role(-1, "image")
+    with pytest.raises(ValueError, match="reference kind"):
+        reference_condition_role(0, "text")
+
+
+def test_layout_segments_use_the_reference_condition_roles():
+    layout = build_h3_layout(
+        task="ref2va",
+        text_length=3,
+        target_video=TARGET_VIDEO,
+        target_audio_frames=8,
+        references=(
+            H3ReferenceGeometry("image", video=H3VideoGeometry(1, 2, 2)),
+            H3ReferenceGeometry("video", video=H3VideoGeometry(2, 2, 2), audio_frames=8),
+            H3ReferenceGeometry("audio", audio_frames=4),
+        ),
+    )
+
+    assert [segment.role for segment in layout.segments] == [
+        "text",
+        reference_condition_role(0, "image"),
+        reference_condition_role(1, "audio"),
+        reference_condition_role(1, "video"),
+        reference_condition_role(2, "audio"),
+        "target_audio",
+        "target_video",
+    ]
 
 
 TARGET_VIDEO = H3VideoGeometry(frames=2, height=4, width=4)
