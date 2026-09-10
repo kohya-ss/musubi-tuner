@@ -25,11 +25,16 @@ from musubi_tuner.minimax_h3.sampling import (
     sample_joint_av,
     write_joint_av,
 )
-from musubi_tuner.minimax_h3.generation_inputs import load_generation_record, load_image_frames, parse_one_frame_options
+from musubi_tuner.minimax_h3.generation_inputs import (
+    H3GenerationRequest,
+    load_generation_record,
+    load_image_frames,
+    one_frame_time_overrides,
+    parse_one_frame_options,
+)
 from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3TimeOverrides
 from musubi_tuner.minimax_h3.sampling import write_image
 from musubi_tuner.minimax_h3_generate_video import (
-    _one_frame_time_overrides,
     load_cached_text_conditioning,
     setup_parser,
     validate_generation_args,
@@ -320,7 +325,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "reference_jsonl": None,
         "reference_index": 0,
         "ref": None,
-        "one_frame": None,
+        "one_frame_inference": None,
         "width": 64,
         "height": 64,
         "frame_count": 124,
@@ -369,25 +374,32 @@ def test_generation_validation_enforces_task_inputs_and_block_swap_range(tmp_pat
 
 
 def test_generation_validation_accepts_inline_refs_exclusively_with_reference_jsonl(tmp_path):
-    validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"]))
+    face = tmp_path / "face.png"
+    face.touch()
+    validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[str(face)]))
+    # the specs are parsed (existence, limits) at validation, before any model loads
+    with pytest.raises(ValueError, match="does not exist"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[str(tmp_path / "missing.png")]))
+    with pytest.raises(ValueError, match="non-empty strings"):
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[" "]))
 
     jsonl = tmp_path / "refs.jsonl"
     jsonl.touch()
     with pytest.raises(ValueError, match="exactly one of"):
-        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_jsonl=str(jsonl)))
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[str(face)], reference_jsonl=str(jsonl)))
     with pytest.raises(ValueError, match="requires --prompt"):
-        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], prompt=None))
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[str(face)], prompt=None))
     with pytest.raises(ValueError, match="reference_index"):
-        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=["face.png"], reference_index=1))
+        validate_generation_args(_generation_args(tmp_path, task="ref2va", ref=[str(face)], reference_index=1))
     with pytest.raises(ValueError, match="T2VA does not accept"):
-        validate_generation_args(_generation_args(tmp_path, task="t2va", ref=["face.png"]))
+        validate_generation_args(_generation_args(tmp_path, task="t2va", ref=[str(face)]))
     first = tmp_path / "first.png"
     last = tmp_path / "last.png"
     first.touch()
     last.touch()
     with pytest.raises(ValueError, match="FL2VA does not accept"):
         validate_generation_args(
-            _generation_args(tmp_path, task="fl2va", first_frame=str(first), last_frame=str(last), ref=["face.png"])
+            _generation_args(tmp_path, task="fl2va", first_frame=str(first), last_frame=str(last), ref=[str(face)])
         )
 
 
@@ -416,14 +428,12 @@ def test_load_generation_record_builds_inline_ref_records_without_a_jsonl(tmp_pa
     style.touch()
 
     record = load_generation_record(
-        SimpleNamespace(
+        H3GenerationRequest(
             task="ref2va",
             prompt="a cat sings",
             ref=["refs/face.png", "refs/style.webp"],
-            reference_jsonl=None,
-            reference_index=0,
-        ),
-        ref_base_directory=str(tmp_path),
+            ref_base_directory=tmp_path,
+        )
     )
 
     assert record.caption == "a cat sings"
@@ -448,28 +458,28 @@ def test_parse_one_frame_options_accepts_indices_and_rejects_malformed_specs():
 
 
 def test_one_frame_time_overrides_map_pixel_frame_indices_to_rotary_units():
-    args = SimpleNamespace(frame_count=1, one_frame="target_index=24,control_index=0;240")
-    assert _one_frame_time_overrides(args) == H3TimeOverrides(
+    request = H3GenerationRequest(task="t2va", frame_count=1, one_frame_inference="target_index=24,control_index=0;240")
+    assert one_frame_time_overrides(request) == H3TimeOverrides(
         condition_times=(0.0, FRAME_RESCALE * 240),
         target_time=FRAME_RESCALE * 24,
     )
 
-    defaults = _one_frame_time_overrides(SimpleNamespace(frame_count=1, one_frame=None))
+    defaults = one_frame_time_overrides(H3GenerationRequest(task="t2va", frame_count=1))
     assert defaults == H3TimeOverrides(condition_times=(), target_time=0.0)
-    assert _one_frame_time_overrides(SimpleNamespace(frame_count=124, one_frame=None)) is None
+    assert one_frame_time_overrides(H3GenerationRequest(task="t2va", frame_count=124)) is None
 
 
 def test_generation_validation_gates_the_one_frame_mode(tmp_path):
     png = str(tmp_path / "output.png")
     validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png))
-    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="target_index=240"))
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame_inference="target_index=240"))
 
     with pytest.raises(ValueError, match="must use .png"):
         validate_generation_args(_generation_args(tmp_path, frame_count=1))
     with pytest.raises(ValueError, match="require --frame_count 1"):
-        validate_generation_args(_generation_args(tmp_path, one_frame="target_index=1"))
+        validate_generation_args(_generation_args(tmp_path, one_frame_inference="target_index=1"))
     with pytest.raises(ValueError, match="control_index applies only to FL2VA"):
-        validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame="control_index=0"))
+        validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame_inference="control_index=0"))
 
     first = tmp_path / "first.png"
     first.touch()
@@ -480,7 +490,7 @@ def test_generation_validation_gates_the_one_frame_mode(tmp_path):
             frame_count=1,
             output=png,
             first_frame=str(first),
-            one_frame="target_index=24,control_index=0",
+            one_frame_inference="target_index=24,control_index=0",
         )
     )
     with pytest.raises(ValueError, match="one entry per condition image"):
@@ -493,11 +503,13 @@ def test_generation_validation_gates_the_one_frame_mode(tmp_path):
                 frame_count=1,
                 output=png,
                 first_frame=str(first),
-                one_frame="control_index=0;240",
+                one_frame_inference="control_index=0;240",
             )
         )
     with pytest.raises(ValueError, match="requires --first_frame and/or --last_frame"):
-        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame="control_index=0"))
+        validate_generation_args(
+            _generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame_inference="control_index=0")
+        )
 
 
 def test_mux_encodes_above_the_1mbps_pyav_default(tmp_path):
@@ -559,7 +571,7 @@ def test_cached_text_conditioning_validates_task_format_and_fingerprint(tmp_path
 
     assert actual_hidden.shape == (1, 3, 5120)
     assert actual_hidden.dtype == torch.bfloat16
-    assert torch.equal(actual_tags, tags)
+    assert torch.equal(actual_tags, tags.unsqueeze(0))
     with pytest.raises(ValueError, match=r"task.*ref2va.*t2va"):
         load_cached_text_conditioning(path, task="ref2va")
     with pytest.raises(ValueError, match="presentation fingerprint"):
@@ -665,7 +677,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     monkeypatch.setattr(
         generate,
         "_encode_text",
-        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(1, 3, dtype=torch.int64)),
     )
     monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
     monkeypatch.setattr(
@@ -753,7 +765,7 @@ def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tm
     monkeypatch.setattr(
         generate,
         "_encode_text",
-        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+        lambda *unused: (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(1, 3, dtype=torch.int64)),
     )
     monkeypatch.setattr(generate, "load_h3_transformer", lambda *unused, **kwargs: Transformer())
     monkeypatch.setattr(generate, "load_video_vae", lambda *unused, **kwargs: VideoVAE())

@@ -31,7 +31,9 @@ from musubi_tuner.minimax_h3.text_encoder import (
     wrap_subject_reference_caption,
 )
 from musubi_tuner.minimax_h3.packing import one_frame_condition_role
+from musubi_tuner.minimax_h3.args import add_h3_text_encoder_args
 from musubi_tuner.minimax_h3.media import (
+    H3_TASKS,
     ONE_FRAME_REFERENCE_FRAME_CAP,
     TEXT_VISUAL_FPS,
     TEXT_VISUAL_FRAME_STRIDE,
@@ -240,32 +242,8 @@ def _cache_dtype(name: str) -> torch.dtype:
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = cache_text_encoder_outputs.setup_parser_common()
-    parser.add_argument(
-        "--text_encoder",
-        type=str,
-        required=True,
-        help="MiniMax-H3 Qwen3-VL safetensors (BF16, ConvRot INT8 or NVFP4, auto-detected)",
-    )
-    parser.add_argument(
-        "--nvfp4_scaled_mm",
-        action="store_true",
-        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
-    )
-    parser.add_argument(
-        "--text_encoder_blocks_to_swap",
-        type=int,
-        default=0,
-        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
-        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
-    )
-    parser.add_argument(
-        "--text_encoder_attn_mode",
-        choices=("sdpa", "flash_attention_2", "eager"),
-        default=None,
-        help="attention implementation for the text encoder (default: transformers default, sdpa)."
-        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
-    )
-    parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
+    add_h3_text_encoder_args(parser, required=True)
+    parser.add_argument("--task", choices=H3_TASKS, required=True)
     parser.add_argument(
         "--one_frame",
         action="store_true",

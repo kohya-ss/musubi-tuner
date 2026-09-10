@@ -8,7 +8,7 @@ import logging
 import random
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -17,44 +17,43 @@ from safetensors.torch import load_file, save_file
 import torch
 from tqdm.auto import tqdm
 
+from musubi_tuner.minimax_h3.args import add_h3_sampling_args, add_h3_text_encoder_args, add_h3_vae_args
 from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
+    DEFAULT_FRAME_COUNT,
+    DEFAULT_HEIGHT,
+    DEFAULT_STEPS,
+    DEFAULT_WIDTH,
     VIDEO_VAE_SPATIAL_RATIO,
+    H3GenerationRequest,
+    build_generation_layout,
     build_reference_geometries,
     decode_generation_visuals,
     encode_audio_conditions,
     encode_visual_conditions,
     fl_condition_entries,
     load_generation_record,
-    parse_one_frame_options,
+    reference_video_frame_counts,
+    request_from_args,
+    request_overrides,
+    require_path,
+    validate_generation_request,
 )
 from musubi_tuner.minimax_h3.media import (
+    H3_TASKS,
     TARGET_FPS,
     H3Record,
     PyAVH3MediaDecoder,
-    audio_latent_frames,
     fingerprint_file,
     reject_one_frame_audio_references,
-    video_latent_frames,
 )
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
-from musubi_tuner.minimax_h3.model import MiniMaxH3Config, load_h3_transformer
-from musubi_tuner.minimax_h3.packing import (
-    FRAME_RESCALE,
-    ONE_FRAME_AUDIO_LATENT_FRAMES,
-    ONE_FRAME_VIDEO_LATENT_FRAMES,
-    H3TimeOverrides,
-    H3VideoGeometry,
-    build_h3_layout,
-)
+from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.sampling import (
-    augment_condition_latents,
     build_shifted_schedule,
-    create_sampling_generator,
     decoded_video_to_uint8,
-    initialize_target_latents,
-    sample_joint_av,
+    sample_joint_av_latents,
     synchronize_decoded_av,
     write_audio_wav,
     write_image,
@@ -74,6 +73,7 @@ from musubi_tuner.minimax_h3.text_encoder import (
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_ENCODE_DTYPE, load_video_vae
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
+from musubi_tuner.training.sampling_prompts import line_to_prompt_dict
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 from musubi_tuner.utils.model_utils import compile_transformer, setup_parser_compile
@@ -89,25 +89,6 @@ TEXT_CONDITIONING_CACHE_ENTRIES = 16
 
 def _time_flag() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
-
-
-def _one_frame_time_overrides(args: argparse.Namespace) -> H3TimeOverrides | None:
-    if args.frame_count != 1:
-        return None
-    target_index, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
-    return H3TimeOverrides(
-        condition_times=tuple(FRAME_RESCALE * index for index in (control_indices or ())),
-        target_time=FRAME_RESCALE * target_index,
-    )
-
-
-def _require_path(value: str | None, label: str) -> Path:
-    if not value:
-        raise ValueError(f"MiniMax-H3 generation requires --{label}")
-    path = Path(value).expanduser()
-    if not path.exists():
-        raise ValueError(f"MiniMax-H3 --{label} does not exist: {path}")
-    return path
 
 
 def _output_is_directory(raw_output: str) -> bool:
@@ -142,16 +123,16 @@ def validate_session_args(args: argparse.Namespace) -> None:
         if args.output_type not in ("video", "images"):
             raise ValueError("MiniMax-H3 --latent_path decoding supports --output_type video or images only")
         for path in args.latent_path:
-            _require_path(path, "latent_path")
-        _require_path(args.video_vae, "video_vae")
+            require_path(path, "latent_path")
+        require_path(args.video_vae, "video_vae")
         return
 
     if not args.task:
         raise ValueError("MiniMax-H3 generation requires --task")
-    if args.task not in {"t2va", "fl2va", "ref2va"}:
-        raise ValueError("MiniMax-H3 --task must be t2va, fl2va, or ref2va")
+    if args.task not in H3_TASKS:
+        raise ValueError(f"MiniMax-H3 --task must be one of {', '.join(H3_TASKS)}")
     for label, value in (("dit", args.dit), ("video_vae", args.video_vae), ("audio_vae", args.audio_vae)):
-        _require_path(value, label)
+        require_path(value, label)
 
     multi_prompt = bool(args.interactive) or bool(args.from_file)
     if multi_prompt:
@@ -159,79 +140,32 @@ def validate_session_args(args: argparse.Namespace) -> None:
             raise ValueError("MiniMax-H3 --interactive and --from_file do not accept --text_cache")
         if args.trajectory_dir:
             raise ValueError("MiniMax-H3 --interactive and --from_file do not accept --trajectory_dir")
-        _require_path(args.text_encoder, "text_encoder")
+        require_path(args.text_encoder, "text_encoder")
     else:
         if args.text_cache is not None:
-            _require_path(args.text_cache, "text_cache")
+            require_path(args.text_cache, "text_cache")
         else:
-            _require_path(args.text_encoder, "text_encoder")
+            require_path(args.text_encoder, "text_encoder")
     if args.from_file:
-        _require_path(args.from_file, "from_file")
+        require_path(args.from_file, "from_file")
 
     if not 0 <= args.blocks_to_swap <= 48:
         raise ValueError("MiniMax-H3 --blocks_to_swap must be between 0 and 48")
 
     lora_weights = args.lora_weight or []
     for path in lora_weights:
-        _require_path(path, "lora_weight")
+        require_path(path, "lora_weight")
     if args.lora_multiplier and len(args.lora_multiplier) > len(lora_weights):
         raise ValueError("MiniMax-H3 has more --lora_multiplier values than --lora_weight files")
 
 
-def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = False) -> None:
-    """Validate per-prompt arguments; with directory_output the output path is an auto-named directory."""
-    if args.width <= 0 or args.height <= 0 or args.width % 32 or args.height % 32:
-        raise ValueError(f"MiniMax-H3 width and height must be positive and divisible by 32, got {args.width}x{args.height}")
-    one_frame = args.frame_count == 1
-    # fps above the native rate would let the duration gate admit packed sequences far past
-    # the released maximum (and desynchronize the floored audio count), so the squeeze
-    # direction stays closed until it is validated
-    if not 1 <= args.output_fps <= TARGET_FPS:
-        raise ValueError(f"MiniMax-H3 --output_fps must be in [1,{TARGET_FPS}], got {args.output_fps}")
-    if one_frame and args.output_fps != TARGET_FPS:
-        raise ValueError(f"MiniMax-H3 one-frame generation has no timeline to stretch; --output_fps must stay {TARGET_FPS}")
-    # at least one band must stay on the stretched clock, or the video RoPE silently reverts
-    # to the native timeline while the audio still covers the stretched duration
-    max_keep_bands = MiniMaxH3Config.rope_inv_freq_len - 1
-    if not 0 <= args.stretch_keep_bands <= max_keep_bands:
-        raise ValueError(f"MiniMax-H3 --stretch_keep_bands must be in [0,{max_keep_bands}], got {args.stretch_keep_bands}")
-    if args.stretch_keep_bands and args.output_fps == TARGET_FPS:
-        raise ValueError(f"MiniMax-H3 --stretch_keep_bands requires an --output_fps below {TARGET_FPS}")
-    if one_frame:
-        _, control_indices = parse_one_frame_options(args.one_frame) if args.one_frame else (0, None)
-        if args.task == "fl2va":
-            entries = fl_condition_entries(args)
-            # a missing-images error is raised by the task input checks below
-            if entries and (control_indices is None or len(control_indices) != len(entries)):
-                given = 0 if control_indices is None else len(control_indices)
-                provided = ", ".join(path for _, path in entries)
-                raise ValueError(
-                    "MiniMax-H3 one-frame FL2VA requires --one_frame control_index with one entry per condition image:"
-                    f" got {given} control_index entries for {len(entries)} condition images ({provided}), "
-                    'e.g. --one_frame "target_index=24,control_index=0" for one condition at index 0'
-                )
-        elif control_indices is not None:
-            raise ValueError("MiniMax-H3 --one_frame control_index applies only to FL2VA conditions")
-    else:
-        if args.one_frame is not None:
-            raise ValueError("MiniMax-H3 --one_frame options require --frame_count 1")
-        video_latent_frames(args.frame_count)
-        # with a temporal stretch the rotary timeline spans the real (stretched) duration,
-        # so that is the quantity to hold inside the released range
-        duration = args.frame_count / args.output_fps
-        if not args.allow_experimental_duration and not 5.0 <= duration <= 15.0:
-            raise ValueError(
-                f"MiniMax-H3 duration {duration:.3f}s is outside the released 5-15s range; "
-                "pass --allow_experimental_duration to proceed"
-            )
-    if args.steps <= 0:
-        raise ValueError("MiniMax-H3 --steps must be positive")
-    for label, value in (("h3_shift_video", args.h3_shift_video), ("h3_shift_audio", args.h3_shift_audio)):
-        if not 0.01 <= float(value) <= 100.0:
-            raise ValueError(f"MiniMax-H3 --{label} must be in [0.01,100.0], got {value}")
-    for label, value in (("h3_visual_cond_clean", args.h3_visual_cond_clean), ("h3_audio_cond_clean", args.h3_audio_cond_clean)):
-        if not 0.0 <= float(value) <= 1.0:
-            raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
+def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = False) -> H3GenerationRequest:
+    """Validate the per-prompt arguments and return their generation request; with directory_output
+    the output path is an auto-named directory. The request rules are the shared ones
+    (generation_inputs.validate_generation_request); the output policy is this script's."""
+    request = request_from_args(args)
+    validate_generation_request(request)
+    one_frame = request.one_frame
     if args.output_type in ("images", "latent_images"):
         # --output is a directory holding an auto-named per-generation subdirectory; a
         # media extension signals a video command line reused without adjusting --output
@@ -256,48 +190,15 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
         raise ValueError(f"MiniMax-H3 --trajectory_stride must be at least 1, got {args.trajectory_stride}")
     if args.trajectory_dir and args.output_type == "latent":
         raise ValueError("MiniMax-H3 --trajectory_dir decodes per-step estimates and cannot combine with --output_type latent")
-
-    condition_images = args.condition_image
-    if args.task == "t2va":
-        if not args.prompt:
-            raise ValueError("MiniMax-H3 T2VA requires --prompt")
-        if args.first_frame or args.last_frame or condition_images or args.reference_jsonl or args.ref:
-            raise ValueError("MiniMax-H3 T2VA does not accept condition/first/last/reference inputs")
-    elif args.task == "fl2va":
-        if args.text_cache is not None:
-            raise ValueError("MiniMax-H3 FL2VA generation does not accept --text_cache")
-        if not args.prompt:
-            raise ValueError("MiniMax-H3 FL2VA requires --prompt")
-        if args.reference_jsonl or args.ref:
-            raise ValueError("MiniMax-H3 FL2VA does not accept --reference_jsonl or --ref")
-        entries = fl_condition_entries(args)  # rejects --condition_image for video targets and mixed one-frame inputs
-        if not entries:
-            raise ValueError(
-                "MiniMax-H3 FL2VA requires --first_frame and/or --last_frame"
-                " (first only = I2VA, last only = L2VA; use --task t2va to condition on neither;"
-                " one-frame targets may also take the ordered --condition_image list)"
-            )
-        for label, path in entries:
-            _require_path(path, label)
-    else:
-        if bool(args.reference_jsonl) == bool(args.ref):
-            raise ValueError("MiniMax-H3 Ref2VA requires exactly one of --reference_jsonl or --ref")
-        if args.first_frame or args.last_frame or condition_images:
-            raise ValueError("MiniMax-H3 Ref2VA does not accept --first_frame, --last_frame or --condition_image")
-        if args.ref:
-            if not args.prompt:
-                raise ValueError("MiniMax-H3 Ref2VA with --ref requires --prompt")
-            if args.reference_index:
-                raise ValueError("MiniMax-H3 --reference_index selects a --reference_jsonl record and does not apply to --ref")
-        else:
-            _require_path(args.reference_jsonl, "reference_jsonl")
-            if args.reference_index < 0:
-                raise ValueError("MiniMax-H3 --reference_index must be nonnegative")
+    if request.task == "fl2va" and args.text_cache is not None:
+        # external first/last images cannot be proven identical to the crop presentation of a dataset cache
+        raise ValueError("MiniMax-H3 FL2VA generation does not accept --text_cache")
+    return request
 
 
-def validate_generation_args(args: argparse.Namespace) -> None:
+def validate_generation_args(args: argparse.Namespace) -> H3GenerationRequest:
     validate_session_args(args)
-    validate_prompt_args(args)
+    return validate_prompt_args(args)
 
 
 def load_cached_text_conditioning(
@@ -329,7 +230,7 @@ def load_cached_text_conditioning(
         hidden_states = handle.get_tensor(hidden_keys[0])
         token_tags = handle.get_tensor("varlen_mmh3_token_tags_int64")
     validate_text_rows(hidden_states, token_tags)
-    return hidden_states.unsqueeze(0), token_tags
+    return hidden_states.unsqueeze(0), token_tags.unsqueeze(0)
 
 
 @dataclass
@@ -416,28 +317,29 @@ def _borrowed_audio_vae(args: argparse.Namespace, device: torch.device, shared: 
         clean_memory_on_device(device)
 
 
-def _text_conditioning_cache_key(args: argparse.Namespace, record: H3Record, presentation) -> str:
+def _text_conditioning_cache_key(request: H3GenerationRequest, record: H3Record, presentation) -> str:
     # the presentation fingerprint hashes text and media shapes; media contents enter through
     # per-file fingerprints. FL2VA frames are not record references, so they are added here.
-    if args.task == "fl2va":
-        media_fingerprints = {Path(path): fingerprint_file(path) for _, path in fl_condition_entries(args)}
+    if request.task == "fl2va":
+        media_fingerprints = {Path(path): fingerprint_file(path) for _, path in fl_condition_entries(request)}
     else:
         media_fingerprints = {
             reference.path: fingerprint_file(reference.path)
             for reference in record.references
             if reference.type in {"image", "video"}
         }
-    return presentation_fingerprint(presentation, media_fingerprints, frame_count=args.frame_count)
+    return presentation_fingerprint(presentation, media_fingerprints, frame_count=request.frame_count)
 
 
 def _encode_text(
     args: argparse.Namespace,
+    request: H3GenerationRequest,
     record: H3Record,
     text_visuals,
     device: torch.device,
     shared: H3SharedModels | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    presentation = build_presentation(record, args.task, text_visuals)
+    presentation = build_presentation(record, request.task, text_visuals)
     if args.text_cache:
         media_fingerprints = {
             reference.path: fingerprint_file(reference.path)
@@ -447,16 +349,16 @@ def _encode_text(
         presentation_identity = presentation_fingerprint(
             presentation,
             media_fingerprints,
-            frame_count=args.frame_count,
+            frame_count=request.frame_count,
         )
         return load_cached_text_conditioning(
             args.text_cache,
-            task=args.task,
+            task=request.task,
             presentation_identity=presentation_identity,
         )
     cache_key = None
     if shared is not None:
-        cache_key = _text_conditioning_cache_key(args, record, presentation)
+        cache_key = _text_conditioning_cache_key(request, record, presentation)
         cached = shared.text_conditioning_cache.get(cache_key)
         if cached is not None:
             shared.text_conditioning_cache.move_to_end(cache_key)
@@ -486,7 +388,7 @@ def _encode_text(
         gc.collect()
     clean_memory_on_device(device)
     hidden_states = hidden_states.to(torch.bfloat16).unsqueeze(0).cpu()
-    token_tags = token_tags.cpu()
+    token_tags = token_tags.unsqueeze(0).cpu()
     if cache_key is not None:
         shared.text_conditioning_cache[cache_key] = (hidden_states, token_tags)
         while len(shared.text_conditioning_cache) > TEXT_CONDITIONING_CACHE_ENTRIES:
@@ -648,13 +550,9 @@ def _acquire_transformer(
     return transformer, lora_networks
 
 
-def _reject_one_frame_audio_references(args: argparse.Namespace, record: H3Record) -> None:
-    if args.frame_count == 1:
-        reject_one_frame_audio_references(record)
-
-
 def _encode_conditions(
     args: argparse.Namespace,
+    request: H3GenerationRequest,
     record: H3Record,
     raw_visuals,
     decoder: PyAVH3MediaDecoder,
@@ -664,7 +562,7 @@ def _encode_conditions(
     visual_conditions = ()
     visual_geometries = ()
     reference_visual_geometries = {}
-    if args.task != "t2va":
+    if request.task != "t2va":
         logger.info("Encoding MiniMax-H3 visual conditions")
         with _borrowed_video_vae(args, device, VIDEO_VAE_ENCODE_DTYPE, shared) as condition_video_vae:
             if condition_video_vae.vae_ratio != VIDEO_VAE_SPATIAL_RATIO:
@@ -672,7 +570,7 @@ def _encode_conditions(
                     f"MiniMax-H3 video VAE spatial ratio must be {VIDEO_VAE_SPATIAL_RATIO}, got {condition_video_vae.vae_ratio}"
                 )
             visual_conditions, visual_geometries, reference_visual_geometries = encode_visual_conditions(
-                args,
+                request,
                 record,
                 raw_visuals,
                 condition_video_vae,
@@ -680,86 +578,44 @@ def _encode_conditions(
 
     audio_conditions = ()
     reference_audio_frames = {}
-    if args.task == "ref2va" and any(reference.audio is not None for reference in record.references):
+    if request.task == "ref2va" and any(reference.audio is not None for reference in record.references):
         logger.info("Encoding MiniMax-H3 audio conditions")
         with _borrowed_audio_vae(args, device, shared) as condition_audio_vae:
             audio_conditions, reference_audio_frames = encode_audio_conditions(
-                args,
+                request,
                 record,
                 decoder,
                 condition_audio_vae,
-                reference_video_frame_counts={
-                    index: int(raw_visuals[reference.path].shape[0])
-                    for index, reference in enumerate(record.references)
-                    if reference.type == "video"
-                },
+                reference_video_frame_counts=reference_video_frame_counts(record, raw_visuals),
             )
     reference_geometries = (
-        build_reference_geometries(record, reference_visual_geometries, reference_audio_frames) if args.task == "ref2va" else ()
+        build_reference_geometries(record, reference_visual_geometries, reference_audio_frames) if request.task == "ref2va" else ()
     )
     return visual_conditions, visual_geometries, reference_geometries, audio_conditions
 
 
-def _build_layout(args: argparse.Namespace, text_length: int, visual_geometries, reference_geometries):
-    one_frame = args.frame_count == 1
-    condition_roles = None
-    if args.task == "fl2va" and not one_frame:
-        # video FL2VA roles select the anchor times; one-frame layouts derive their ordered cond_{i} roles
-        condition_roles = tuple(role for role, _ in fl_condition_entries(args))
-    layout = build_h3_layout(
-        task=args.task,
-        text_length=text_length,
-        target_video=H3VideoGeometry(
-            ONE_FRAME_VIDEO_LATENT_FRAMES if one_frame else video_latent_frames(args.frame_count),
-            args.height // VIDEO_VAE_SPATIAL_RATIO,
-            args.width // VIDEO_VAE_SPATIAL_RATIO,
-        ),
-        target_audio_frames=(
-            ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame else audio_latent_frames(args.frame_count, output_fps=args.output_fps)
-        ),
-        visual_conditions=visual_geometries,
-        references=reference_geometries,
-        one_frame=one_frame,
-        condition_roles=condition_roles,
-        time_overrides=_one_frame_time_overrides(args),
-        output_fps=args.output_fps,
-        temporal_fine_bands=args.stretch_keep_bands,
-    )
-    logger.info(
-        "MiniMax-H3 layout: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d temporal_stretch=%.4f fine_bands=%d",
-        args.task,
-        layout.target_video,
-        layout.target_audio_frames,
-        layout.text_length,
-        layout.row_count,
-        layout.temporal_stretch,
-        layout.temporal_fine_bands,
-    )
-    return layout
-
-
-def _setup_trajectory(args: argparse.Namespace):
+def _setup_trajectory(args: argparse.Namespace, request: H3GenerationRequest):
     if not args.trajectory_dir:
         return None, None, [], None
     trajectory_dir = Path(args.trajectory_dir).expanduser()
     trajectory_dir.mkdir(parents=True, exist_ok=True)
     trajectory_schedule = build_shifted_schedule(
-        args.steps,
-        video_shift=args.h3_shift_video,
-        audio_shift=args.h3_shift_audio,
+        request.steps,
+        video_shift=request.h3_shift_video,
+        audio_shift=request.h3_shift_audio,
     )
     with open(trajectory_dir / "sigma_schedule.csv", "w", encoding="utf-8", newline="") as handle:
         handle.write("step,base_sigma,sigma_video,sigma_audio\n")
-        for index in range(args.steps):
+        for index in range(request.steps):
             handle.write(
                 f"{index},{trajectory_schedule.base[index]:.6f},"
                 f"{trajectory_schedule.video[index]:.6f},{trajectory_schedule.audio[index]:.6f}\n"
             )
-    for index in range(args.steps):
+    for index in range(request.steps):
         logger.info(
             "MiniMax-H3 step %d/%d: base sigma %.4f, video sigma %.4f, audio sigma %.4f",
             index,
-            args.steps,
+            request.steps,
             trajectory_schedule.base[index],
             trajectory_schedule.video[index],
             trajectory_schedule.audio[index],
@@ -768,7 +624,7 @@ def _setup_trajectory(args: argparse.Namespace):
 
     def x0_callback(index: int, x0_video: torch.Tensor, x0_audio: torch.Tensor) -> None:
         del x0_audio  # the diagnostic decodes video only
-        if index % args.trajectory_stride == 0 or index == args.steps - 1:
+        if index % args.trajectory_stride == 0 or index == request.steps - 1:
             trajectory.append((index, x0_video.detach().to(device="cpu", dtype=torch.float32)))
 
     return trajectory_dir, trajectory_schedule, trajectory, x0_callback
@@ -776,6 +632,7 @@ def _setup_trajectory(args: argparse.Namespace):
 
 def _sample_latents(
     args: argparse.Namespace,
+    request: H3GenerationRequest,
     *,
     layout,
     seed: int,
@@ -787,59 +644,31 @@ def _sample_latents(
     shared: H3SharedModels | None = None,
     x0_callback=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    generator = create_sampling_generator(seed)
-    initial_video, initial_audio = initialize_target_latents(
-        video_shape=(
-            1,
-            24,
-            layout.target_video.frames,
-            layout.target_video.height,
-            layout.target_video.width,
-        ),
-        audio_shape=(1, 32, 2, layout.target_audio_frames),
-        generator=generator,
-        device=device,
-        video_dtype=torch.float32,
-        audio_dtype=torch.float32,
-    )
-    visual_conditions, audio_conditions = augment_condition_latents(
-        visual_conditions,
-        audio_conditions,
-        generator=generator,
-        visual_clean=args.h3_visual_cond_clean,
-        audio_clean=args.h3_audio_cond_clean,
-        device=device,
-    )
     transformer, lora_networks = _acquire_transformer(args, device, shared)
-    text_hidden_states = text_hidden_states.to(device=device, dtype=torch.bfloat16)
-    text_token_tags = text_token_tags.unsqueeze(0).to(device)
-    with tqdm(total=args.steps, desc="MiniMax-H3", unit="step") as progress:
-        sample = sample_joint_av(
+    with tqdm(total=request.steps, desc="MiniMax-H3", unit="step") as progress:
+        sample = sample_joint_av_latents(
             transformer,
             layout=layout,
+            seed=seed,
             text_hidden_states=text_hidden_states,
             text_token_tags=text_token_tags,
-            initial_video=initial_video,
-            initial_audio=initial_audio,
-            steps=args.steps,
-            video_shift=args.h3_shift_video,
-            audio_shift=args.h3_shift_audio,
-            visual_condition_latents=visual_conditions,
-            audio_condition_latents=audio_conditions,
-            visual_condition_clean=args.h3_visual_cond_clean,
-            audio_condition_clean=args.h3_audio_cond_clean,
+            visual_conditions=visual_conditions,
+            audio_conditions=audio_conditions,
+            steps=request.steps,
+            video_shift=request.h3_shift_video,
+            audio_shift=request.h3_shift_audio,
+            visual_condition_clean=request.h3_visual_cond_clean,
+            audio_condition_clean=request.h3_audio_cond_clean,
+            device=device,
             step_callback=lambda completed, total: progress.update(1),
             x0_callback=x0_callback,
         )
-    video_latents = sample.video.detach().cpu()
-    audio_latents = sample.audio.detach().cpu()
     if shared is None and transformer.offloader is not None:
         transformer.offloader.set_forward_only(True)
-    del transformer, lora_networks, sample, text_hidden_states, text_token_tags
-    del visual_conditions, audio_conditions, initial_video, initial_audio
+    del transformer, lora_networks
     gc.collect()
     clean_memory_on_device(device)
-    return video_latents, audio_latents
+    return sample.video, sample.audio
 
 
 def _decode_and_save(
@@ -971,7 +800,7 @@ def _resolve_latent_path(args: argparse.Namespace, output_path: Path) -> Path | 
 
 
 def _save_latent_file(
-    path: Path, video_latents: torch.Tensor, audio_latents: torch.Tensor | None, args: argparse.Namespace, seed: int
+    path: Path, video_latents: torch.Tensor, audio_latents: torch.Tensor | None, request: H3GenerationRequest, seed: int
 ) -> Path:
     tensors = {"latent_video": video_latents.contiguous()}
     if audio_latents is not None:
@@ -979,15 +808,15 @@ def _save_latent_file(
     metadata = {
         "format": LATENT_FILE_FORMAT,
         "seeds": str(seed),
-        "prompt": args.prompt or "",
-        "task": args.task,
-        "width": str(args.width),
-        "height": str(args.height),
-        "frame_count": str(args.frame_count),
-        "output_fps": str(args.output_fps),
-        "steps": str(args.steps),
-        "h3_shift_video": str(args.h3_shift_video),
-        "h3_shift_audio": str(args.h3_shift_audio),
+        "prompt": request.prompt or "",
+        "task": request.task,
+        "width": str(request.width),
+        "height": str(request.height),
+        "frame_count": str(request.frame_count),
+        "output_fps": str(request.output_fps),
+        "steps": str(request.steps),
+        "h3_shift_video": str(request.h3_shift_video),
+        "h3_shift_audio": str(request.h3_shift_audio),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(path), metadata=metadata)
@@ -1017,63 +846,25 @@ def _load_latent_file(path: Path) -> tuple[torch.Tensor, torch.Tensor | None, in
 def parse_prompt_line(line: str) -> dict:
     """Parse an interactive/from-file prompt line into argument overrides.
 
-    Format: "prompt text --w 768 --h 1344 --f 1 --d 42 --s 30 --fs 12.0 --fsa 3.0
-    --ofps 12 --skb 3 --i first.png --ei last.png --ci cond.png --ref face.png --of target_index=24 --o name.png".
-    --ref and --ci are repeatable and each replaces its session-level list (--ci is the
-    ordered one-frame FL2VA condition list, --condition_image). A line starting
-    with "--" carries only options; without prompt text the command-line --prompt
-    (when given) stays in effect. The literal string "\\n" in the prompt text becomes
-    a newline, for the multi-line official prompt format.
+    The line vocabulary is the training sample-prompt one (training/sampling_prompts.py), mapped
+    onto the request fields by generation_inputs.request_overrides: "prompt text --w 768 --h 1344
+    --f 1 --d 42 --s 30 --fs 12.0 --fsa 3.0 --ofps 12 --skb 3 --i first.png --ei last.png --ci cond.png
+    --ref face.png --of target_index=24 --o name.png". --ref and --ci are repeatable and each
+    replaces its session-level list (--ci is the ordered one-frame FL2VA condition list,
+    --condition_image); --o names the output file. A line starting with "--" carries only options;
+    without prompt text the command-line --prompt (when given) stays in effect. The literal string
+    "\\n" in the prompt text becomes a newline, for the multi-line official prompt format.
     """
     line = line.strip()
-    parts = ["", *line[2:].split(" --")] if line.startswith("--") else line.split(" --")
-    overrides: dict = {}
-    if parts[0].strip():
-        overrides["prompt"] = parts[0].strip().replace("\\n", "\n")
-    refs: list[str] = []
-    condition_images: list[str] = []
-    for part in parts[1:]:
-        part = part.strip()
-        if not part:
-            continue
-        option, _, value = part.partition(" ")
-        value = value.strip()
-        if option == "w":
-            overrides["width"] = int(value)
-        elif option == "h":
-            overrides["height"] = int(value)
-        elif option == "f":
-            overrides["frame_count"] = int(value)
-        elif option == "ofps":
-            overrides["output_fps"] = int(value)
-        elif option == "skb":
-            overrides["stretch_keep_bands"] = int(value)
-        elif option == "d":
-            overrides["seed"] = int(value)
-        elif option == "s":
-            overrides["steps"] = int(value)
-        elif option == "fs":
-            overrides["h3_shift_video"] = float(value)
-        elif option == "fsa":
-            overrides["h3_shift_audio"] = float(value)
-        elif option == "i":
-            overrides["first_frame"] = value
-        elif option == "ei":
-            overrides["last_frame"] = value
-        elif option == "ci":
-            condition_images.append(value)
-        elif option == "ref":
-            refs.append(value)
-        elif option == "of":
-            overrides["one_frame"] = value
-        elif option == "o":
-            overrides["output_name"] = value
-        else:
-            raise ValueError(f"MiniMax-H3 prompt line has unknown option --{option}")
-    if refs:
-        overrides["ref"] = refs
-    if condition_images:
-        overrides["condition_image"] = condition_images
+    if line.startswith("--"):
+        line = " " + line
+    prompt_dict = line_to_prompt_dict(line)
+    if not prompt_dict["prompt"].strip():
+        del prompt_dict["prompt"]
+    output_name = prompt_dict.pop("output_name", None)
+    overrides = request_overrides(prompt_dict)
+    if output_name:
+        overrides["output_name"] = output_name
     return overrides
 
 
@@ -1093,28 +884,34 @@ def run_generation(
     decoder: PyAVH3MediaDecoder | None = None,
     directory_output: bool = False,
 ) -> Path:
-    validate_prompt_args(args, directory_output=directory_output)
-    one_frame = args.frame_count == 1
+    request = validate_prompt_args(args, directory_output=directory_output)
     if device is None:
         device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     decoder = decoder or PyAVH3MediaDecoder()
     seed = _resolve_seed(args)
-    args.seed = seed
+    request = replace(request, seed=seed)
 
-    record = load_generation_record(args)
-    _reject_one_frame_audio_references(args, record)
-    raw_visuals, text_visuals = decode_generation_visuals(args, record, decoder)
-    text_hidden_states, text_token_tags = _encode_text(args, record, text_visuals, device, shared)
+    record = load_generation_record(request)
+    if request.one_frame:
+        reject_one_frame_audio_references(record)
+    raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
+    text_hidden_states, text_token_tags = _encode_text(args, request, record, text_visuals, device, shared)
     visual_conditions, visual_geometries, reference_geometries, audio_conditions = _encode_conditions(
-        args, record, raw_visuals, decoder, device, shared
+        args, request, record, raw_visuals, decoder, device, shared
     )
     del raw_visuals, text_visuals
     clean_memory_on_device(device)
 
-    layout = _build_layout(args, text_hidden_states.shape[1], visual_geometries, reference_geometries)
-    trajectory_dir, trajectory_schedule, trajectory, x0_callback = _setup_trajectory(args)
+    layout = build_generation_layout(
+        request,
+        text_length=text_hidden_states.shape[1],
+        visual_geometries=visual_geometries,
+        reference_geometries=reference_geometries,
+    )
+    trajectory_dir, trajectory_schedule, trajectory, x0_callback = _setup_trajectory(args, request)
     video_latents, audio_latents = _sample_latents(
         args,
+        request,
         layout=layout,
         seed=seed,
         text_hidden_states=text_hidden_states,
@@ -1125,13 +922,13 @@ def run_generation(
         shared=shared,
         x0_callback=x0_callback,
     )
-    if one_frame:
+    if request.one_frame:
         # the 2-frame audio target is a byproduct of the joint layout, not an output
         audio_latents = None
     output_path = _resolve_output_path(args, seed, directory_mode=directory_output)
     latent_path = _resolve_latent_path(args, output_path)
     if latent_path is not None:
-        _save_latent_file(latent_path, video_latents, audio_latents, args, seed)
+        _save_latent_file(latent_path, video_latents, audio_latents, request, seed)
     if args.output_type == "latent":
         return output_path
     return _decode_and_save(
@@ -1151,6 +948,7 @@ def run_generation(
 class _BatchItem:
     index: int
     args: argparse.Namespace
+    request: H3GenerationRequest | None = None
     seed: int = 0
     record: H3Record | None = None
     text_visuals: dict | None = None
@@ -1184,7 +982,7 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
             continue
         try:
             prompt_args = apply_overrides(args, parse_prompt_line(line))
-            validate_prompt_args(prompt_args, directory_output=True)
+            request = validate_prompt_args(prompt_args, directory_output=True)
         except ValueError as error:
             # an invalid line must not abort the batch: record it as a failed item so the
             # remaining prompts still run and the summary reports it
@@ -1192,7 +990,7 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
             _mark_failed(failed, f"line {line_number} validation", error)
             items.append(failed)
             continue
-        items.append(_BatchItem(index=len(items), args=prompt_args))
+        items.append(_BatchItem(index=len(items), args=prompt_args, request=request))
     if not items:
         logger.warning("MiniMax-H3 --from_file %s contains no prompts", args.from_file)
         return
@@ -1203,18 +1001,21 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
 
     logger.info("MiniMax-H3 batch phase 1/4: preparing inputs for %d prompts", len(items))
     for item in items:
+        if item.error:
+            continue
         try:
             item.seed = _resolve_seed(item.args)
-            item.args.seed = item.seed
-            item.record = load_generation_record(item.args)
-            _reject_one_frame_audio_references(item.args, item.record)
-            raw_visuals, item.text_visuals = decode_generation_visuals(item.args, item.record, decoder)
+            item.request = replace(item.request, seed=item.seed)
+            item.record = load_generation_record(item.request)
+            if item.request.one_frame:
+                reject_one_frame_audio_references(item.record)
+            raw_visuals, item.text_visuals = decode_generation_visuals(item.request, item.record, decoder)
             (
                 item.visual_conditions,
                 item.visual_geometries,
                 item.reference_geometries,
                 item.audio_conditions,
-            ) = _encode_conditions(item.args, item.record, raw_visuals, decoder, device, shared)
+            ) = _encode_conditions(item.args, item.request, item.record, raw_visuals, decoder, device, shared)
             del raw_visuals
         except Exception as error:
             _mark_failed(item, "input preparation", error)
@@ -1225,7 +1026,9 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
         if item.error:
             continue
         try:
-            item.text_hidden_states, item.text_token_tags = _encode_text(item.args, item.record, item.text_visuals, device, shared)
+            item.text_hidden_states, item.text_token_tags = _encode_text(
+                item.args, item.request, item.record, item.text_visuals, device, shared
+            )
             item.text_visuals = None
         except Exception as error:
             _mark_failed(item, "text encoding", error)
@@ -1236,9 +1039,15 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
         if item.error:
             continue
         try:
-            layout = _build_layout(item.args, item.text_hidden_states.shape[1], item.visual_geometries, item.reference_geometries)
+            layout = build_generation_layout(
+                item.request,
+                text_length=item.text_hidden_states.shape[1],
+                visual_geometries=item.visual_geometries,
+                reference_geometries=item.reference_geometries,
+            )
             item.video_latents, item.audio_latents = _sample_latents(
                 item.args,
+                item.request,
                 layout=layout,
                 seed=item.seed,
                 text_hidden_states=item.text_hidden_states,
@@ -1248,14 +1057,14 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
                 device=device,
                 shared=shared,
             )
-            if item.args.frame_count == 1:
+            if item.request.one_frame:
                 # the 2-frame audio target is a byproduct of the joint layout, not an output
                 item.audio_latents = None
             item.latent_file = _save_latent_file(
                 output_dir / f"{_time_flag()}_{item.index:03d}_{item.seed}_latent.safetensors",
                 item.video_latents,
                 item.audio_latents,
-                item.args,
+                item.request,
                 item.seed,
             )
             item.text_hidden_states = None
@@ -1372,7 +1181,7 @@ def process_latent_decode(args: argparse.Namespace, device: torch.device) -> Non
         source = Path(path).expanduser()
         loaded.append((source, *_load_latent_file(source)))
     if any(audio_latents is not None for _, _, audio_latents, _, _ in loaded):
-        _require_path(args.audio_vae, "audio_vae")
+        require_path(args.audio_vae, "audio_vae")
     shared = H3SharedModels(device=device)
     for source, video_latents, audio_latents, frame_count, metadata in loaded:
         logger.info("Decoding MiniMax-H3 latents from %s", source)
@@ -1395,7 +1204,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--task",
-        choices=("t2va", "fl2va", "ref2va"),
+        choices=H3_TASKS,
         default=None,
         help="generation task; required except with --latent_path",
     )
@@ -1420,34 +1229,8 @@ def setup_parser() -> argparse.ArgumentParser:
         "embedder retained). Published pruned checkpoints do not need this flag; pre-quantized ConvRot INT8 "
         "checkpoints are rejected. Combines with --convrot_int8.",
     )
-    parser.add_argument("--video_vae", default=None, help="MiniMax-H3 video VAE safetensors path or directory")
-    parser.add_argument(
-        "--audio_vae",
-        default=None,
-        help="MiniMax-H3 audio VAE safetensors path or directory; required except for --latent_path files without audio",
-    )
-    parser.add_argument(
-        "--text_encoder", default=None, help="MiniMax-H3 Qwen3-VL safetensors path (BF16, ConvRot INT8 or NVFP4, auto-detected)"
-    )
-    parser.add_argument(
-        "--nvfp4_scaled_mm",
-        action="store_true",
-        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
-    )
-    parser.add_argument(
-        "--text_encoder_blocks_to_swap",
-        type=int,
-        default=0,
-        help="number of the 50 Qwen3-VL decoder layers to stream from CPU instead of keeping them on the GPU"
-        " (0 = disabled, 50 = minimum VRAM; requires CUDA)",
-    )
-    parser.add_argument(
-        "--text_encoder_attn_mode",
-        choices=("sdpa", "flash_attention_2", "eager"),
-        default=None,
-        help="attention implementation for the text encoder (default: transformers default, sdpa)."
-        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
-    )
+    add_h3_vae_args(parser, note="required except with --latent_path, whose one-frame files need no --audio_vae")
+    add_h3_text_encoder_args(parser, note="required unless --text_cache or --latent_path is used")
     parser.add_argument("--text_cache", default=None, help="optional precomputed mmh3 text cache (single generation only)")
     parser.add_argument(
         "--prompt",
@@ -1478,24 +1261,24 @@ def setup_parser() -> argparse.ArgumentParser:
         " extension unless ;type= overrides it; ;audio= attaches an external audio track to a video reference."
         " Validation matches the JSONL references schema exactly. Mutually exclusive with --reference_jsonl.",
     )
-    parser.add_argument("--width", type=int, default=768)
-    parser.add_argument("--height", type=int, default=1344)
+    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     parser.add_argument(
         "--frame_count",
         type=int,
-        default=124,
+        default=DEFAULT_FRAME_COUNT,
         help="pixel frame count, 17*n+5 for video; 1 enables the experimental one-frame (image) mode, which writes"
         " a PNG and skips audio decoding",
     )
     parser.add_argument(
-        "--one_frame",
+        "--one_frame_inference",
         default=None,
         metavar="target_index=N,control_index=A;B",
-        help="one-frame mode time options (requires --frame_count 1): 0-based 24 fps pixel-frame indices on the"
-        " nominal timeline, converted to RoPE times relative to the target-block cursor. target_index (default 0)"
-        " places the generated frame; control_index places the FL2VA condition images in --condition_image order"
-        " (or --first_frame, --last_frame) and is required when conditions are present. The base model reads these"
-        " as trainable time inputs; see docs/minimax_h3_1f.md",
+        help="one-frame mode time options (requires --frame_count 1; --of in prompt lines): 0-based 24 fps"
+        " pixel-frame indices on the nominal timeline, converted to RoPE times relative to the target-block cursor."
+        " target_index (default 0) places the generated frame; control_index places the FL2VA condition images in"
+        " --condition_image order (or --first_frame, --last_frame) and is required when conditions are present."
+        " The base model reads these as trainable time inputs; see docs/minimax_h3_1f.md",
     )
     parser.add_argument(
         "--output_fps",
@@ -1519,8 +1302,10 @@ def setup_parser() -> argparse.ArgumentParser:
         " 16 fps, 1 at 20 fps (at most 15 -- at least one band must stay on the stretched clock)."
         " 0 stretches all bands (default)",
     )
-    parser.add_argument("--allow_experimental_duration", action="store_true")
-    parser.add_argument("--steps", type=int, default=30)
+    parser.add_argument(
+        "--allow_experimental_duration", action="store_true", help="allow durations outside the released 5-15 s range"
+    )
+    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--seed", type=int, default=None, help="random when omitted")
     parser.add_argument(
         "--output",
@@ -1575,10 +1360,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--blocks_to_swap", type=int, default=0)
     parser.add_argument("--use_pinned_memory_for_block_swap", action="store_true")
     setup_parser_compile(parser)  # torch.compile for the DiT, same flags as training
-    parser.add_argument("--h3_shift_video", type=float, default=12.0)
-    parser.add_argument("--h3_shift_audio", type=float, default=3.0)
-    parser.add_argument("--h3_visual_cond_clean", type=float, default=0.999)
-    parser.add_argument("--h3_audio_cond_clean", type=float, default=1.0)
+    add_h3_sampling_args(parser)
     parser.add_argument("--lora_weight", nargs="*", default=None)
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None)
     parser.add_argument(
@@ -1614,8 +1396,6 @@ def main() -> None:
     # not a command-line option: the per-line --o name of the multi-prompt modes, set by
     # apply_overrides; defined here so every namespace reaching the output helpers has it
     args.output_name = None
-    if args.prompt:
-        args.prompt = args.prompt.replace("\\n", "\n")
     validate_session_args(args)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if args.latent_path:

@@ -28,7 +28,15 @@ import av
 from PIL import Image
 import torch
 
-from musubi_tuner.minimax_h3.packing import H3PackedLayout
+from musubi_tuner.minimax_h3.media import AUDIO_SAMPLE_RATE, TARGET_FPS
+from musubi_tuner.minimax_h3.packing import AUDIO_CHANNELS, STEREO_CHANNELS, VIDEO_CHANNELS, H3PackedLayout
+
+# released sampler defaults, shared by the generation CLI, the trainer's sampling flags and
+# the function signatures below
+DEFAULT_VIDEO_SHIFT = 12.0
+DEFAULT_AUDIO_SHIFT = 3.0
+DEFAULT_VISUAL_CONDITION_CLEAN = 0.999
+DEFAULT_AUDIO_CONDITION_CLEAN = 1.0
 
 
 @dataclass(frozen=True)
@@ -48,8 +56,8 @@ class H3SampleResult:
 class H3DecodedAV:
     video: torch.Tensor
     audio: torch.Tensor
-    fps: int = 24
-    sample_rate: int = 32000
+    fps: int = TARGET_FPS
+    sample_rate: int = AUDIO_SAMPLE_RATE
 
 
 def _validate_shift(value: float, label: str) -> float:
@@ -66,8 +74,8 @@ def _shift(base: torch.Tensor, value: float) -> torch.Tensor:
 def build_shifted_schedule(
     steps: int,
     *,
-    video_shift: float = 12.0,
-    audio_shift: float = 3.0,
+    video_shift: float = DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = DEFAULT_AUDIO_SHIFT,
     device: torch.device | str | None = None,
 ) -> H3SigmaSchedule:
     if not isinstance(steps, int) or steps <= 0:
@@ -97,10 +105,10 @@ def initialize_target_latents(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     video_shape = tuple(int(value) for value in video_shape)
     audio_shape = tuple(int(value) for value in audio_shape)
-    if len(video_shape) != 5 or video_shape[1] != 24:
-        raise ValueError(f"MiniMax-H3 target video noise shape must be [B,24,F,H,W], got {video_shape}")
-    if len(audio_shape) != 4 or audio_shape[1:3] != (32, 2) or audio_shape[0] != video_shape[0]:
-        raise ValueError(f"MiniMax-H3 target audio noise shape must be [B,32,2,A], got {audio_shape}")
+    if len(video_shape) != 5 or video_shape[1] != VIDEO_CHANNELS:
+        raise ValueError(f"MiniMax-H3 target video noise shape must be [B,{VIDEO_CHANNELS},F,H,W], got {video_shape}")
+    if len(audio_shape) != 4 or audio_shape[1:3] != (AUDIO_CHANNELS, STEREO_CHANNELS) or audio_shape[0] != video_shape[0]:
+        raise ValueError(f"MiniMax-H3 target audio noise shape must be [B,{AUDIO_CHANNELS},{STEREO_CHANNELS},A], got {audio_shape}")
     video = torch.randn(video_shape, generator=generator, dtype=torch.float32, device="cpu").to(device=device, dtype=video_dtype)
     audio = torch.randn(audio_shape, generator=generator, dtype=torch.float32, device="cpu").to(device=device, dtype=audio_dtype)
     return video, audio
@@ -130,8 +138,8 @@ def augment_condition_latents(
     audio_conditions: Sequence[torch.Tensor],
     *,
     generator: torch.Generator,
-    visual_clean: float = 0.999,
-    audio_clean: float = 1.0,
+    visual_clean: float = DEFAULT_VISUAL_CONDITION_CLEAN,
+    audio_clean: float = DEFAULT_AUDIO_CONDITION_CLEAN,
     device: torch.device | str,
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     if not 0.0 <= visual_clean <= 1.0:
@@ -154,12 +162,12 @@ def sample_joint_av(
     initial_video: torch.Tensor,
     initial_audio: torch.Tensor,
     steps: int,
-    video_shift: float = 12.0,
-    audio_shift: float = 3.0,
+    video_shift: float = DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = DEFAULT_AUDIO_SHIFT,
     visual_condition_latents: Sequence[torch.Tensor] = (),
     audio_condition_latents: Sequence[torch.Tensor] = (),
-    visual_condition_clean: float = 0.999,
-    audio_condition_clean: float = 1.0,
+    visual_condition_clean: float = DEFAULT_VISUAL_CONDITION_CLEAN,
+    audio_condition_clean: float = DEFAULT_AUDIO_CONDITION_CLEAN,
     step_callback: Callable[[int, int], None] | None = None,
     x0_callback: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,
 ) -> H3SampleResult:
@@ -169,7 +177,7 @@ def sample_joint_av(
         layout.target_video.width,
     ):
         raise ValueError("MiniMax-H3 initial video noise does not match the packed layout")
-    if initial_audio.ndim != 4 or tuple(initial_audio.shape[1:]) != (32, 2, layout.target_audio_frames):
+    if initial_audio.ndim != 4 or tuple(initial_audio.shape[1:]) != (AUDIO_CHANNELS, STEREO_CHANNELS, layout.target_audio_frames):
         raise ValueError("MiniMax-H3 initial audio noise does not match the packed layout")
     if initial_video.shape[0] != initial_audio.shape[0]:
         raise ValueError("MiniMax-H3 initial video and audio batch sizes differ")
@@ -224,14 +232,74 @@ def sample_joint_av(
 
 
 @torch.no_grad()
+def sample_joint_av_latents(
+    transformer,
+    *,
+    layout: H3PackedLayout,
+    seed: int,
+    text_hidden_states: torch.Tensor,
+    text_token_tags: torch.Tensor,
+    visual_conditions: Sequence[torch.Tensor] = (),
+    audio_conditions: Sequence[torch.Tensor] = (),
+    steps: int,
+    video_shift: float = DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = DEFAULT_AUDIO_SHIFT,
+    visual_condition_clean: float = DEFAULT_VISUAL_CONDITION_CLEAN,
+    audio_condition_clean: float = DEFAULT_AUDIO_CONDITION_CLEAN,
+    device: torch.device | str,
+    step_callback: Callable[[int, int], None] | None = None,
+    x0_callback: Callable[[int, torch.Tensor, torch.Tensor], None] | None = None,
+) -> H3SampleResult:
+    """One seeded generation on a prepared layout, shared by the generation CLI and the trainer's
+    training-time samples: the target noise and the condition augmentation come from the seed's
+    single CPU stream (see create_sampling_generator), the text rows run in bf16, and the sampled
+    latents are returned on the CPU."""
+    generator = create_sampling_generator(seed)
+    initial_video, initial_audio = initialize_target_latents(
+        video_shape=(1, VIDEO_CHANNELS, layout.target_video.frames, layout.target_video.height, layout.target_video.width),
+        audio_shape=(1, AUDIO_CHANNELS, STEREO_CHANNELS, layout.target_audio_frames),
+        generator=generator,
+        device=device,
+        video_dtype=torch.float32,
+        audio_dtype=torch.float32,
+    )
+    visual_conditions, audio_conditions = augment_condition_latents(
+        visual_conditions,
+        audio_conditions,
+        generator=generator,
+        visual_clean=visual_condition_clean,
+        audio_clean=audio_condition_clean,
+        device=device,
+    )
+    sample = sample_joint_av(
+        transformer,
+        layout=layout,
+        text_hidden_states=text_hidden_states.to(device=device, dtype=torch.bfloat16),
+        text_token_tags=text_token_tags.to(device),
+        initial_video=initial_video,
+        initial_audio=initial_audio,
+        steps=steps,
+        video_shift=video_shift,
+        audio_shift=audio_shift,
+        visual_condition_latents=visual_conditions,
+        audio_condition_latents=audio_conditions,
+        visual_condition_clean=visual_condition_clean,
+        audio_condition_clean=audio_condition_clean,
+        step_callback=step_callback,
+        x0_callback=x0_callback,
+    )
+    return H3SampleResult(video=sample.video.detach().cpu(), audio=sample.audio.detach().cpu())
+
+
+@torch.no_grad()
 def decode_joint_av(
     video_vae,
     audio_vae,
     sample: H3SampleResult,
     *,
     frame_count: int,
-    fps: int = 24,
-    sample_rate: int = 32000,
+    fps: int = TARGET_FPS,
+    sample_rate: int = AUDIO_SAMPLE_RATE,
 ) -> H3DecodedAV:
     decoded_video = video_vae.decode(sample.video)
     decoded_audio = audio_vae.decode(sample.audio)
@@ -249,8 +317,8 @@ def synchronize_decoded_av(
     decoded_audio: torch.Tensor,
     *,
     frame_count: int,
-    fps: int = 24,
-    sample_rate: int = 32000,
+    fps: int = TARGET_FPS,
+    sample_rate: int = AUDIO_SAMPLE_RATE,
 ) -> H3DecodedAV:
     if frame_count <= 0 or fps <= 0 or sample_rate <= 0:
         raise ValueError("MiniMax-H3 decode frame count, fps, and sample rate must be positive")
@@ -336,7 +404,7 @@ def write_audio_wav(audio: torch.Tensor, output_path: str | Path, *, sample_rate
 H3_VIDEO_CRF = 16
 
 
-def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int = 24) -> None:
+def write_video_only(video: torch.Tensor, output_path: str | Path, *, fps: int = TARGET_FPS) -> None:
     """Write a silent video-only container; the diagnostic trajectory dumps have no audio track."""
     if video.ndim != 4 or video.shape[-1] != 3 or video.dtype != torch.uint8:
         raise ValueError(f"MiniMax-H3 video-only write needs uint8 [F,H,W,3], got {tuple(video.shape)} {video.dtype}")

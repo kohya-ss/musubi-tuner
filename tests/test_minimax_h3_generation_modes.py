@@ -50,7 +50,7 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
         "reference_jsonl": None,
         "reference_index": 0,
         "ref": None,
-        "one_frame": None,
+        "one_frame_inference": None,
         "width": 64,
         "height": 64,
         "frame_count": 124,
@@ -82,7 +82,7 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
     return SimpleNamespace(**values)
 
 
-def test_parse_prompt_line_maps_inline_options_and_collects_refs():
+def test_parse_prompt_line_maps_inline_options_and_collects_refs(caplog):
     overrides = parse_prompt_line(
         "a cat sings --w 768 --h 1344 --f 1 --d 42 --s 20 --fs 10.5 --fsa 2.5"
         " --i first.png --ei last.png --of target_index=24,control_index=0;12 --o cat.png"
@@ -98,7 +98,7 @@ def test_parse_prompt_line_maps_inline_options_and_collects_refs():
         "h3_shift_audio": 2.5,
         "first_frame": "first.png",
         "last_frame": "last.png",
-        "one_frame": "target_index=24,control_index=0;12",
+        "one_frame_inference": "target_index=24,control_index=0;12",
         "output_name": "cat.png",
     }
 
@@ -113,8 +113,13 @@ def test_parse_prompt_line_maps_inline_options_and_collects_refs():
     # the literal "\n" becomes a newline, so the multi-line official prompt format fits on one line
     assert parse_prompt_line("line one\\nline two --d 1") == {"prompt": "line one\nline two", "seed": 1}
 
-    with pytest.raises(ValueError, match="unknown option --x"):
-        parse_prompt_line("a cat --x 1")
+    # the shared house line parser warns about an unknown option instead of failing the line
+    with caplog.at_level(logging.WARNING):
+        assert parse_prompt_line("a cat --x 1") == {"prompt": "a cat"}
+    assert any("--x 1" in record.getMessage() for record in caplog.records)
+    # the generic sampling options H3 cannot honor are rejected by the shared request mapping
+    with pytest.raises(ValueError, match="negative_prompt"):
+        parse_prompt_line("a cat --n ugly")
 
 
 def test_apply_overrides_keeps_the_base_args_untouched_and_resets_output_name():
@@ -247,7 +252,7 @@ def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
         task="fl2va",
         frame_count=1,
         first_frame=str(first),
-        one_frame="target_index=6,control_index=0;123",
+        one_frame_inference="target_index=6,control_index=0;123",
         output=str(tmp_path / "out.png"),
     )
 
@@ -264,7 +269,7 @@ def test_one_frame_fl2va_accepts_an_ordered_condition_image_list(tmp_path):
     base = dict(task="fl2va", frame_count=1, output=str(tmp_path / "out.png"))
 
     validate_prompt_args(
-        _session_args(tmp_path, **base, condition_image=conditions, one_frame="target_index=24,control_index=0;24;48")
+        _session_args(tmp_path, **base, condition_image=conditions, one_frame_inference="target_index=24,control_index=0;24;48")
     )
     # --first_frame / --last_frame alias the first two slots and cannot be combined with the list
     with pytest.raises(ValueError, match="not both"):
@@ -274,7 +279,7 @@ def test_one_frame_fl2va_accepts_an_ordered_condition_image_list(tmp_path):
                 **base,
                 condition_image=conditions[:1],
                 first_frame=conditions[0],
-                one_frame="target_index=24,control_index=0;24",
+                one_frame_inference="target_index=24,control_index=0;24",
             )
         )
     # ... and the list is a one-frame feature
@@ -284,7 +289,7 @@ def test_one_frame_fl2va_accepts_an_ordered_condition_image_list(tmp_path):
     assert parse_prompt_line("x --ci a.png --ci b.png --of control_index=0;48") == {
         "prompt": "x",
         "condition_image": ["a.png", "b.png"],
-        "one_frame": "control_index=0;48",
+        "one_frame_inference": "control_index=0;48",
     }
 
 
@@ -371,7 +376,7 @@ def _stub_generation_models(monkeypatch, counters):
         "_encode_text",
         lambda *unused: (
             counters.__setitem__("text", counters["text"] + 1),
-            (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(3, dtype=torch.int64)),
+            (torch.zeros(1, 3, 5120, dtype=torch.bfloat16), torch.ones(1, 3, dtype=torch.int64)),
         )[1],
     )
     monkeypatch.setattr(
