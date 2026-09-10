@@ -602,6 +602,16 @@ TEACHER_CONDITIONS_FIRST_LAST = "first,last"
 TEACHER_CONDITIONS_REF = "ref"
 TEACHER_CONDITIONS_SUBJECT_REF = "subject_ref"
 
+# key stem of the teacher text rows a text cache may carry next to the student rows, per teacher
+# kind: each kind uses distinct keys so the trainer hard-fails on a cache/flag mode mismatch
+# instead of silently misreading the rows (the cache writer appends `_hidden_states_<dtype>` /
+# `_token_tags_int64`; the training collator drops the `varlen_` marker and the dtype suffix)
+TEACHER_TEXT_CACHE_PREFIXES = {
+    TEACHER_CONDITIONS_FIRST_LAST: "varlen_mmh3_teacher",
+    TEACHER_CONDITIONS_REF: "varlen_mmh3_teacher_ref",
+    TEACHER_CONDITIONS_SUBJECT_REF: "varlen_mmh3_teacher_subject_ref",
+}
+
 
 def normalize_teacher_conditions(value: str) -> str:
     parts = [part.strip() for part in str(value).split(",")]

@@ -47,12 +47,14 @@ from musubi_tuner.minimax_h3.packing import (
     H3VideoGeometry,
     build_h3_layout,
     one_frame_condition_role,
+    validate_clean_coefficient,
 )
 from musubi_tuner.minimax_h3.sampling import (
     DEFAULT_AUDIO_CONDITION_CLEAN,
     DEFAULT_AUDIO_SHIFT,
     DEFAULT_VIDEO_SHIFT,
     DEFAULT_VISUAL_CONDITION_CLEAN,
+    validate_shift,
 )
 from musubi_tuner.minimax_h3.text_encoder import H3TextVisual
 from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_ENCODE_DTYPE, encode_video_condition
@@ -316,15 +318,10 @@ def validate_generation_request(request: H3GenerationRequest) -> None:
             )
     if request.steps <= 0:
         raise ValueError("MiniMax-H3 --steps must be positive")
-    for label, value in (("h3_shift_video", request.h3_shift_video), ("h3_shift_audio", request.h3_shift_audio)):
-        if not 0.01 <= float(value) <= 100.0:
-            raise ValueError(f"MiniMax-H3 --{label} must be in [0.01,100.0], got {value}")
-    for label, value in (
-        ("h3_visual_cond_clean", request.h3_visual_cond_clean),
-        ("h3_audio_cond_clean", request.h3_audio_cond_clean),
-    ):
-        if not 0.0 <= float(value) <= 1.0:
-            raise ValueError(f"MiniMax-H3 --{label} must be in [0.0,1.0], got {value}")
+    validate_shift(request.h3_shift_video, "--h3_shift_video")
+    validate_shift(request.h3_shift_audio, "--h3_shift_audio")
+    validate_clean_coefficient(request.h3_visual_cond_clean, "--h3_visual_cond_clean")
+    validate_clean_coefficient(request.h3_audio_cond_clean, "--h3_audio_cond_clean")
     _validate_string_list(request.condition_image, "condition_image")
     _validate_string_list(request.ref, "ref")
 

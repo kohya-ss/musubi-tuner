@@ -188,6 +188,8 @@ Block swap supports up to 48 of the 50 main blocks. `--block_swap_h2d_only` is a
 
 MiniMax-H3 requires `batch_size = 1` in every H3 dataset. Use Accelerate gradient accumulation for a larger effective batch. The latent caching script warns when a dataset config sets any other value, and the trainer rejects the first batch whose size is not 1. Real packed batching needs text padding, an attention mask, and per-sample structural tensors, so it is deferred to a separate PR.
 
+`--task` decides which cache entries each batch is read with: `t2va` uses the targets only, `fl2va` the first/last (or timed one-frame) condition latents, `ref2va` the numbered reference latents, and a configured teacher additionally reads its own text rows and conditions. An entry the task needs but the cache lacks is an error; entries the task never reads (for example the endpoint latents of an `fl2va` cache in a `t2va` run) are ignored and reported once at the first step, so a cache written for another task shows up in the log.
+
 Saved `ss_minimax_h3_base_family` names the released transformer family, not the task. T2VA therefore records `ss_minimax_h3_task=t2va` and `ss_minimax_h3_base_family=fl2va`, because T2VA uses the released FL2VA base.
 
 ### Guidance-distillation countermeasure (guidance loss)
@@ -315,7 +317,7 @@ The reference pictures are canvas-capped to the target's bucket area, exactly as
 
 ### Training-time joint AV samples
 
-H3 overrides the shared `prepare_sampling` hook (whose default covers single-VAE architectures) and returns both VAEs as its sampling resources. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`.
+H3 overrides the shared `prepare_sampling` hook (whose default covers single-VAE architectures) and returns both VAEs as its sampling resources. It samples with the live transformer and current LoRA, decodes the video and audio latents with their own VAEs in sequence, and writes a muxed MP4 under `OUTPUT_DIR/sample`, named like every other architecture's samples (`<output_name>_<step or epoch>_<prompt index>_<timestamp>_<seed>.mp4`). A one-frame sample (`--f 1`) decodes only the video frame and is saved through the shared image path, so it takes the same `_000.png` suffix as the other architectures' image samples.
 
 Add the sampling assets and normal sampling schedule flags to the training command:
 
@@ -327,7 +329,7 @@ Add the sampling assets and normal sampling schedule flags to the training comma
 --text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors
 ```
 
-The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, RNG restoration, and the block-swap inference/training transition.
+The text presentations and condition latents are prepared once before the transformer is loaded. The two decode VAEs then remain on CPU and are moved to the accelerator one at a time for each scheduled sample. The shared trainer still owns sampling cadence, distributed prompt assignment, per-sample seeding and RNG restoration, sample file naming, the eval/train switch, and the block-swap inference/training transition.
 
 Training-time samples load the selected Qwen3-VL text encoder on the training accelerator before the transformer. The BF16 artifact is approximately 48 GB, so `--sample_prompts` requires roughly 50 GB of available accelerator memory there; the ConvRot INT8 artifact lowers the persistent text-encoder weights to ~25 GB and the NVFP4+AWQ artifact to ~15 GB, selected simply by passing their paths. `--text_encoder_blocks_to_swap` (see Text Encoder Layer Streaming below) removes most of the remaining weight footprint by streaming the encoder layers from CPU during this phase.
 

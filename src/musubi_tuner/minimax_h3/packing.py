@@ -571,7 +571,9 @@ def _single_model_time(value: float | torch.Tensor, label: str) -> float:
     return scalar
 
 
-def _validate_clean_coefficient(value: float, label: str) -> float:
+def validate_clean_coefficient(value: float, label: str) -> float:
+    """The condition-augmentation clean coefficient (clean*x + (1-clean)*eps) must lie in [0,1];
+    the timestep rows, the samplers and the CLIs all validate through here."""
     value = float(value)
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError(f"MiniMax-H3 {label} must be finite and in [0,1], got {value}")
@@ -601,8 +603,8 @@ def build_timestep_rows(
 ) -> H3TimestepRows:
     video_time = _single_model_time(model_t_video, "video model time")
     audio_time = _single_model_time(model_t_audio, "audio model time")
-    visual_clean = _validate_clean_coefficient(visual_condition_clean, "visual condition clean coefficient")
-    audio_clean = _validate_clean_coefficient(audio_condition_clean, "audio condition clean coefficient")
+    visual_clean = validate_clean_coefficient(visual_condition_clean, "visual condition clean coefficient")
+    audio_clean = validate_clean_coefficient(audio_condition_clean, "audio condition clean coefficient")
 
     text_token_tags = torch.as_tensor(text_token_tags)
     if text_token_tags.dtype != torch.int64 or text_token_tags.shape != (1, layout.text_length):

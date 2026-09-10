@@ -29,7 +29,13 @@ from PIL import Image
 import torch
 
 from musubi_tuner.minimax_h3.media import AUDIO_SAMPLE_RATE, TARGET_FPS
-from musubi_tuner.minimax_h3.packing import AUDIO_CHANNELS, STEREO_CHANNELS, VIDEO_CHANNELS, H3PackedLayout
+from musubi_tuner.minimax_h3.packing import (
+    AUDIO_CHANNELS,
+    STEREO_CHANNELS,
+    VIDEO_CHANNELS,
+    H3PackedLayout,
+    validate_clean_coefficient,
+)
 
 # released sampler defaults, shared by the generation CLI, the trainer's sampling flags and
 # the function signatures below
@@ -60,15 +66,19 @@ class H3DecodedAV:
     sample_rate: int = AUDIO_SAMPLE_RATE
 
 
-def _validate_shift(value: float, label: str) -> float:
+def validate_shift(value: float, label: str) -> float:
+    """The per-modality timestep shift must lie in [0.01,100]; the schedule builder, the trainer
+    and the CLIs all validate through here."""
     value = float(value)
     if not 0.01 <= value <= 100.0:
-        raise ValueError(f"MiniMax-H3 {label} shift must be in [0.01,100.0], got {value}")
+        raise ValueError(f"MiniMax-H3 {label} must be in [0.01,100.0], got {value}")
     return value
 
 
-def _shift(base: torch.Tensor, value: float) -> torch.Tensor:
-    return value * base / (1.0 + (value - 1.0) * base)
+def shift_sigma(base: torch.Tensor, shift: float) -> torch.Tensor:
+    """The released H3 timestep shift ``s*u / (1 + (s-1)*u)`` of a base sigma in [0,1]; the
+    sampler applies it to its schedule, training to each step's drawn base sigma."""
+    return shift * base / (1.0 + (shift - 1.0) * base)
 
 
 def build_shifted_schedule(
@@ -80,10 +90,10 @@ def build_shifted_schedule(
 ) -> H3SigmaSchedule:
     if not isinstance(steps, int) or steps <= 0:
         raise ValueError(f"MiniMax-H3 sampling steps must be a positive integer, got {steps}")
-    video_shift = _validate_shift(video_shift, "video")
-    audio_shift = _validate_shift(audio_shift, "audio")
+    video_shift = validate_shift(video_shift, "video shift")
+    audio_shift = validate_shift(audio_shift, "audio shift")
     base = torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float64, device=device)
-    return H3SigmaSchedule(base=base, video=_shift(base, video_shift), audio=_shift(base, audio_shift))
+    return H3SigmaSchedule(base=base, video=shift_sigma(base, video_shift), audio=shift_sigma(base, audio_shift))
 
 
 def create_sampling_generator(seed: int) -> torch.Generator:
@@ -117,7 +127,7 @@ def initialize_target_latents(
 def _augment_condition_group(
     tensors: Sequence[torch.Tensor],
     *,
-    generator: torch.Generator,
+    generator: torch.Generator | None,
     clean: float,
     device: torch.device | str,
 ) -> tuple[torch.Tensor, ...]:
@@ -126,9 +136,13 @@ def _augment_condition_group(
         return moved
     augmented = []
     for tensor in moved:
-        noise = torch.randn(tuple(tensor.shape), generator=generator, dtype=torch.float32, device="cpu").to(
-            device=tensor.device, dtype=tensor.dtype
-        )
+        if generator is None:
+            # training: fresh noise from the global RNG on the tensor's device, like the target noise
+            noise = torch.randn(tuple(tensor.shape), dtype=torch.float32, device=tensor.device).to(tensor.dtype)
+        else:
+            noise = torch.randn(tuple(tensor.shape), generator=generator, dtype=torch.float32, device="cpu").to(
+                device=tensor.device, dtype=tensor.dtype
+            )
         augmented.append(clean * tensor + (1.0 - clean) * noise)
     return tuple(augmented)
 
@@ -137,15 +151,18 @@ def augment_condition_latents(
     visual_conditions: Sequence[torch.Tensor],
     audio_conditions: Sequence[torch.Tensor],
     *,
-    generator: torch.Generator,
+    generator: torch.Generator | None,
     visual_clean: float = DEFAULT_VISUAL_CONDITION_CLEAN,
     audio_clean: float = DEFAULT_AUDIO_CONDITION_CLEAN,
     device: torch.device | str,
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-    if not 0.0 <= visual_clean <= 1.0:
-        raise ValueError(f"MiniMax-H3 visual condition clean coefficient must be in [0,1], got {visual_clean}")
-    if not 0.0 <= audio_clean <= 1.0:
-        raise ValueError(f"MiniMax-H3 audio condition clean coefficient must be in [0,1], got {audio_clean}")
+    """Blend independent Gaussian noise into the condition latents: clean*x + (1-clean)*eps.
+
+    Sampling passes the seed's CPU generator (see create_sampling_generator) so the noise is
+    reproducible; training passes ``generator=None`` and draws from the global RNG per step.
+    """
+    visual_clean = validate_clean_coefficient(visual_clean, "visual condition clean coefficient")
+    audio_clean = validate_clean_coefficient(audio_clean, "audio condition clean coefficient")
     return (
         _augment_condition_group(visual_conditions, generator=generator, clean=visual_clean, device=device),
         _augment_condition_group(audio_conditions, generator=generator, clean=audio_clean, device=device),
