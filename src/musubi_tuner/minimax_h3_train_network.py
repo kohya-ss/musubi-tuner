@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import gc
 import logging
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -56,17 +55,21 @@ from musubi_tuner.minimax_h3.packing import (
     build_h3_layout,
     one_frame_condition_roles,
     parse_condition_role,
+    validate_clean_coefficient,
 )
 from musubi_tuner.minimax_h3.sampling import (
-    decoded_video_to_uint8,
+    H3DecodedAV,
+    augment_condition_latents,
     sample_joint_av_latents,
+    shift_sigma,
     synchronize_decoded_av,
-    write_image,
+    validate_shift,
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     TEACHER_CONDITIONS_REF,
     TEACHER_CONDITIONS_SUBJECT_REF,
+    TEACHER_TEXT_CACHE_PREFIXES,
     build_presentation,
     encode_h3_presentation,
     load_h3_processor,
@@ -78,7 +81,7 @@ from musubi_tuner.minimax_h3.video_vae import VIDEO_VAE_DECODE_DTYPE, VIDEO_VAE_
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
-from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
+from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer, wandb_tracker_and_module
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils import model_utils
 
@@ -89,6 +92,15 @@ logger = logging.getLogger(__name__)
 # above it the conditioned content is unpredictable from the text (and the FL2VA weights stop
 # aligning a reference near ~0.85), so the band is better spent as a base-preservation anchor
 SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION = 0.75
+
+
+def _sample_frame_count(frame_count: int) -> int:
+    """The house sample convention on the H3 frame grid: a one-frame sample stays 1, an off-grid
+    video frame count rounds down onto 17*n+5 instead of failing."""
+    if frame_count == 1:
+        return 1
+    # the H3 grid is not a stride, so the stride argument is unused for this architecture
+    return round_down_frame_count(frame_count, ARCHITECTURE_MINIMAX_H3, 0)
 
 
 def _sample_request(args: argparse.Namespace, parameter: Mapping[str, Any]) -> H3GenerationRequest:
@@ -103,12 +115,10 @@ def _sample_request(args: argparse.Namespace, parameter: Mapping[str, Any]) -> H
     if args.h3_allow_experimental_sample_duration:
         overrides["allow_experimental_duration"] = True
     requested_frame_count = overrides.get("frame_count", DEFAULT_FRAME_COUNT)
-    if requested_frame_count != 1:
-        # the house sample convention: an off-grid frame count rounds down instead of failing
-        frame_count = round_down_frame_count(requested_frame_count, ARCHITECTURE_MINIMAX_H3, 17)
-        if frame_count != requested_frame_count:
-            logger.warning("MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)", requested_frame_count, frame_count)
-        overrides["frame_count"] = frame_count
+    frame_count = _sample_frame_count(requested_frame_count)
+    if frame_count != requested_frame_count:
+        logger.warning("MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)", requested_frame_count, frame_count)
+    overrides["frame_count"] = frame_count
     reference_jsonl = overrides.get("reference_jsonl")
     if reference_jsonl and not Path(reference_jsonl).expanduser().is_absolute():
         # relative reference_jsonl paths resolve from the prompt file's directory, falling
@@ -129,30 +139,70 @@ def _sample_request(args: argparse.Namespace, parameter: Mapping[str, Any]) -> H
     return request
 
 
-def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
-    if not isinstance(value, torch.Tensor) or value.shape != (batch_size,) or value.dtype != torch.float32:
-        raise ValueError("MiniMax-H3 batch requires a float32 audio_present tensor with shape [B]; re-run latent caching")
-    if not torch.isfinite(value).all().item() or not ((value == 0.0) | (value == 1.0)).all().item():
-        raise ValueError("MiniMax-H3 audio_present must be exactly 0.0 or 1.0 per sample")
-    return value
-
-
 @dataclass(frozen=True)
 class _H3RuntimeBatch:
+    """One training batch as the transformer consumes it: the packed layout, the text rows, the
+    condition latents in layout order, and the audio-presence flags. The batch's cache entries
+    are read by the training --task (t2va uses none, fl2va the first/last or timed cond_
+    latents, ref2va the numbered references); a configured teacher additionally reads its own
+    text rows and conditions, which never reach the student."""
+
     layout: H3PackedLayout
     text_hidden_states: torch.Tensor
     text_token_tags: torch.Tensor
     visual_conditions: tuple[torch.Tensor, ...]
     audio_conditions: tuple[torch.Tensor, ...]
     audio_present: torch.Tensor
-    # teacher-matching extras: the teacher runs on its own layout with its own condition
-    # latents and text rows (FL2VA endpoints, or the Ref2VA self-reference), none of which
-    # reach the student
     teacher_layout: H3PackedLayout | None = None
     teacher_text_hidden_states: torch.Tensor | None = None
     teacher_text_token_tags: torch.Tensor | None = None
     teacher_visual_conditions: tuple[torch.Tensor, ...] = ()
     teacher_audio_conditions: tuple[torch.Tensor, ...] = ()
+    # warn-once observations about the batch's cache entries (see MiniMaxH3NetworkTrainer._notice)
+    notices: tuple[str, ...] = ()
+
+
+_REQUIRED_BATCH_KEYS = ("latents_audio", "audio_present", "mmh3_hidden_states", "mmh3_token_tags")
+
+
+class _BatchEntries:
+    """The H3 cache entries of one batch with consumption tracking: the condition latents
+    (``latents_<role>``), the teacher text rows and the one-frame index tensors. Whatever the
+    task and the teacher leave unread is reported, since it usually means the caches were
+    written for another task."""
+
+    def __init__(self, batch: Mapping[str, Any]):
+        self._batch = batch
+        self.unread = {
+            key
+            for key in batch
+            if (key.startswith("latents_") and key != "latents_audio")
+            or key.startswith("mmh3_teacher_")
+            or key.startswith("one_frame_")
+        }
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._batch
+
+    def take(self, key: str) -> Any:
+        self.unread.discard(key)
+        return self._batch[key]
+
+    def take_index_tensor(self, key: str, batch_size: int, *, ndim: int, hint: str) -> torch.Tensor:
+        value = self._batch.get(key)
+        if not isinstance(value, torch.Tensor) or value.ndim != ndim or value.shape[0] != batch_size:
+            shape = "[B]" if ndim == 1 else "[B,K]"
+            raise ValueError(
+                f"MiniMax-H3 one-frame batch requires a {shape} {key} tensor; re-run minimax_h3_cache_latents.py --one_frame{hint}"
+            )
+        return self.take(key)
+
+
+def _teacher_text_keys(teacher_conditions: str) -> tuple[str, str]:
+    """The batch keys of one teacher kind's text rows: the cache stems without the collator's
+    varlen_ marker."""
+    stem = TEACHER_TEXT_CACHE_PREFIXES[teacher_conditions].removeprefix("varlen_")
+    return f"{stem}_hidden_states", f"{stem}_token_tags"
 
 
 def _stack_single_text_rows(value, label: str) -> torch.Tensor:
@@ -163,22 +213,6 @@ def _stack_single_text_rows(value, label: str) -> torch.Tensor:
     if not isinstance(value, Sequence) or len(value) != 1 or not isinstance(value[0], torch.Tensor):
         raise ValueError(f"MiniMax-H3 {label} must contain exactly one tensor")
     return value[0].unsqueeze(0)
-
-
-_coinciding_one_frame_indices_warned = False
-
-
-def _warn_once_coinciding_indices(control_indices: list[int], target_index: int) -> None:
-    global _coinciding_one_frame_indices_warned
-    if _coinciding_one_frame_indices_warned or target_index not in control_indices:
-        return
-    _coinciding_one_frame_indices_warned = True
-    logger.warning(
-        "MiniMax-H3 one-frame FL2VA data places a control at the target index (%d): the base model's"
-        " prior at coinciding timestamps is verbatim anchor copying, so make sure that is the intended"
-        " training signal (see docs/minimax_h3_1f.md)",
-        target_index,
-    )
 
 
 def _condition_roles_in(batch: Mapping[str, Any]) -> dict[str, H3ConditionRole]:
@@ -204,348 +238,224 @@ def _one_frame_condition_roles_in(condition_roles: Mapping[str, H3ConditionRole]
 
 
 def _collect_fl_conditions(
-    batch: dict[str, Any],
-    batch_size: int,
+    entries: _BatchEntries,
+    condition_roles: Mapping[str, H3ConditionRole],
     visual_conditions: list[torch.Tensor],
     condition_geometries: list[H3VideoGeometry],
     *,
     one_frame: bool = False,
 ) -> tuple[str, ...]:
-    condition_roles = _condition_roles_in(batch)
-    fl_roles = tuple(role for role in FL_CONDITION_ROLES if role in condition_roles)
-    cond_roles = _one_frame_condition_roles_in(condition_roles)
+    """Reads the FL2VA condition latents in layout order and returns their roles: first/last for
+    video targets, the ordered cond_{i} slots (timed by one_frame_control_indices) for one-frame
+    targets. The layout builder and the transformer validate the tensors themselves."""
     if one_frame:
-        # one-frame conditions are the ordered cond_{i} slots; their temporal positions are
-        # carried by one_frame_control_indices, not by role names
-        if fl_roles or not cond_roles:
+        roles = _one_frame_condition_roles_in(condition_roles)
+        if not roles:
             raise ValueError(
                 "MiniMax-H3 one-frame FL2VA batch requires latents_cond_000... condition latents (first/last keys are the"
                 " video layout); re-run minimax_h3_cache_latents.py --one_frame --task fl2va"
             )
-        roles = cond_roles
     else:
-        if cond_roles:
-            raise ValueError("MiniMax-H3 video FL2VA batch cannot carry one-frame cond_ condition latents; re-run latent caching")
-        if fl_roles != FL_CONDITION_ROLES:
-            raise ValueError("MiniMax-H3 FL2VA batch requires both first and last conditions")
-        roles = fl_roles
+        roles = tuple(role for role in FL_CONDITION_ROLES if role in condition_roles)
+        if not roles:
+            raise ValueError(
+                "MiniMax-H3 FL2VA batch requires latents_first/latents_last condition latents;"
+                " re-run minimax_h3_cache_latents.py --task fl2va"
+            )
     for role in roles:
-        key = f"latents_{role}"
-        tensor = batch[key]
-        if not isinstance(tensor, torch.Tensor) or tensor.ndim != 5 or tensor.shape[1] != 24:
-            raise ValueError(f"MiniMax-H3 {key} must be [B,24,F,H,W]")
-        if tensor.shape[0] != batch_size:
-            raise ValueError(f"MiniMax-H3 {key} batch size does not match the targets")
+        tensor = entries.take(f"latents_{role}")
         visual_conditions.append(tensor)
         condition_geometries.append(H3VideoGeometry(*tensor.shape[2:]))
     return roles
 
 
 def _collect_reference_conditions(
-    reference_roles: dict[int, dict[str, torch.Tensor]], batch_size: int
+    entries: _BatchEntries, condition_roles: Mapping[str, H3ConditionRole]
 ) -> tuple[list[H3ReferenceGeometry], list[torch.Tensor], list[torch.Tensor]]:
     """Turns the numbered ``latents_ref_{i}_{image|video|audio}`` batch entries into ordered
     reference geometries plus the visual/audio condition tensors in layout order."""
+    by_index: dict[int, dict[str, torch.Tensor]] = {}
+    for name, role in condition_roles.items():
+        if role.family == "reference":
+            by_index.setdefault(role.index, {})[role.reference_kind] = entries.take(f"latents_{name}")
+    if set(by_index) != set(range(len(by_index))):
+        raise ValueError("MiniMax-H3 reference indices must be contiguous from 000")
     references: list[H3ReferenceGeometry] = []
     visual_conditions: list[torch.Tensor] = []
     audio_conditions: list[torch.Tensor] = []
-    if set(reference_roles) != set(range(len(reference_roles))):
-        raise ValueError("MiniMax-H3 reference indices must be contiguous from 000")
-    for index in range(len(reference_roles)):
-        roles = reference_roles[index]
+    for index in range(len(by_index)):
+        roles = by_index[index]
         image = roles.get("image")
         video = roles.get("video")
         audio = roles.get("audio")
         if image is not None:
             if video is not None or audio is not None:
                 raise ValueError(f"MiniMax-H3 reference {index:03d} image cannot share video/audio roles")
-            if image.ndim != 5 or image.shape[1] != 24 or image.shape[0] != batch_size:
-                raise ValueError(f"MiniMax-H3 reference {index:03d} image must be [B,24,1,H,W]")
-            geometry = H3VideoGeometry(*image.shape[2:])
-            references.append(H3ReferenceGeometry("image", video=geometry))
+            references.append(H3ReferenceGeometry("image", video=H3VideoGeometry(*image.shape[2:])))
             visual_conditions.append(image)
         elif video is not None:
-            if video.ndim != 5 or video.shape[1] != 24 or video.shape[0] != batch_size:
-                raise ValueError(f"MiniMax-H3 reference {index:03d} video must be [B,24,F,H,W]")
-            geometry = H3VideoGeometry(*video.shape[2:])
             audio_frames = 0
             if audio is not None:
-                if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
-                    raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
                 audio_frames = audio.shape[-1]
                 audio_conditions.append(audio)
-            references.append(H3ReferenceGeometry("video", video=geometry, audio_frames=audio_frames))
+            references.append(H3ReferenceGeometry("video", video=H3VideoGeometry(*video.shape[2:]), audio_frames=audio_frames))
             visual_conditions.append(video)
-        elif audio is not None:
-            if audio.ndim != 4 or tuple(audio.shape[1:3]) != (32, 2) or audio.shape[0] != batch_size:
-                raise ValueError(f"MiniMax-H3 reference {index:03d} audio must be [B,32,2,A]")
+        else:
             references.append(H3ReferenceGeometry("audio", audio_frames=audio.shape[-1]))
             audio_conditions.append(audio)
-        else:
-            raise ValueError(f"MiniMax-H3 reference {index:03d} has no supported role")
     return references, visual_conditions, audio_conditions
 
 
-def _validate_teacher_text_rows(
-    teacher_hidden_states: torch.Tensor, teacher_token_tags: torch.Tensor, hidden_states: torch.Tensor
-) -> None:
-    if (
-        teacher_hidden_states.ndim != 3
-        or teacher_token_tags.ndim != 2
-        or teacher_hidden_states.shape[:2] != teacher_token_tags.shape
-    ):
-        raise ValueError("MiniMax-H3 teacher hidden states and token tags must share [B,L]")
-    if teacher_token_tags.dtype != torch.int64 or not torch.all((teacher_token_tags == 0) | (teacher_token_tags == 1)):
-        raise ValueError("MiniMax-H3 teacher text token tags must be int64 values 0 or 1")
-    if teacher_hidden_states.shape[2] != hidden_states.shape[2]:
-        raise ValueError(
-            f"MiniMax-H3 teacher text width {teacher_hidden_states.shape[2]} does not match"
-            f" the student text width {hidden_states.shape[2]}"
-        )
-
-
 def _runtime_batch_plan(
-    batch: dict[str, Any],
+    batch: Mapping[str, Any],
     video_latents: torch.Tensor,
     *,
+    task: str,
     teacher_conditions: str | None = None,
     one_frame: bool = False,
 ) -> _H3RuntimeBatch:
-    if video_latents.ndim != 5 or video_latents.shape[1] != 24:
-        raise ValueError(f"MiniMax-H3 target video latents must be [B,24,F,H,W], got {tuple(video_latents.shape)}")
+    missing = [key for key in _REQUIRED_BATCH_KEYS if key not in batch]
+    if missing:
+        raise ValueError(f"MiniMax-H3 batch is missing {', '.join(missing)}; re-run latent caching")
     batch_size = video_latents.shape[0]
     if batch_size != 1:
         raise ValueError(f"MiniMax-H3 R1 requires batch_size=1, got {batch_size}; use gradient accumulation")
-    audio_latents = batch.get("latents_audio")
-    if not isinstance(audio_latents, torch.Tensor) or audio_latents.ndim != 4 or tuple(audio_latents.shape[1:3]) != (32, 2):
-        shape = None if not isinstance(audio_latents, torch.Tensor) else tuple(audio_latents.shape)
-        raise ValueError(f"MiniMax-H3 target audio latents must be [B,32,2,A], got {shape}")
-    if audio_latents.shape[0] != batch_size:
-        raise ValueError("MiniMax-H3 target video and audio batch sizes differ")
-    audio_present = _validate_audio_present(batch.get("audio_present"), batch_size)
-
-    hidden_states = _stack_single_text_rows(batch.get("mmh3_hidden_states"), "text hidden states")
-    token_tags = _stack_single_text_rows(batch.get("mmh3_token_tags"), "text token tags")
-    if hidden_states.ndim != 3 or token_tags.ndim != 2 or hidden_states.shape[:2] != token_tags.shape:
-        raise ValueError("MiniMax-H3 hidden states and token tags must share [B,L]")
-    if token_tags.dtype != torch.int64 or not torch.all((token_tags == 0) | (token_tags == 1)):
-        raise ValueError("MiniMax-H3 text token tags must be int64 values 0 or 1")
+    audio_latents = batch["latents_audio"]
+    audio_present = batch["audio_present"]
+    if not isinstance(audio_present, torch.Tensor) or audio_present.shape != (batch_size,):
+        raise ValueError("MiniMax-H3 batch requires an audio_present tensor with shape [B]; re-run latent caching")
+    hidden_states = _stack_single_text_rows(batch["mmh3_hidden_states"], "text hidden states")
+    token_tags = _stack_single_text_rows(batch["mmh3_token_tags"], "text token tags")
+    entries = _BatchEntries(batch)
     condition_roles = _condition_roles_in(batch)
-    has_fl_condition = any(role.family in {"fl", "one_frame"} for role in condition_roles.values())
-    has_fl_teacher_text = "mmh3_teacher_hidden_states" in batch or "mmh3_teacher_token_tags" in batch
-    has_ref_teacher_text = "mmh3_teacher_ref_hidden_states" in batch or "mmh3_teacher_ref_token_tags" in batch
-    has_subject_ref_teacher_text = (
-        "mmh3_teacher_subject_ref_hidden_states" in batch or "mmh3_teacher_subject_ref_token_tags" in batch
-    )
-    if (has_fl_teacher_text or has_ref_teacher_text or has_subject_ref_teacher_text) and teacher_conditions is None:
-        raise ValueError(
-            "MiniMax-H3 text cache contains teacher rows (--teacher_conditions); pass --h3_teacher_matching"
-            " or rebuild the text cache without --teacher_conditions"
-        )
-    # the text cache kind must match the configured teacher: distinct keys per kind
-    present_teacher_kinds = {
-        kind
-        for kind, present in (
-            ("first,last", has_fl_teacher_text),
-            (TEACHER_CONDITIONS_REF, has_ref_teacher_text),
-            (TEACHER_CONDITIONS_SUBJECT_REF, has_subject_ref_teacher_text),
-        )
-        if present
-    }
-    if teacher_conditions is not None:
-        foreign = present_teacher_kinds - {teacher_conditions}
-        if foreign:
-            raise ValueError(
-                f"MiniMax-H3 text cache contains {sorted(foreign)[0]} teacher rows but training runs"
-                f" --h3_teacher_conditions {teacher_conditions};"
-                f" re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions {teacher_conditions}"
-            )
-    reference_roles: dict[int, dict[str, torch.Tensor]] = {}
-    for name, role in condition_roles.items():
-        if role.family != "reference":
-            continue
-        value = batch[f"latents_{name}"]
-        if not isinstance(value, torch.Tensor):
-            raise ValueError(f"MiniMax-H3 condition latents_{name} must be a tensor")
-        reference_roles.setdefault(role.index, {})[role.reference_kind] = value
-    if has_fl_condition and reference_roles:
-        raise ValueError("MiniMax-H3 batch cannot mix FL2VA and Ref2VA condition roles")
+    notices: list[str] = []
 
-    is_one_frame_batch = video_latents.shape[2] == 1
-    one_frame_index_value = batch.get("one_frame_target_index")
-    one_frame_control_value = batch.get("one_frame_control_indices")
-    time_overrides = None
-    if is_one_frame_batch:
+    is_one_frame = video_latents.shape[2] == ONE_FRAME_VIDEO_LATENT_FRAMES
+    target_index = None
+    if is_one_frame:
         if not one_frame:
             raise ValueError("MiniMax-H3 batch carries a one-frame latent cache; pass --one_frame to train on image targets")
-        if teacher_conditions is not None and teacher_conditions != TEACHER_CONDITIONS_SUBJECT_REF:
-            raise ValueError(
-                "MiniMax-H3 one-frame training supports teacher matching with --h3_teacher_conditions subject_ref only"
-            )
-        if (
-            not isinstance(one_frame_index_value, torch.Tensor)
-            or one_frame_index_value.shape != (batch_size,)
-            or one_frame_index_value.dtype != torch.int64
-        ):
-            raise ValueError(
-                "MiniMax-H3 one-frame batch requires an int64 one_frame_target_index tensor;"
-                " re-run minimax_h3_cache_latents.py --one_frame"
-            )
-        target_index = int(one_frame_index_value.item())
-        if target_index < 0:
-            raise ValueError(f"MiniMax-H3 one-frame target index must be nonnegative, got {target_index}")
-        condition_times: tuple[float, ...] = ()
-        if has_fl_condition:
-            if (
-                not isinstance(one_frame_control_value, torch.Tensor)
-                or one_frame_control_value.ndim != 2
-                or one_frame_control_value.shape[0] != batch_size
-                or one_frame_control_value.dtype != torch.int64
-            ):
-                raise ValueError(
-                    "MiniMax-H3 one-frame FL2VA batch requires an int64 one_frame_control_indices tensor;"
-                    " re-run minimax_h3_cache_latents.py --one_frame --task fl2va"
-                )
-            control_indices = [int(index) for index in one_frame_control_value[0].tolist()]
-            if any(index < 0 for index in control_indices):
-                raise ValueError(f"MiniMax-H3 one-frame control indices must be nonnegative, got {control_indices}")
-            _warn_once_coinciding_indices(control_indices, target_index)
-            condition_times = tuple(FRAME_RESCALE * index for index in control_indices)
-        elif one_frame_control_value is not None:
-            # references are untimed: only FL2VA controls carry condition indices
-            raise ValueError("MiniMax-H3 one-frame T2VA/Ref2VA batch cannot carry one_frame_control_indices; re-run latent caching")
-        time_overrides = H3TimeOverrides(condition_times=condition_times, target_time=FRAME_RESCALE * target_index)
-    elif one_frame_index_value is not None or one_frame_control_value is not None:
-        raise ValueError("MiniMax-H3 video batch cannot carry one-frame index tensors; re-run latent caching")
+        target_index = int(entries.take_index_tensor("one_frame_target_index", batch_size, ndim=1, hint="")[0].item())
 
-    visual_conditions = []
-    audio_conditions = []
-    condition_geometries = []
-    references = []
+    # the student's conditions, by the authoritative --task
+    visual_conditions: list[torch.Tensor] = []
+    audio_conditions: list[torch.Tensor] = []
+    condition_geometries: list[H3VideoGeometry] = []
+    references: list[H3ReferenceGeometry] = []
     fl_condition_roles: tuple[str, ...] | None = None
+    condition_times: tuple[float, ...] = ()
+    if task == "fl2va":
+        fl_condition_roles = _collect_fl_conditions(
+            entries, condition_roles, visual_conditions, condition_geometries, one_frame=is_one_frame
+        )
+        if is_one_frame:
+            # one-frame conditions are timed by their control indices, not by role names
+            control_value = entries.take_index_tensor("one_frame_control_indices", batch_size, ndim=2, hint=" --task fl2va")
+            control_indices = [int(index) for index in control_value[0].tolist()]
+            if target_index in control_indices:
+                notices.append(
+                    f"MiniMax-H3 one-frame FL2VA data places a control at the target index ({target_index}): the base"
+                    " model's prior at coinciding timestamps is verbatim anchor copying, so make sure that is the"
+                    " intended training signal (see docs/minimax_h3_1f.md)"
+                )
+            condition_times = tuple(FRAME_RESCALE * index for index in control_indices)
+    elif task == "ref2va":
+        references, visual_conditions, audio_conditions = _collect_reference_conditions(entries, condition_roles)
+        if not references:
+            raise ValueError(
+                "MiniMax-H3 Ref2VA batch requires latents_ref_000_* reference latents; re-run minimax_h3_cache_latents.py --task ref2va"
+            )
+    # references are untimed: only FL2VA controls carry condition times
+    time_overrides = H3TimeOverrides(condition_times, FRAME_RESCALE * target_index) if is_one_frame else None
+
+    target_geometry = H3VideoGeometry(*video_latents.shape[2:])
     teacher_layout = None
     teacher_hidden_states = None
     teacher_token_tags = None
     teacher_visual_conditions: list[torch.Tensor] = []
     teacher_audio_conditions: list[torch.Tensor] = []
-    if teacher_conditions == TEACHER_CONDITIONS_REF:
-        # the student trains as T2VA; the teacher runs on the Ref2VA layout with the cached
-        # target latents themselves (video + audio) as the reference condition, so the teacher
-        # sees complete information at every sigma. FL2VA first/last latents, if present in the
-        # caches, are simply unused in this mode.
-        if reference_roles:
-            raise ValueError("MiniMax-H3 teacher matching does not accept Ref2VA condition roles")
-        if not has_ref_teacher_text:
+    if teacher_conditions is not None:
+        hidden_key, tags_key = _teacher_text_keys(teacher_conditions)
+        if hidden_key not in entries or tags_key not in entries:
             raise ValueError(
-                "MiniMax-H3 ref teacher matching requires reference teacher text rows;"
-                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions ref"
+                f"MiniMax-H3 {teacher_conditions} teacher matching requires {teacher_conditions} teacher text rows;"
+                f" re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions {teacher_conditions}"
             )
-        task = "t2va"
-        teacher_hidden_states = _stack_single_text_rows(batch.get("mmh3_teacher_ref_hidden_states"), "teacher text hidden states")
-        teacher_token_tags = _stack_single_text_rows(batch.get("mmh3_teacher_ref_token_tags"), "teacher text token tags")
-        _validate_teacher_text_rows(teacher_hidden_states, teacher_token_tags, hidden_states)
-        target_geometry = H3VideoGeometry(*video_latents.shape[2:])
-        teacher_visual_conditions.append(video_latents)
-        teacher_audio_conditions.append(audio_latents)
-        teacher_layout = build_h3_layout(
-            task="ref2va",
-            text_length=teacher_hidden_states.shape[1],
-            target_video=target_geometry,
-            target_audio_frames=audio_latents.shape[-1],
-            references=(H3ReferenceGeometry("video", video=target_geometry, audio_frames=audio_latents.shape[-1]),),
-        )
-    elif teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
-        # the student trains as T2VA; the item's own reference latents (Ref2VA cache) and the
-        # subject-declaration text rows feed only the no-grad Ref2VA teacher forward. The
-        # references are other pictures of the subject, so the teacher supplies the concept
-        # without the complete-information degeneration of the self-reference teacher.
-        if has_fl_condition:
-            raise ValueError("MiniMax-H3 subject-reference teacher matching does not accept FL2VA condition latents")
-        if not reference_roles:
-            raise ValueError(
-                "MiniMax-H3 subject-reference teacher matching requires the item's reference latents;"
-                " re-run minimax_h3_cache_latents.py --task ref2va (with --one_frame for image datasets)"
+        teacher_hidden_states = _stack_single_text_rows(entries.take(hidden_key), "teacher text hidden states")
+        teacher_token_tags = _stack_single_text_rows(entries.take(tags_key), "teacher text token tags")
+        if teacher_conditions == TEACHER_CONDITIONS_REF:
+            # the teacher runs on the Ref2VA layout with the cached target latents themselves
+            # (video + audio) as the reference condition, so it sees complete information at every
+            # sigma; FL2VA first/last latents, if present in the caches, are simply unused
+            teacher_visual_conditions.append(video_latents)
+            teacher_audio_conditions.append(audio_latents)
+            teacher_layout = build_h3_layout(
+                task="ref2va",
+                text_length=teacher_hidden_states.shape[1],
+                target_video=target_geometry,
+                target_audio_frames=audio_latents.shape[-1],
+                references=(H3ReferenceGeometry("video", video=target_geometry, audio_frames=audio_latents.shape[-1]),),
             )
-        if not has_subject_ref_teacher_text:
-            raise ValueError(
-                "MiniMax-H3 subject-reference teacher matching requires subject_ref teacher text rows;"
-                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions subject_ref"
+        elif teacher_conditions == TEACHER_CONDITIONS_SUBJECT_REF:
+            # the item's own reference latents (Ref2VA cache) and the subject-declaration text
+            # rows feed only the no-grad Ref2VA teacher forward: other pictures of the subject
+            # supply the concept without the complete-information degeneration of the
+            # self-reference teacher
+            teacher_references, teacher_visual_conditions, teacher_audio_conditions = _collect_reference_conditions(
+                entries, condition_roles
             )
-        task = "t2va"
-        teacher_references, teacher_visual_conditions, teacher_audio_conditions = _collect_reference_conditions(
-            reference_roles, batch_size
-        )
-        if any(reference.kind != "image" for reference in teacher_references):
-            raise ValueError("MiniMax-H3 subject-reference teacher matching supports image references only (v1)")
-        teacher_hidden_states = _stack_single_text_rows(
-            batch.get("mmh3_teacher_subject_ref_hidden_states"), "teacher text hidden states"
-        )
-        teacher_token_tags = _stack_single_text_rows(batch.get("mmh3_teacher_subject_ref_token_tags"), "teacher text token tags")
-        _validate_teacher_text_rows(teacher_hidden_states, teacher_token_tags, hidden_states)
-        # a one-frame teacher layout must carry the one-frame flag and the target-time override
-        # (the same rebuild trap as the guidance-loss uncond layout); references are untimed
-        teacher_layout = build_h3_layout(
-            task="ref2va",
-            text_length=teacher_hidden_states.shape[1],
-            target_video=H3VideoGeometry(*video_latents.shape[2:]),
-            target_audio_frames=audio_latents.shape[-1],
-            references=tuple(teacher_references),
-            one_frame=is_one_frame_batch,
-            time_overrides=time_overrides,
-        )
-    elif teacher_conditions is not None:
-        # the student trains as T2VA; the first/last latents and the Picture-prefixed text rows
-        # feed only the no-grad FL2VA teacher forward
-        if reference_roles:
-            raise ValueError("MiniMax-H3 teacher matching does not accept Ref2VA condition roles")
-        if not has_fl_condition:
-            raise ValueError(
-                "MiniMax-H3 teacher matching requires FL2VA-style latent caches with first/last conditions;"
-                " re-run minimax_h3_cache_latents.py --task fl2va"
+            if not teacher_references:
+                raise ValueError(
+                    "MiniMax-H3 subject-reference teacher matching requires the item's reference latents;"
+                    " re-run minimax_h3_cache_latents.py --task ref2va (with --one_frame for image datasets)"
+                )
+            if any(reference.kind != "image" for reference in teacher_references):
+                raise ValueError("MiniMax-H3 subject-reference teacher matching supports image references only (v1)")
+            # a one-frame teacher layout must carry the one-frame flag and the target-time override
+            # (the same rebuild trap as the guidance-loss uncond layout); references are untimed
+            teacher_layout = build_h3_layout(
+                task="ref2va",
+                text_length=teacher_hidden_states.shape[1],
+                target_video=target_geometry,
+                target_audio_frames=audio_latents.shape[-1],
+                references=tuple(teacher_references),
+                one_frame=is_one_frame,
+                time_overrides=time_overrides,
             )
-        if not has_fl_teacher_text:
-            raise ValueError(
-                "MiniMax-H3 teacher matching requires teacher text rows;"
-                " re-run minimax_h3_cache_text_encoder_outputs.py --task t2va --teacher_conditions first,last"
+        else:
+            # the first/last latents and the Picture-prefixed text rows feed only the no-grad
+            # FL2VA teacher forward
+            teacher_geometries: list[H3VideoGeometry] = []
+            if not any(role.family == "fl" for role in condition_roles.values()):
+                raise ValueError(
+                    "MiniMax-H3 teacher matching requires FL2VA-style latent caches with first/last conditions;"
+                    " re-run minimax_h3_cache_latents.py --task fl2va"
+                )
+            _collect_fl_conditions(entries, condition_roles, teacher_visual_conditions, teacher_geometries)
+            teacher_layout = build_h3_layout(
+                task="fl2va",
+                text_length=teacher_hidden_states.shape[1],
+                target_video=target_geometry,
+                target_audio_frames=audio_latents.shape[-1],
+                visual_conditions=tuple(teacher_geometries),
             )
-        task = "t2va"
-        teacher_geometries: list[H3VideoGeometry] = []
-        _collect_fl_conditions(batch, batch_size, teacher_visual_conditions, teacher_geometries)
-        teacher_hidden_states = _stack_single_text_rows(batch.get("mmh3_teacher_hidden_states"), "teacher text hidden states")
-        teacher_token_tags = _stack_single_text_rows(batch.get("mmh3_teacher_token_tags"), "teacher text token tags")
-        _validate_teacher_text_rows(teacher_hidden_states, teacher_token_tags, hidden_states)
-        teacher_layout = build_h3_layout(
-            task="fl2va",
-            text_length=teacher_hidden_states.shape[1],
-            target_video=H3VideoGeometry(*video_latents.shape[2:]),
-            target_audio_frames=audio_latents.shape[-1],
-            visual_conditions=tuple(teacher_geometries),
-        )
-    elif has_fl_condition:
-        task = "fl2va"
-        fl_condition_roles = _collect_fl_conditions(
-            batch, batch_size, visual_conditions, condition_geometries, one_frame=is_one_frame_batch
-        )
-    elif reference_roles:
-        task = "ref2va"
-        references, visual_conditions, audio_conditions = _collect_reference_conditions(reference_roles, batch_size)
-    else:
-        task = "t2va"
 
-    if is_one_frame_batch and task == "fl2va" and len(condition_geometries) != len(time_overrides.condition_times):
-        raise ValueError(
-            f"MiniMax-H3 one-frame FL2VA batch has {len(condition_geometries)} condition latents for"
-            f" {len(time_overrides.condition_times)} control indices; re-run latent caching"
+    if entries.unread:
+        consumer = f"--task {task}" if teacher_conditions is None else f"--task {task} with the {teacher_conditions} teacher"
+        notices.append(
+            f"MiniMax-H3 batch entries {', '.join(sorted(entries.unread))} are not used by {consumer} and are ignored;"
+            " check that the caches were written for this task"
         )
+
     layout = build_h3_layout(
         task=task,
         text_length=hidden_states.shape[1],
-        target_video=H3VideoGeometry(*video_latents.shape[2:]),
+        target_video=target_geometry,
         target_audio_frames=audio_latents.shape[-1],
         visual_conditions=tuple(condition_geometries),
         references=tuple(references),
-        one_frame=is_one_frame_batch,
-        condition_roles=fl_condition_roles if is_one_frame_batch else None,
+        one_frame=is_one_frame,
+        condition_roles=fl_condition_roles,
         time_overrides=time_overrides,
     )
     return _H3RuntimeBatch(
@@ -560,11 +470,13 @@ def _runtime_batch_plan(
         teacher_text_token_tags=teacher_token_tags,
         teacher_visual_conditions=tuple(teacher_visual_conditions),
         teacher_audio_conditions=tuple(teacher_audio_conditions),
+        notices=tuple(notices),
     )
 
 
-def _shift_noise_amount(base: torch.Tensor, shift: float) -> torch.Tensor:
-    return shift * base / (1.0 + (shift - 1.0) * base)
+def _base_sigma_of(timesteps: torch.Tensor) -> float:
+    """The drawn pre-shift base sigma behind the trainer's 1..1000 timestep convention."""
+    return float((timesteps.reshape(-1)[0].item() - 1.0) / 1000.0)
 
 
 def _apply_timestep_focus(base: torch.Tensor, low: float, high: float, prob: float) -> torch.Tensor:
@@ -670,27 +582,25 @@ def _prediction_geometry_log(label: str, prediction: torch.Tensor, target: torch
     }
 
 
-def _augment_conditions(tensors: tuple[torch.Tensor, ...], clean: float) -> tuple[torch.Tensor, ...]:
-    """Blend independent Gaussian noise into condition latents: clean*x + (1-clean)*eps.
-
-    Training draws fresh noise from the global RNG, like the target noise; only the
-    sampling path (minimax_h3.sampling) needs seed-reproducible condition noise.
-    """
-    if clean == 1.0:
-        return tensors
-    augmented = []
-    for tensor in tensors:
-        noise = torch.randn(tuple(tensor.shape), dtype=torch.float32, device=tensor.device).to(tensor.dtype)
-        augmented.append(clean * tensor + (1.0 - clean) * noise)
-    return tuple(augmented)
+def _scalar_logs(logs: Mapping[str, torch.Tensor | float]) -> dict[str, float]:
+    """The per-step metrics as plain floats (the ``process_batch`` contract), fetched from the
+    device in one transfer instead of one sync per entry."""
+    if not logs:
+        return {}
+    scalars = [torch.as_tensor(value).detach().float().reshape(()) for value in logs.values()]
+    device = next((scalar.device for scalar in scalars if scalar.device.type != "cpu"), torch.device("cpu"))
+    values = torch.stack([scalar.to(device) for scalar in scalars]).cpu().tolist()
+    return dict(zip(logs.keys(), values))
 
 
-@dataclass(frozen=True)
-class H3SamplingResources:
-    """Training-time sampling payload: H3 decodes samples with two separate VAEs."""
+class H3SamplingResources(torch.nn.Module):
+    """Training-time sampling payload: H3 decodes samples with two separate VAEs. A Module, so the
+    base trainer's resource handling (device moves after each sample) covers both."""
 
-    video_vae: torch.nn.Module
-    audio_vae: torch.nn.Module
+    def __init__(self, video_vae: torch.nn.Module, audio_vae: torch.nn.Module):
+        super().__init__()
+        self.video_vae = video_vae
+        self.audio_vae = audio_vae
 
 
 @dataclass
@@ -721,12 +631,14 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # first-epoch warning and the observed fraction saved in metadata
         self._audio_items_seen = 0
         self._audio_supervised_seen = 0
-        # guidance-loss uncond probe (CPU hidden rows + tags), loaded when
+        # guidance-loss uncond probe (CPU hidden rows + tags), loaded by on_train_start when
         # --h3_guidance_loss_scale is active
         self._guidance_uncond: tuple[torch.Tensor, torch.Tensor] | None = None
         # effective base quantization, known once load_transformer has seen the checkpoint
         # (pre-quantized ConvRot INT8 files are detected there, independent of --convrot_int8)
         self._convrot_int8_active: bool | None = None
+        # batch observations already warned about (each one is logged once per run)
+        self._warned_notices: set[str] = set()
 
     @property
     def architecture(self) -> str:
@@ -765,14 +677,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         upper = 1000.0 if args.max_timestep is None else float(args.max_timestep)
         if not 0.0 <= lower <= upper <= 1000.0:
             raise ValueError("MiniMax-H3 min_timestep/max_timestep must define a range inside [0,1000]")
-        for name, value in (("h3_shift_video", args.h3_shift_video), ("h3_shift_audio", args.h3_shift_audio)):
-            if not 0.01 <= float(value) <= 100.0:
-                raise ValueError(f"--{name} must be in [0.01,100.0], got {value}")
-        for name, value in (("h3_visual_cond_clean", args.h3_visual_cond_clean), ("h3_audio_cond_clean", args.h3_audio_cond_clean)):
-            if not 0.0 <= float(value) <= 1.0:
-                raise ValueError(f"--{name} must be in [0.0,1.0], got {value}")
-        if args.audio_loss_weight < 0:
-            raise ValueError(f"--audio_loss_weight must be nonnegative, got {args.audio_loss_weight}")
+        validate_shift(args.h3_shift_video, "--h3_shift_video")
+        validate_shift(args.h3_shift_audio, "--h3_shift_audio")
+        validate_clean_coefficient(args.h3_visual_cond_clean, "--h3_visual_cond_clean")
+        validate_clean_coefficient(args.h3_audio_cond_clean, "--h3_audio_cond_clean")
         if args.blocks_to_swap is not None and args.blocks_to_swap > 48:
             raise ValueError("--blocks_to_swap for MiniMax-H3 must be <= 48")
         if args.fp8_base or args.fp8_scaled:
@@ -873,25 +781,30 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise ValueError(f"--h3_guidance_loss_scale_audio must be nonnegative, got {args.h3_guidance_loss_scale_audio}")
         if not 0.0 <= float(args.h3_guidance_loss_sigma_min) <= 1.0:
             raise ValueError(f"--h3_guidance_loss_sigma_min must be in [0.0,1.0], got {args.h3_guidance_loss_sigma_min}")
-        self._guidance_uncond = None
         if guidance_scale > 0.0:
             if not args.h3_guidance_loss_uncond_cache:
                 raise ValueError(
                     "--h3_guidance_loss_scale requires --h3_guidance_loss_uncond_cache"
                     " (write one with minimax_h3_cache_text_encoder_outputs.py --uncond_output)"
                 )
+            require_path(args.h3_guidance_loss_uncond_cache, "h3_guidance_loss_uncond_cache")
+        elif args.h3_guidance_loss_uncond_cache:
+            logger.warning("--h3_guidance_loss_uncond_cache is ignored because --h3_guidance_loss_scale is 0")
+
+    def on_train_start(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, optimizer) -> None:
+        del accelerator, network, transformer, optimizer
+        self._guidance_uncond = None
+        if float(args.h3_guidance_loss_scale) > 0.0:
             hidden_states, token_tags, metadata = load_h3_uncond_cache(args.h3_guidance_loss_uncond_cache)
             self._guidance_uncond = (hidden_states, token_tags)
             logger.info(
                 "MiniMax-H3 guidance loss: scale=%s scale_audio=%s sigma_min=%s uncond=%r (%d rows)",
-                guidance_scale,
+                args.h3_guidance_loss_scale,
                 self._guidance_audio_scale(args),
                 args.h3_guidance_loss_sigma_min,
                 metadata.get("text", "?"),
                 hidden_states.shape[0],
             )
-        elif args.h3_guidance_loss_uncond_cache:
-            logger.warning("--h3_guidance_loss_uncond_cache is ignored because --h3_guidance_loss_scale is 0")
 
     def on_transformer_loaded(
         self,
@@ -912,13 +825,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 raise ValueError("--convrot_int8_bwd int8 requires a CUDA training device")
         if is_convrot_int8 and args.base_weights:
             raise ValueError("MiniMax-H3 --base_weights cannot be merged into a ConvRot INT8 transformer base")
-
-    def process_sample_prompts(self, args, accelerator, sample_prompts):
-        # only the default prepare_sampling needs this seam; guard against future
-        # base-side callers silently getting the base NotImplementedError instead
-        raise NotImplementedError(
-            "MiniMax-H3 prepares sample prompts inside prepare_sampling, which returns joint AV sampling resources"
-        )
 
     def prepare_sampling(self, args, accelerator, vae_dtype):
         del vae_dtype  # the H3 video/audio VAE dtypes are fixed per stage
@@ -1031,6 +937,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 else ()
             )
             logger.info("MiniMax-H3 training sample %d: %r", parameter["enum"], preparation.request.prompt)
+            # the resolved coordinates, so the base sampler's log lines describe the actual sample
+            parameter["width"] = preparation.request.width
+            parameter["height"] = preparation.request.height
+            parameter["frame_count"] = preparation.request.frame_count
+            parameter["sample_steps"] = preparation.request.steps
+            parameter["seed"] = preparation.request.seed
             parameter["h3_request"] = preparation.request
             parameter["h3_layout"] = build_generation_layout(
                 preparation.request,
@@ -1042,140 +954,110 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             parameter["h3_audio_conditions"] = preparation.audio_conditions
         return parameters, H3SamplingResources(video_vae=video_vae, audio_vae=audio_vae)
 
-    def sample_image_inference(
+    def round_sample_frame_count(self, frame_count: int) -> int:
+        return _sample_frame_count(frame_count)
+
+    def do_inference(
         self,
         accelerator,
         args,
-        transformer,
-        dit_dtype,
-        sample_resources,
-        save_dir,
         sample_parameter,
-        epoch,
-        steps,
+        vae,
+        dit_dtype,
+        transformer,
+        discrete_flow_shift,
+        sample_steps,
+        width,
+        height,
+        frame_count,
+        generator,
+        do_classifier_free_guidance,
+        guidance_scale,
+        cfg_scale,
+        image_path=None,
+        control_video_path=None,
     ):
-        del dit_dtype
-        if not isinstance(sample_resources, H3SamplingResources):
-            raise RuntimeError("MiniMax-H3 training sample VAEs were not prepared")
-        video_vae = sample_resources.video_vae
-        audio_vae = sample_resources.audio_vae
+        # the validated request prepared by prepare_sampling carries every sample coordinate
+        del args, dit_dtype, discrete_flow_shift, sample_steps, width, height, frame_count
+        del do_classifier_free_guidance, guidance_scale, cfg_scale, image_path, control_video_path
         request: H3GenerationRequest = sample_parameter["h3_request"]
         layout = sample_parameter["h3_layout"]
-        frame_count = request.frame_count
-        seed = request.seed
-        if seed is None:
-            seed = torch.seed()
-            if torch.cuda.is_available():
-                torch.cuda.seed()
-        else:
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
-        logger.info(
-            "MiniMax-H3 joint sample: prompt=%r size=%dx%d frames=%d steps=%d seed=%d",
-            request.prompt,
-            request.width,
-            request.height,
-            frame_count,
-            request.steps,
-            seed,
-        )
-
         device = accelerator.device
-        has_self_ref_orig_mod = getattr(transformer, "_orig_mod", None) is transformer
-        was_training = transformer.training if not has_self_ref_orig_mod else True
-        if not has_self_ref_orig_mod:
-            transformer.eval()
-        try:
-            with tqdm(
-                total=request.steps,
-                desc=f"MiniMax-H3 sample {sample_parameter.get('enum', 0)}",
-                unit="step",
-                disable=not accelerator.is_local_main_process,
-            ) as progress:
-                sample = sample_joint_av_latents(
-                    transformer,
-                    layout=layout,
-                    seed=seed,
-                    text_hidden_states=sample_parameter["h3_text_hidden_states"],
-                    text_token_tags=sample_parameter["h3_text_token_tags"],
-                    visual_conditions=sample_parameter["h3_visual_conditions"],
-                    audio_conditions=sample_parameter["h3_audio_conditions"],
-                    steps=request.steps,
-                    video_shift=request.h3_shift_video,
-                    audio_shift=request.h3_shift_audio,
-                    visual_condition_clean=request.h3_visual_cond_clean,
-                    audio_condition_clean=request.h3_audio_cond_clean,
-                    device=device,
-                    step_callback=lambda completed, total: progress.update(1),
-                )
-            video_latents = sample.video
-            audio_latents = sample.audio
-            del sample
-            synchronize_device(device)
-            clean_memory_on_device(device)
+        logger.info(
+            "MiniMax-H3 joint sample: shift video=%s audio=%s, condition clean visual=%s audio=%s, output fps=%d",
+            request.h3_shift_video,
+            request.h3_shift_audio,
+            request.h3_visual_cond_clean,
+            request.h3_audio_cond_clean,
+            request.output_fps,
+        )
+        with tqdm(
+            total=request.steps,
+            desc=f"MiniMax-H3 sample {sample_parameter.get('enum', 0)}",
+            unit="step",
+            disable=not accelerator.is_local_main_process,
+        ) as progress:
+            sample = sample_joint_av_latents(
+                transformer,
+                layout=layout,
+                # the base seeds the generator from the prompt's seed, or from a fresh random one
+                seed=generator.initial_seed(),
+                text_hidden_states=sample_parameter["h3_text_hidden_states"],
+                text_token_tags=sample_parameter["h3_text_token_tags"],
+                visual_conditions=sample_parameter["h3_visual_conditions"],
+                audio_conditions=sample_parameter["h3_audio_conditions"],
+                steps=request.steps,
+                video_shift=request.h3_shift_video,
+                audio_shift=request.h3_shift_audio,
+                visual_condition_clean=request.h3_visual_cond_clean,
+                audio_condition_clean=request.h3_audio_cond_clean,
+                device=device,
+                step_callback=lambda completed, total: progress.update(1),
+            )
+        synchronize_device(device)
+        clean_memory_on_device(device)
 
-            logger.info("Decoding MiniMax-H3 training sample video")
-            video_vae.to(device).eval()
-            _, video_dtype = module_device_dtype(video_vae, VIDEO_VAE_DECODE_DTYPE)
-            decoded_video = video_vae.decode(video_latents.to(device=device, dtype=video_dtype)).cpu()
-            video_vae.to("cpu")
-            del video_latents
-            clean_memory_on_device(device)
+        logger.info("Decoding MiniMax-H3 training sample video")
+        video_vae = vae.video_vae
+        video_vae.to(device)
+        _, video_dtype = module_device_dtype(video_vae, VIDEO_VAE_DECODE_DTYPE)
+        decoded_video = video_vae.decode(sample.video.to(device=device, dtype=video_dtype)).cpu()
+        video_vae.to("cpu")
+        clean_memory_on_device(device)
+        if request.one_frame:
+            # one-frame sample: the audio rows are a byproduct and are never decoded; the single
+            # frame is saved by the base like any image sample ([1,3,1,H,W] in [0,1])
+            return (decoded_video[:, :, :1].float().clamp(-1.0, 1.0) + 1.0) / 2.0
 
-            timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
-            number = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-            seed_suffix = "" if request.seed is None else f"_{request.seed}"
-            prompt_index = sample_parameter.get("enum", 0)
-            prefix = "" if args.output_name is None else f"{args.output_name}_"
-            output_stem = f"{prefix}{number}_{prompt_index:02d}_{timestamp}{seed_suffix}"
+        logger.info("Decoding MiniMax-H3 training sample audio")
+        audio_vae = vae.audio_vae
+        audio_vae.to(device)
+        _, audio_dtype = module_device_dtype(audio_vae, torch.float32)
+        decoded_audio = audio_vae.decode(sample.audio.to(device=device, dtype=audio_dtype)).cpu()
+        audio_vae.to("cpu")
+        clean_memory_on_device(device)
+        # a stretched sample (--ofps) plays its frame_count frames over the stretched real
+        # duration, like the generation CLI: the container rate and the audio trim follow it
+        return synchronize_decoded_av(decoded_video, decoded_audio, frame_count=request.frame_count, fps=request.output_fps)
 
-            if frame_count == 1:
-                # one-frame sample: the audio rows are a byproduct and are never decoded
-                del audio_latents
-                output_path = Path(save_dir) / f"{output_stem}.png"
-                write_image(decoded_video_to_uint8(decoded_video, frame_limit=1)[0], output_path)
-                logger.info("Saved MiniMax-H3 one-frame training sample: %s", output_path)
-            else:
-                logger.info("Decoding MiniMax-H3 training sample audio")
-                audio_vae.to(device).eval()
-                _, audio_dtype = module_device_dtype(audio_vae, torch.float32)
-                decoded_audio = audio_vae.decode(audio_latents.to(device=device, dtype=audio_dtype)).cpu()
-                audio_vae.to("cpu")
-                del audio_latents
-                clean_memory_on_device(device)
+    def save_sample(self, accelerator, args, sample_parameter, sample, save_dir: str, save_path: str, steps: int) -> None:
+        if not isinstance(sample, H3DecodedAV):
+            # a one-frame sample is a plain image tensor
+            return super().save_sample(accelerator, args, sample_parameter, sample, save_dir, save_path, steps)
+        output_path = Path(save_dir) / f"{save_path}.mp4"
+        write_joint_av(sample, output_path)
+        logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
+        wandb_tracker, wandb = wandb_tracker_and_module(accelerator)
+        if wandb_tracker is not None:
+            wandb_tracker.log(
+                {f"sample_{sample_parameter.get('enum', 0)}": wandb.Video(str(output_path), fps=sample.fps)}, step=steps
+            )
 
-                # a stretched sample (--ofps) plays its frame_count frames over the stretched real
-                # duration, like the generation CLI: the container rate and the audio trim follow it
-                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count, fps=request.output_fps)
-                output_path = Path(save_dir) / f"{output_stem}.mp4"
-                write_joint_av(decoded, output_path)
-                logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
-
-            try:
-                wandb_tracker = accelerator.get_tracker("wandb")
-            except (AttributeError, ValueError):
-                wandb_tracker = None
-            if wandb_tracker is not None:
-                try:
-                    import wandb
-                except ImportError:
-                    logger.warning("wandb tracker is active but wandb is not installed")
-                else:
-                    if frame_count == 1:
-                        wandb_tracker.log({f"sample_{prompt_index}": wandb.Image(str(output_path))}, step=steps)
-                    else:
-                        wandb_tracker.log(
-                            {f"sample_{prompt_index}": wandb.Video(str(output_path), fps=request.output_fps)}, step=steps
-                        )
-            return output_path
-        finally:
-            video_vae.to("cpu")
-            audio_vae.to("cpu")
-            if not has_self_ref_orig_mod:
-                transformer.train(was_training)
-            gc.collect()
-            clean_memory_on_device(device)
+    def _notice(self, message: str) -> None:
+        """Logs a batch observation once per run (the same cache condition recurs every step)."""
+        if message not in self._warned_notices:
+            self._warned_notices.add(message)
+            logger.warning(message)
 
     def on_epoch_end(self, args: argparse.Namespace, accelerator: Accelerator, network, transformer, epoch: int) -> None:
         del network, transformer
@@ -1286,7 +1168,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         network_dtype: torch.dtype,
         **kwargs,
     ) -> DiTOutput:
-        del batch  # timesteps (the pre-shift base sigma) gates the guidance-loss forward
+        del batch
+        base_sigma = _base_sigma_of(timesteps)  # the pre-shift draw gates the guidance/teacher forwards
         audio_latents = kwargs.pop("audio_latents")
         audio_noise = kwargs.pop("audio_noise")
         noisy_audio_input = kwargs.pop("noisy_audio_input")
@@ -1308,14 +1191,15 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
 
         video_target = latents - noise
         audio_target = audio_latents - audio_noise
-        guidance_log: dict[str, torch.Tensor] = {}
+        guidance_log: dict[str, torch.Tensor | float] = {}
+        teacher_conditioned = True
         if self._guidance_uncond is not None:
             # the uncond forward runs before the grad forward so the block-swap offloader
             # keeps its forward->backward alternation and no autograd graph is live yet
-            applied = float(timesteps) >= float(args.h3_guidance_loss_sigma_min)
+            applied = base_sigma >= float(args.h3_guidance_loss_sigma_min)
             # the drawn pre-shift sigma, so the logged gap magnitudes can be binned by noise level
-            guidance_log["guidance/base_sigma"] = torch.as_tensor(float(timesteps))
-            guidance_log["guidance/applied"] = torch.tensor(1.0 if applied else 0.0)
+            guidance_log["guidance/base_sigma"] = base_sigma
+            guidance_log["guidance/applied"] = 1.0 if applied else 0.0
             if applied:
                 video_target, audio_target, gap_log = self._apply_guidance_loss_targets(
                     args,
@@ -1334,7 +1218,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 )
                 guidance_log.update(gap_log)
         if args.h3_teacher_matching:
-            video_target, audio_target, teacher_log = self._apply_teacher_matching_targets(
+            video_target, audio_target, teacher_conditioned, teacher_log = self._apply_teacher_matching_targets(
                 args,
                 accelerator,
                 transformer,
@@ -1349,7 +1233,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 video_target,
                 audio_target,
                 network_dtype,
-                timesteps,
+                base_sigma,
             )
             guidance_log.update(teacher_log)
 
@@ -1385,6 +1269,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 "audio_pred": prediction.audio,
                 "audio_target": audio_target,
                 "audio_loss_weight": audio_loss_weight,
+                "teacher_conditioned": teacher_conditioned,
                 "guidance_log": guidance_log,
             },
         )
@@ -1425,11 +1310,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         visual/audio conditions stay (the same augmented tensors as the main forward).
         """
         uncond_hidden, uncond_tags = self._guidance_uncond
-        if uncond_hidden.shape[1] != runtime.text_hidden_states.shape[2]:
-            raise ValueError(
-                f"MiniMax-H3 guidance-loss uncond cache width {uncond_hidden.shape[1]} does not match"
-                f" the text cache width {runtime.text_hidden_states.shape[2]}"
-            )
         # the probe swaps only the text rows; the one-frame times stay valid because they
         # are relative to the target-block cursor, which moves with the text length. The
         # FL2VA condition roles are recovered from the segments so a one-frame FL2VA layout
@@ -1495,8 +1375,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         video_target: torch.Tensor,
         audio_target: torch.Tensor,
         network_dtype: torch.dtype,
-        base_sigma,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        base_sigma: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, bool, dict[str, torch.Tensor | float]]:
         """Replace both flow targets with the frozen base model's predictions.
 
         The teacher shares weights with the student: the same transformer runs once with the
@@ -1528,8 +1408,6 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         reference against a footing-less x_t); anchoring that band to the base also counters
         the collateral drift of the LoRA's shared weights.
         """
-        if runtime.teacher_layout is None or runtime.teacher_text_hidden_states is None:
-            raise RuntimeError("MiniMax-H3 teacher matching batch plan is missing the teacher layout")
         if network is None:
             raise RuntimeError("MiniMax-H3 teacher matching requires the LoRA network to disable it for the teacher forward")
         base_network = accelerator.unwrap_model(network)
@@ -1537,7 +1415,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # reveals x_0, so every teacher's prediction collapses toward the raw velocity (the
         # complete-information de-amplification channel entering from below)
         sigma_min = float(args.h3_teacher_condition_sigma_min)
-        conditioned = sigma_min <= float(base_sigma) <= float(args.h3_teacher_condition_sigma_max)
+        conditioned = sigma_min <= base_sigma <= float(args.h3_teacher_condition_sigma_max)
         if conditioned:
             teacher_text = runtime.teacher_text_hidden_states
             teacher_tags = runtime.teacher_text_token_tags
@@ -1574,12 +1452,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         # the flow-gap magnitudes measure how far the teacher deviates from the raw velocity
         # target (guidance amplification + endpoint information), binned by base sigma
         teacher_log = {
-            "teacher/base_sigma": torch.as_tensor(float(base_sigma)),
-            "teacher/conditioned": torch.tensor(1.0 if conditioned else 0.0),
+            "teacher/base_sigma": base_sigma,
+            "teacher/conditioned": 1.0 if conditioned else 0.0,
             "teacher/video_flow_gap_rms": (teacher_video - video_target.float()).pow(2).mean().sqrt().detach(),
             "teacher/audio_flow_gap_rms": (teacher_audio - audio_target.float()).pow(2).mean().sqrt().detach(),
         }
-        return teacher_video, teacher_audio, teacher_log
+        return teacher_video, teacher_audio, conditioned, teacher_log
 
     def process_batch(
         self,
@@ -1598,41 +1476,43 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del sample_resources
         teacher_conditions = normalize_teacher_conditions(args.h3_teacher_conditions) if args.h3_teacher_matching else None
-        # _runtime_batch_plan rejects batches larger than one item (batch_size=1 rule)
-        runtime = _runtime_batch_plan(batch, latents, teacher_conditions=teacher_conditions, one_frame=bool(args.one_frame))
+        runtime = _runtime_batch_plan(
+            batch, latents, task=args.task, teacher_conditions=teacher_conditions, one_frame=bool(args.one_frame)
+        )
+        for notice in runtime.notices:
+            self._notice(notice)
+        # the shared audio-loss policy validates the cached presence flags
+        audio_loss_weight = effective_audio_loss_weights(runtime.audio_present, args)
         self._audio_items_seen += int(runtime.audio_present.numel())
         self._audio_supervised_seen += int(runtime.audio_present.sum().item())
-        if runtime.layout.task != args.task:
-            raise ValueError(f"MiniMax-H3 --task {args.task} cannot train a {runtime.layout.task.upper()} cache batch")
         device = latents.device
+        noisy_video, timesteps = self.get_noisy_model_input_and_timesteps(
+            args, noise, latents, batch["timesteps"], noise_scheduler, device, dit_dtype
+        )
+        # the audio shares the drawn base sigma under its own shift
+        base = (timesteps[0] - 1.0) / 1000.0
+        sigma_video = shift_sigma(base, args.h3_shift_video)
+        sigma_audio = shift_sigma(base, args.h3_shift_audio)
         audio_latents = batch["latents_audio"].to(device=device)
         audio_noise = torch.randn_like(audio_latents)
-        pool = batch.get("timesteps")
-        if pool is not None and len(pool) != 1:
-            raise ValueError("MiniMax-H3 R1 requires exactly one timestep value for its single-item batch")
-        base = self.sample_timesteps(args, 1, pool, latents, device)[0]
-        base = _apply_timestep_focus(
-            base, float(args.h3_timestep_focus_min), float(args.h3_timestep_focus_max), float(args.h3_timestep_focus_prob)
-        )
-        sigma_video = _shift_noise_amount(base, args.h3_shift_video)
-        sigma_audio = _shift_noise_amount(base, args.h3_shift_audio)
-        model_t_video = 1.0 - sigma_video
-        model_t_audio = 1.0 - sigma_audio
-        noisy_video = (1.0 - sigma_video) * latents + sigma_video * noise
         noisy_audio = (1.0 - sigma_audio) * audio_latents + sigma_audio * audio_noise
 
-        visual_conditions = _augment_conditions(
-            tuple(tensor.to(device) for tensor in runtime.visual_conditions), args.h3_visual_cond_clean
-        )
-        audio_conditions = _augment_conditions(
-            tuple(tensor.to(device) for tensor in runtime.audio_conditions), args.h3_audio_cond_clean
+        visual_conditions, audio_conditions = augment_condition_latents(
+            runtime.visual_conditions,
+            runtime.audio_conditions,
+            generator=None,
+            visual_clean=args.h3_visual_cond_clean,
+            audio_clean=args.h3_audio_cond_clean,
+            device=device,
         )
         # the teacher's conditions get the same per-step augmentation as FL2VA/Ref2VA training
-        teacher_visual_conditions = _augment_conditions(
-            tuple(tensor.to(device) for tensor in runtime.teacher_visual_conditions), args.h3_visual_cond_clean
-        )
-        teacher_audio_conditions = _augment_conditions(
-            tuple(tensor.to(device) for tensor in runtime.teacher_audio_conditions), args.h3_audio_cond_clean
+        teacher_visual_conditions, teacher_audio_conditions = augment_condition_latents(
+            runtime.teacher_visual_conditions,
+            runtime.teacher_audio_conditions,
+            generator=None,
+            visual_clean=args.h3_visual_cond_clean,
+            audio_clean=args.h3_audio_cond_clean,
+            device=device,
         )
         output = self.call_dit(
             args,
@@ -1642,22 +1522,37 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             batch,
             noise,
             noisy_video,
-            base,
+            timesteps,
             network_dtype,
             audio_latents=audio_latents,
             audio_noise=audio_noise,
             noisy_audio_input=noisy_audio,
             runtime=runtime,
-            model_t_video=model_t_video,
-            model_t_audio=model_t_audio,
+            model_t_video=1.0 - sigma_video,
+            model_t_audio=1.0 - sigma_audio,
             visual_conditions=visual_conditions,
             audio_conditions=audio_conditions,
-            audio_loss_weight=effective_audio_loss_weights(runtime.audio_present, args),
+            audio_loss_weight=audio_loss_weight,
             network=network,
             teacher_visual_conditions=teacher_visual_conditions,
             teacher_audio_conditions=teacher_audio_conditions,
         )
-        return self.compute_loss(args, output, base, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+
+    def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
+        """The video half of the H3 noising: one base sigma per item from the shared draw (uniform,
+        then the optional timestep focus), shifted by --h3_shift_video. The returned timesteps
+        follow the trainer's 1..1000 convention; process_batch derives the audio noising from the
+        same base sigma under --h3_shift_audio."""
+        del noise_scheduler, dtype
+        base = self.sample_timesteps(args, noise.shape[0], timesteps, latents, device)
+        base = _apply_timestep_focus(
+            base, float(args.h3_timestep_focus_min), float(args.h3_timestep_focus_max), float(args.h3_timestep_focus_prob)
+        )
+        sigma_video = shift_sigma(base, args.h3_shift_video).view(-1, 1, 1, 1, 1)
+        # blended in fp32, stored in the cache dtype (the released FP16 video latents stay FP16)
+        noisy_model_input = ((1.0 - sigma_video) * latents.float() + sigma_video * noise.float()).to(latents.dtype)
+        return noisy_model_input, base * 1000.0 + 1.0
 
     def compute_loss(
         self,
@@ -1671,9 +1566,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del timesteps, noise_scheduler, dit_dtype, global_step
         teacher_matching = bool(args.h3_teacher_matching)
-        guidance_log = output.extra.get("guidance_log") or {}
-        conditioned_flag = guidance_log.get("teacher/conditioned")
-        conditioned = bool(conditioned_flag.item() > 0.5) if isinstance(conditioned_flag, torch.Tensor) else True
+        conditioned = bool(output.extra.get("teacher_conditioned", True))
         dc_weight = float(args.h3_teacher_loss_dc_weight)
         mag_weight = float(args.h3_teacher_loss_mag_weight)
 
@@ -1691,15 +1584,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
 
         # the DC attenuation targets the video palette axis; the audio anchor keeps its full DC
         video_loss = flow_loss(output.pred.to(network_dtype), output.target.to(network_dtype), attenuate_dc=True)
-        audio_loss_weight = output.extra.get("audio_loss_weight")
-        if (
-            not isinstance(audio_loss_weight, torch.Tensor)
-            or audio_loss_weight.shape != (1,)
-            or not torch.isfinite(audio_loss_weight).all().item()
-            or audio_loss_weight.item() < 0.0
-        ):
-            raise ValueError("MiniMax-H3 audio loss weight must be a finite nonnegative float32 tensor with shape [1]")
-        weight = audio_loss_weight.item()
+        weight = float(output.extra["audio_loss_weight"].item())
         if weight == 0.0:
             audio_loss = video_loss.detach().new_zeros(())
         else:
@@ -1708,11 +1593,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 output.extra["audio_target"].to(network_dtype),
                 attenuate_dc=False,
             )
-        logs = {
+        logs: dict[str, torch.Tensor | float] = {
             "loss/video": video_loss.detach(),
             "loss/audio": audio_loss.detach(),
+            **output.extra.get("guidance_log", {}),
         }
-        logs.update(guidance_log)
         total_loss = video_loss + weight * audio_loss
         if teacher_matching and not conditioned:
             # preservation-anchor step: user weight on top of the automatic focus compensation,
@@ -1727,7 +1612,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             )
             if multiplier != 1.0:
                 total_loss = total_loss * multiplier
-        return total_loss, logs
+        return total_loss, _scalar_logs(logs)
 
 
 def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -1915,7 +1800,6 @@ def main() -> None:
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
     args.dit_dtype = "bfloat16" if args.dit_dtype is None else args.dit_dtype
-    args.vae_dtype = "bfloat16" if args.vae_dtype is None else args.vae_dtype
     MiniMaxH3NetworkTrainer().train(args)
 
 

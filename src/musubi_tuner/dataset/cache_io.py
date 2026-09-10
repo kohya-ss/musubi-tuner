@@ -616,13 +616,8 @@ def save_latent_cache_minimax_h3(
 
 
 # key stem of the teacher text rows a MiniMax-H3 text cache may carry next to the student rows,
-# per teacher kind: each kind uses distinct keys so the trainer hard-fails on a cache/flag mode
-# mismatch instead of silently misreading the rows
-MINIMAX_H3_TEACHER_TEXT_PREFIXES = {
-    "first,last": "varlen_mmh3_teacher",
-    "ref": "varlen_mmh3_teacher_ref",
-    "subject_ref": "varlen_mmh3_teacher_subject_ref",
-}
+# per teacher kind (the vocabulary lives with the teacher-kind seam in minimax_h3.text_encoder)
+MINIMAX_H3_TEACHER_TEXT_PREFIXES = h3_text_encoder.TEACHER_TEXT_CACHE_PREFIXES
 
 
 def _h3_text_rows(prefix: str, hidden_states: torch.Tensor, token_tags: torch.Tensor, label: str) -> dict[str, torch.Tensor]:

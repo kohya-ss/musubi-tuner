@@ -66,10 +66,12 @@ def _load_training_module(monkeypatch):
     _stub(
         monkeypatch,
         "musubi_tuner.minimax_h3.sampling",
-        decoded_video_to_uint8=noop,
+        H3DecodedAV=object,
+        augment_condition_latents=noop,
         sample_joint_av_latents=noop,
+        shift_sigma=noop,
         synchronize_decoded_av=noop,
-        write_image=noop,
+        validate_shift=noop,
         write_joint_av=noop,
     )
     _stub(
@@ -77,6 +79,7 @@ def _load_training_module(monkeypatch):
         "musubi_tuner.minimax_h3.text_encoder",
         TEACHER_CONDITIONS_REF="ref",
         TEACHER_CONDITIONS_SUBJECT_REF="subject_ref",
+        TEACHER_TEXT_CACHE_PREFIXES={},
         build_presentation=noop,
         encode_h3_presentation=noop,
         load_h3_processor=noop,
@@ -116,7 +119,13 @@ def _load_training_module(monkeypatch):
     class NetworkTrainer:
         pass
 
-    _stub(monkeypatch, "musubi_tuner.training.trainer_base", DiTOutput=SimpleNamespace, NetworkTrainer=NetworkTrainer)
+    _stub(
+        monkeypatch,
+        "musubi_tuner.training.trainer_base",
+        DiTOutput=SimpleNamespace,
+        NetworkTrainer=NetworkTrainer,
+        wandb_tracker_and_module=noop,
+    )
     _stub(monkeypatch, "musubi_tuner.utils.device_utils", clean_memory_on_device=noop, synchronize_device=noop)
     model_utils = _stub(monkeypatch, "musubi_tuner.utils.model_utils", compile_transformer=noop)
     spec = importlib.util.spec_from_file_location(
