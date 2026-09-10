@@ -97,7 +97,10 @@ def _fl_visual_keys(visuals: Mapping[object, H3TextVisual]) -> list[str]:
             raise ValueError(f"MiniMax-H3 one-frame FL2VA visuals must be the contiguous {expected}, got {cond_keys}")
         present_keys = cond_keys
     if not present_keys:
-        raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
+        raise ValueError(
+            "MiniMax-H3 FL2VA presentation requires the first/last visuals (video targets)"
+            " or the cond_{i} control visuals (one-frame targets)"
+        )
     return present_keys
 
 

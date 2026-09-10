@@ -86,7 +86,7 @@ def test_fl2va_presentation_numbers_a_lone_picture_one_for_either_role(tmp_path:
         assert presentation.text == f"<Picture 1>: {IMAGE_PLACEHOLDER}{record.caption}"
         assert len(presentation.images) == 1
 
-    with pytest.raises(ValueError, match="at least one of the first and last"):
+    with pytest.raises(ValueError, match=r"first/last visuals \(video targets\) or the cond_\{i\}"):
         build_presentation(record, "fl2va", {})
 
 
