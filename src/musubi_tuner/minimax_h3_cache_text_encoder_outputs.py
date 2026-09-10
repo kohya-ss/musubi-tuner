@@ -56,7 +56,6 @@ from musubi_tuner.minimax_h3.cache_plan import (
     plan_h3_datasets,
 )
 from musubi_tuner.minimax_h3.checkpoint import fingerprint_checkpoint
-from musubi_tuner.utils.model_utils import dtype_to_str
 
 
 logger = logging.getLogger(__name__)
@@ -524,22 +523,12 @@ def main() -> None:
 
             hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
             hidden_states = hidden_states.to(_cache_dtype(args.text_cache_dtype))
-            tensors = {
-                f"varlen_mmh3_hidden_states_{dtype_to_str(hidden_states.dtype)}": hidden_states,
-                "varlen_mmh3_token_tags_int64": token_tags,
-            }
             payload_mib = hidden_states.numel() * hidden_states.element_size() / (1024**2)
             teacher_note = ""
+            teacher_hidden = teacher_tags = None
             if teacher_presentation is not None:
                 teacher_hidden, teacher_tags = encode_h3_presentation(processor, text_encoder, teacher_presentation)
                 teacher_hidden = teacher_hidden.to(_cache_dtype(args.text_cache_dtype))
-                # distinct keys per teacher kind, so the trainer hard-fails on a mode mismatch
-                key_prefix = {
-                    TEACHER_CONDITIONS_REF: "varlen_mmh3_teacher_ref",
-                    TEACHER_CONDITIONS_SUBJECT_REF: "varlen_mmh3_teacher_subject_ref",
-                }.get(teacher_conditions, "varlen_mmh3_teacher")
-                tensors[f"{key_prefix}_hidden_states_{dtype_to_str(teacher_hidden.dtype)}"] = teacher_hidden
-                tensors[f"{key_prefix}_token_tags_int64"] = teacher_tags
                 payload_mib += teacher_hidden.numel() * teacher_hidden.element_size() / (1024**2)
                 teacher_note = f", teacher_rows={teacher_hidden.shape[0]}"
             logger.info(
@@ -550,7 +539,15 @@ def main() -> None:
                 teacher_note,
                 payload_mib,
             )
-            save_text_encoder_output_cache_minimax_h3(item, tensors, metadata)
+            save_text_encoder_output_cache_minimax_h3(
+                item,
+                hidden_states=hidden_states,
+                token_tags=token_tags,
+                teacher_kind=teacher_conditions if teacher_presentation is not None else None,
+                teacher_hidden_states=teacher_hidden,
+                teacher_token_tags=teacher_tags,
+                metadata=metadata,
+            )
 
     # the text caches are per crop (the FL2VA presentations embed the crop endpoints), so every
     # task walks the latent batches; a per-record text cache for t2va/ref2va is a follow-up

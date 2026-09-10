@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import os
 from typing import Optional, TYPE_CHECKING, Union
 
@@ -20,6 +21,8 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
 )
+from musubi_tuner.minimax_h3 import packing as h3_packing
+from musubi_tuner.minimax_h3 import text_encoder as h3_text_encoder
 from musubi_tuner.utils import safetensors_utils
 from musubi_tuner.utils.model_utils import dtype_to_str, remove_dtype_suffix
 
@@ -549,148 +552,123 @@ def save_text_encoder_output_cache_hidream_o1(
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HIDREAM_O1_FULL, merge_existing=False)
 
 
-def _h3_dtype_matches(tensor: torch.Tensor, dtype_name: str) -> bool:
-    return dtype_to_str(tensor.dtype) == dtype_name
+def _h3_video_latent_key(role: str, latent: torch.Tensor, label: str) -> str:
+    """`latents[_<role>]_FxHxW_<dtype>` of a [24,F,H,W] MiniMax-H3 video latent (role "" = the target)."""
+    channels = h3_packing.VIDEO_CHANNELS
+    if latent.ndim != 4 or latent.shape[0] != channels:
+        raise ValueError(f"MiniMax-H3 {label} latent must be [{channels},F,H,W], got {tuple(latent.shape)}")
+    _, F, H, W = latent.shape
+    return f"latents_{role + '_' if role else ''}{F}x{H}x{W}_{dtype_to_str(latent.dtype)}"
+
+
+def _h3_audio_latent_key(role: str, latent: torch.Tensor, label: str) -> str:
+    """`latents_<role>_32x2xA_<dtype>` of a [32,2,A] MiniMax-H3 audio latent (role "audio" = the target)."""
+    channels, stereo = h3_packing.AUDIO_CHANNELS, h3_packing.STEREO_CHANNELS
+    if latent.ndim != 3 or tuple(latent.shape[:2]) != (channels, stereo):
+        raise ValueError(f"MiniMax-H3 {label} latent [{channels},{stereo},A] required, got {tuple(latent.shape)}")
+    return f"latents_{role}_{channels}x{stereo}x{latent.shape[2]}_{dtype_to_str(latent.dtype)}"
 
 
 def save_latent_cache_minimax_h3(
     item_info: ItemInfo,
-    tensors: dict[str, torch.Tensor],
+    *,
+    target_video: torch.Tensor,
+    target_audio: torch.Tensor,
+    audio_present: bool,
+    visual_conditions: Optional[Mapping[str, torch.Tensor]] = None,
+    audio_conditions: Optional[Mapping[str, torch.Tensor]] = None,
+    one_frame_target_index: Optional[int] = None,
+    one_frame_control_indices: Optional[Sequence[int]] = None,
     metadata: Optional[dict[str, str]] = None,
 ):
-    import re
+    """MiniMax-H3 architecture: a joint audio-video target plus optional condition latents.
 
-    target_pattern = re.compile(r"^latents_(\d+)x(\d+)x(\d+)_(.+)$")
-    audio_pattern = re.compile(r"^latents_audio_32x2x(\d+)_(.+)$")
-    visual_condition_pattern = re.compile(r"^latents_(?:first|last|cond_\d{3}|ref_\d{3}_(?:image|video))_(\d+)x(\d+)x(\d+)_(.+)$")
-    audio_condition_pattern = re.compile(r"^latents_ref_\d{3}_audio_32x2x(\d+)_(.+)$")
+    `target_video` is [24,F,H,W] and `target_audio` [32,2,A]; `audio_present` records whether the
+    audio is real (see AUDIO_PRESENT_KEY). The conditions are keyed by their role in the
+    packed layout (`first`/`last`, `cond_{i}`, `ref_{i}_{image|video|audio}`, see
+    minimax_h3/packing.py): video-shaped ones in `visual_conditions`, the reference audio rows
+    in `audio_conditions`. One-frame (image) caches also carry the target's pixel-frame index and,
+    for FL2VA controls, the condition indices (ONE_FRAME_*_KEY). Every tensor lands under
+    `latents[_<role>]_<shape>_<dtype>`, which the bucket collator folds back to `latents[_<role>]`.
+    """
+    sd = {
+        _h3_video_latent_key("", target_video, "target video"): target_video,
+        _h3_audio_latent_key("audio", target_audio, "target audio"): target_audio,
+    }
+    for role, latent in (visual_conditions or {}).items():
+        if h3_packing.parse_condition_role(role).is_audio:
+            raise ValueError(f"MiniMax-H3 condition role {role} carries audio rows, not a visual latent")
+        sd[_h3_video_latent_key(role, latent, f"visual condition {role}")] = latent
+    for role, latent in (audio_conditions or {}).items():
+        if not h3_packing.parse_condition_role(role).is_audio:
+            raise ValueError(f"MiniMax-H3 condition role {role} carries a visual latent, not audio rows")
+        sd[_h3_audio_latent_key(role, latent, f"audio condition {role}")] = latent
+    sd = {key: tensor.detach().cpu().contiguous() for key, tensor in sd.items()}
 
-    target_count = 0
-    audio_count = 0
-    normalized = {}
-    for key, tensor in tensors.items():
-        if not isinstance(tensor, torch.Tensor):
-            raise ValueError(f"MiniMax-H3 cache value must be a tensor: {key}")
-        if key == AUDIO_PRESENT_KEY:
-            normalized[key] = tensor.detach().cpu().contiguous()
-            continue
-        if key == ONE_FRAME_TARGET_INDEX_KEY:
-            if tensor.shape != torch.Size([]) or tensor.dtype != torch.int64 or tensor.item() < 0:
-                raise ValueError(f"MiniMax-H3 {ONE_FRAME_TARGET_INDEX_KEY} must be a nonnegative scalar int64 tensor")
-            normalized[key] = tensor.detach().cpu().contiguous()
-            continue
-        if key == ONE_FRAME_CONTROL_INDICES_KEY:
-            if tensor.ndim != 1 or tensor.shape[0] < 1 or tensor.dtype != torch.int64 or bool((tensor < 0).any()):
-                raise ValueError(f"MiniMax-H3 {ONE_FRAME_CONTROL_INDICES_KEY} must be a nonnegative int64 [K] tensor with K >= 1")
-            normalized[key] = tensor.detach().cpu().contiguous()
-            continue
-
-        match = target_pattern.fullmatch(key)
-        if match is not None:
-            frames, height, width = (int(match.group(index)) for index in range(1, 4))
-            if tensor.shape != (24, frames, height, width):
-                raise ValueError(f"MiniMax-H3 target video latent must be [24,F,H,W], got {tuple(tensor.shape)}")
-            if not _h3_dtype_matches(tensor, match.group(4)):
-                raise ValueError(f"MiniMax-H3 cache key dtype does not match tensor: {key}")
-            target_count += 1
-        else:
-            match = audio_pattern.fullmatch(key)
-            if match is not None:
-                audio_frames = int(match.group(1))
-                if tensor.shape != (32, 2, audio_frames):
-                    raise ValueError(f"MiniMax-H3 audio latent [32,2,A] required, got {tuple(tensor.shape)}")
-                if not _h3_dtype_matches(tensor, match.group(2)):
-                    raise ValueError(f"MiniMax-H3 cache key dtype does not match tensor: {key}")
-                audio_count += 1
-            else:
-                match = visual_condition_pattern.fullmatch(key)
-                if match is not None:
-                    frames, height, width = (int(match.group(index)) for index in range(1, 4))
-                    if tensor.shape != (24, frames, height, width):
-                        raise ValueError(f"MiniMax-H3 visual condition latent must be [24,F,H,W], got {tuple(tensor.shape)}")
-                    if not _h3_dtype_matches(tensor, match.group(4)):
-                        raise ValueError(f"MiniMax-H3 cache key dtype does not match tensor: {key}")
-                else:
-                    match = audio_condition_pattern.fullmatch(key)
-                    if match is None:
-                        raise ValueError(f"Unsupported MiniMax-H3 latent cache key: {key}")
-                    audio_frames = int(match.group(1))
-                    if tensor.shape != (32, 2, audio_frames):
-                        raise ValueError(f"MiniMax-H3 audio latent [32,2,A] required, got {tuple(tensor.shape)}")
-                    if not _h3_dtype_matches(tensor, match.group(2)):
-                        raise ValueError(f"MiniMax-H3 cache key dtype does not match tensor: {key}")
-        normalized[key] = tensor.detach().cpu().contiguous()
-
-    if target_count != 1:
-        raise ValueError(f"MiniMax-H3 cache requires exactly one target video latent, found {target_count}")
-    if audio_count != 1:
-        raise ValueError(f"MiniMax-H3 cache requires exactly one target audio latent, found {audio_count}")
-    validate_audio_present_entry(normalized)
-    save_latent_cache_common(item_info, normalized, ARCHITECTURE_MINIMAX_H3_FULL, metadata)
+    append_audio_present_entry(sd, audio_present)
+    if one_frame_control_indices is not None and one_frame_target_index is None:
+        raise ValueError("MiniMax-H3 one-frame control indices require the one-frame target index")
+    if one_frame_target_index is not None:
+        append_one_frame_target_index_entry(sd, one_frame_target_index)
+    if one_frame_control_indices is not None:
+        append_one_frame_control_indices_entry(sd, list(one_frame_control_indices))
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_MINIMAX_H3_FULL, metadata)
 
 
-# (teacher kind, key prefix) of the teacher text rows a MiniMax-H3 text cache may carry next to
-# the student rows; the writer accepts at most one kind per cache
-MINIMAX_H3_TEACHER_TEXT_PREFIXES = (
-    ("first,last", "varlen_mmh3_teacher"),
-    ("ref", "varlen_mmh3_teacher_ref"),
-    ("subject_ref", "varlen_mmh3_teacher_subject_ref"),
-)
+# key stem of the teacher text rows a MiniMax-H3 text cache may carry next to the student rows,
+# per teacher kind: each kind uses distinct keys so the trainer hard-fails on a cache/flag mode
+# mismatch instead of silently misreading the rows
+MINIMAX_H3_TEACHER_TEXT_PREFIXES = {
+    "first,last": "varlen_mmh3_teacher",
+    "ref": "varlen_mmh3_teacher_ref",
+    "subject_ref": "varlen_mmh3_teacher_subject_ref",
+}
+
+
+def _h3_text_rows(prefix: str, hidden_states: torch.Tensor, token_tags: torch.Tensor, label: str) -> dict[str, torch.Tensor]:
+    """`<prefix>_hidden_states_<dtype>` ([L,5120]) and `<prefix>_token_tags_int64` ([L], 0/1) of one presentation."""
+    width, max_rows = h3_text_encoder.TEXT_WIDTH, h3_text_encoder.MAX_TEXT_ROWS
+    if hidden_states.ndim != 2 or hidden_states.shape[1] != width:
+        raise ValueError(f"MiniMax-H3 {label} hidden states must be [L,{width}], got {tuple(hidden_states.shape)}")
+    if hidden_states.shape[0] > max_rows:
+        raise ValueError(f"MiniMax-H3 {label} exceeds {max_rows} rows: {hidden_states.shape[0]}")
+    if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
+        raise ValueError(f"MiniMax-H3 {label} token tags must be int64 [L]")
+    if not torch.all((token_tags == 0) | (token_tags == 1)):
+        raise ValueError(f"MiniMax-H3 {label} token tags may contain only 0 and 1")
+    return {
+        f"{prefix}_hidden_states_{dtype_to_str(hidden_states.dtype)}": hidden_states.detach().cpu().contiguous(),
+        f"{prefix}_token_tags_int64": token_tags.detach().cpu().contiguous(),
+    }
 
 
 def save_text_encoder_output_cache_minimax_h3(
     item_info: ItemInfo,
-    tensors: dict[str, torch.Tensor],
+    *,
+    hidden_states: torch.Tensor,
+    token_tags: torch.Tensor,
+    teacher_kind: Optional[str] = None,
+    teacher_hidden_states: Optional[torch.Tensor] = None,
+    teacher_token_tags: Optional[torch.Tensor] = None,
     metadata: Optional[dict[str, str]] = None,
 ):
-    # the teacher prefixes must be split off before matching the student prefix, because
-    # "varlen_mmh3_teacher[_<kind>]_hidden_states_*" does not share the student prefix; each
-    # teacher kind (FL2VA "first,last", Ref2VA "ref", subject-reference "subject_ref") uses
-    # distinct keys so the trainer can hard-fail on a cache/flag mode mismatch instead of
-    # silently misreading the rows. A cache carries the student rows plus at most one kind.
-    student_hidden_keys = [key for key in tensors if key.startswith("varlen_mmh3_hidden_states_")]
-    if len(student_hidden_keys) != 1:
-        raise ValueError(f"MiniMax-H3 text cache requires exactly one hidden-state tensor, found {len(student_hidden_keys)}")
-    tags_key = "varlen_mmh3_token_tags_int64"
+    """MiniMax-H3 architecture: the student presentation's Qwen3-VL rows plus, for teacher matching,
+    the rows of one teacher presentation (`teacher_kind` in MINIMAX_H3_TEACHER_TEXT_PREFIXES).
 
-    pairs = [(student_hidden_keys[0], "varlen_mmh3_hidden_states_", tags_key)]
-    expected_keys = {student_hidden_keys[0], tags_key}
-    teacher_kinds_present = []
-    for kind, prefix in MINIMAX_H3_TEACHER_TEXT_PREFIXES:
-        hidden_prefix = f"{prefix}_hidden_states_"
-        kind_tags_key = f"{prefix}_token_tags_int64"
-        hidden_keys = [key for key in tensors if key.startswith(hidden_prefix)]
-        if not hidden_keys and kind_tags_key not in tensors:
-            continue
-        if len(hidden_keys) != 1 or kind_tags_key not in tensors:
-            raise ValueError("MiniMax-H3 teacher text rows require exactly one hidden-state tensor and its token tags")
-        teacher_kinds_present.append(kind)
-        pairs.append((hidden_keys[0], hidden_prefix, kind_tags_key))
-        expected_keys |= {hidden_keys[0], kind_tags_key}
-    if len(teacher_kinds_present) > 1:
-        raise ValueError(f"MiniMax-H3 text cache cannot mix {' and '.join(teacher_kinds_present)} teacher rows")
-    if set(tensors) != expected_keys:
-        raise ValueError(f"MiniMax-H3 text cache requires exactly the keys {sorted(expected_keys)}")
-
-    normalized = {}
-    for hidden_key, hidden_prefix, pair_tags_key in pairs:
-        hidden_states = tensors[hidden_key]
-        token_tags = tensors[pair_tags_key]
-        if hidden_states.ndim != 2 or hidden_states.shape[1] != 5120:
-            raise ValueError(f"MiniMax-H3 hidden states must be [L,5120], got {tuple(hidden_states.shape)}")
-        if not _h3_dtype_matches(hidden_states, hidden_key.removeprefix(hidden_prefix)):
-            raise ValueError(f"MiniMax-H3 hidden-state key dtype does not match tensor: {hidden_key}")
-        if hidden_states.shape[0] > 32768:
-            raise ValueError(f"MiniMax-H3 text cache exceeds 32768 rows: {hidden_states.shape[0]}")
-        if token_tags.dtype != torch.int64 or token_tags.shape != (hidden_states.shape[0],):
-            raise ValueError("MiniMax-H3 token tags must be int64 [L]")
-        if not torch.all((token_tags == 0) | (token_tags == 1)):
-            raise ValueError("MiniMax-H3 token tags may contain only 0 and 1")
-        normalized[hidden_key] = hidden_states.detach().cpu().contiguous()
-        normalized[pair_tags_key] = token_tags.detach().cpu().contiguous()
+    Stored varlen (the collator returns lists): `hidden_states` [L,5120], `token_tags` int64 [L]
+    with 1 for text and 0 for vision rows."""
+    sd = _h3_text_rows("varlen_mmh3", hidden_states, token_tags, "text cache")
+    teacher_rows = (teacher_kind, teacher_hidden_states, teacher_token_tags)
+    if any(value is not None for value in teacher_rows):
+        if any(value is None for value in teacher_rows):
+            raise ValueError("MiniMax-H3 teacher text rows require the teacher kind, hidden states and token tags together")
+        prefix = MINIMAX_H3_TEACHER_TEXT_PREFIXES.get(teacher_kind)
+        if prefix is None:
+            raise ValueError(f"Unsupported MiniMax-H3 teacher kind: {teacher_kind}")
+        sd.update(_h3_text_rows(prefix, teacher_hidden_states, teacher_token_tags, "teacher text rows"))
     save_text_encoder_output_cache_common(
         item_info,
-        normalized,
+        sd,
         ARCHITECTURE_MINIMAX_H3_FULL,
         merge_existing=False,
         additional_metadata=metadata,

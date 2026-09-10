@@ -25,7 +25,6 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-import re
 from typing import Any
 
 import numpy as np
@@ -34,6 +33,7 @@ import torch.nn as nn
 
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.minimax_h3.media import TEXT_VISUAL_FPS, H3Record, H3Task
+from musubi_tuner.minimax_h3.packing import FL_CONDITION_ROLES, one_frame_condition_roles, parse_condition_role
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,28 @@ def _require_visual(visuals: Mapping[object, H3TextVisual], key: object, label: 
         raise ValueError(f"MiniMax-H3 presentation is missing {label} visual data") from error
 
 
-_ONE_FRAME_CONDITION_KEY = re.compile(r"^cond_\d{3}$")
+def _fl_visual_keys(visuals: Mapping[object, H3TextVisual]) -> list[str]:
+    """The FL2VA visual keys present, in <Picture i> order: the released first/last anchors or
+    the contiguous one-frame cond_{i} slots (the same role vocabulary as the latent cache)."""
+    present_keys = [key for key in FL_CONDITION_ROLES if key in visuals]
+    cond_keys = sorted(key for key in visuals if isinstance(key, str) and _is_one_frame_condition_role(key))
+    if present_keys and cond_keys:
+        raise ValueError("MiniMax-H3 FL2VA presentation cannot mix first/last visuals with one-frame cond_ visuals")
+    if cond_keys:
+        expected = list(one_frame_condition_roles(len(cond_keys)))
+        if cond_keys != expected:
+            raise ValueError(f"MiniMax-H3 one-frame FL2VA visuals must be the contiguous {expected}, got {cond_keys}")
+        present_keys = cond_keys
+    if not present_keys:
+        raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
+    return present_keys
+
+
+def _is_one_frame_condition_role(key: str) -> bool:
+    try:
+        return parse_condition_role(key).family == "one_frame"
+    except ValueError:
+        return False
 
 
 def build_presentation(
@@ -109,18 +130,7 @@ def build_presentation(
         # in packed (first, last) order: a lone last frame is still <Picture 1>, and the
         # first/last distinction is carried only by the rotary anchor times. One-frame
         # layouts use the ordered cond_{i} slots instead, numbered in slot order.
-        present_keys = [key for key in ("first", "last") if key in visuals]
-        cond_keys = sorted(key for key in visuals if isinstance(key, str) and _ONE_FRAME_CONDITION_KEY.fullmatch(key))
-        if present_keys and cond_keys:
-            raise ValueError("MiniMax-H3 FL2VA presentation cannot mix first/last visuals with one-frame cond_ visuals")
-        if cond_keys:
-            expected = [f"cond_{index:03d}" for index in range(len(cond_keys))]
-            if cond_keys != expected:
-                raise ValueError(f"MiniMax-H3 one-frame FL2VA visuals must be the contiguous {expected}, got {cond_keys}")
-            present_keys = cond_keys
-        if not present_keys:
-            raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
-        for index, key in enumerate(present_keys, start=1):
+        for index, key in enumerate(_fl_visual_keys(visuals), start=1):
             visual = visuals[key]
             if visual.frames.shape[0] != 1:
                 raise ValueError(f"MiniMax-H3 FL2VA {key} visual must contain exactly one frame")

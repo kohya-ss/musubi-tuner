@@ -42,6 +42,28 @@ from musubi_tuner.dataset.cache_io import (
     save_text_encoder_output_cache_minimax_h3,
 )
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
+from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
+
+
+def _saved_keys(path: str) -> set[str]:
+    with MemoryEfficientSafeOpen(path) as f:
+        return set(f.keys())
+
+
+def _save_text_rows(item: ItemInfo, rows: int = 3, tags=None, metadata=None, **teacher) -> None:
+    save_text_encoder_output_cache_minimax_h3(
+        item,
+        hidden_states=torch.zeros(rows, 5120, dtype=torch.bfloat16),
+        token_tags=torch.tensor([1, 0, 1][:rows], dtype=torch.int64) if tags is None else tags,
+        metadata=metadata,
+        **teacher,
+    )
+
+
+_TEACHER_ROWS = dict(
+    teacher_hidden_states=torch.zeros(5, 5120, dtype=torch.bfloat16),
+    teacher_token_tags=torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
+)
 
 
 @pytest.mark.parametrize(
@@ -446,18 +468,28 @@ def _h3_item(tmp_path: Path) -> ItemInfo:
 
 def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Path):
     item = _h3_item(tmp_path)
-    latent_tensors = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
-        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
-        "latents_first_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        target_audio=torch.zeros(32, 2, 8),
+        audio_present=True,
+        visual_conditions={"first": torch.ones(24, 1, 4, 4, dtype=torch.float16)},
+        metadata={"task": "fl2va"},
+    )
+    _save_text_rows(item, metadata={"task": "fl2va"})
+
+    # the writer names the entries (`latents[_<role>]_<shape>_<dtype>`, varlen text rows):
+    # existing caches depend on these exact names
+    assert _saved_keys(item.latent_cache_path) == {
+        "latents_2x4x4_bfloat16",
+        "latents_audio_32x2x8_float32",
+        AUDIO_PRESENT_KEY,
+        "latents_first_1x4x4_float16",
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
+    assert _saved_keys(item.text_encoder_output_cache_path) == {
+        "varlen_mmh3_hidden_states_bfloat16",
+        "varlen_mmh3_token_tags_int64",
     }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "fl2va"})
 
     manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
     batch = manager[0]
@@ -474,38 +506,53 @@ def test_h3_cache_keys_round_trip_through_existing_bucket_collator(tmp_path: Pat
 
 def test_h3_latent_writer_rejects_transposed_audio_layout(tmp_path: Path):
     item = _h3_item(tmp_path)
-    tensors = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(2, 32, 8),
-    }
 
     with pytest.raises(ValueError, match=r"audio latent \[32,2,A\]"):
-        save_latent_cache_minimax_h3(item, tensors)
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+            target_audio=torch.zeros(2, 32, 8),
+            audio_present=True,
+        )
 
 
-def test_h3_latent_writer_requires_binary_float32_audio_present_scalar(tmp_path: Path):
+def test_h3_latent_writer_records_audio_presence_as_the_binary_scalar_entry(tmp_path: Path):
     item = _h3_item(tmp_path)
-    base = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
-    }
+    for audio_present in (True, False):
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+            target_audio=torch.zeros(32, 2, 8),
+            audio_present=audio_present,
+            metadata={"task": "t2va"},
+        )
+        with MemoryEfficientSafeOpen(item.latent_cache_path) as f:
+            scalar = f.get_tensor(AUDIO_PRESENT_KEY)
+        assert scalar.dtype == torch.float32 and scalar.shape == torch.Size([])
+        assert scalar.item() == (1.0 if audio_present else 0.0)
 
-    with pytest.raises(ValueError, match=AUDIO_PRESENT_KEY):
-        save_latent_cache_minimax_h3(item, base, {"task": "t2va"})
 
-    invalid = (
-        torch.tensor([1.0], dtype=torch.float32),
-        torch.tensor(1.0, dtype=torch.float64),
-        torch.tensor(float("nan"), dtype=torch.float32),
-        torch.tensor(0.5, dtype=torch.float32),
-    )
-    for scalar in invalid:
-        with pytest.raises(ValueError, match=AUDIO_PRESENT_KEY):
-            save_latent_cache_minimax_h3(
-                item,
-                {**base, AUDIO_PRESENT_KEY: scalar},
-                {"task": "t2va"},
-            )
+@pytest.mark.parametrize(
+    ("conditions", "message"),
+    [
+        ({"visual_conditions": {"cond_0": torch.zeros(24, 1, 4, 4)}}, "Unsupported MiniMax-H3 condition role"),
+        ({"visual_conditions": {"ref_000_audio": torch.zeros(24, 1, 4, 4)}}, "carries audio rows"),
+        ({"audio_conditions": {"ref_000_video": torch.zeros(32, 2, 8)}}, "carries a visual latent"),
+        ({"visual_conditions": {"last": torch.zeros(1, 24, 4, 4)}}, r"visual condition last latent must be \[24,F,H,W\]"),
+        ({"audio_conditions": {"ref_001_audio": torch.zeros(32, 8)}}, r"audio condition ref_001_audio latent \[32,2,A\]"),
+    ],
+)
+def test_h3_latent_writer_rejects_conditions_outside_the_role_vocabulary(tmp_path: Path, conditions: dict, message: str):
+    item = _h3_item(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=torch.zeros(24, 2, 4, 4),
+            target_audio=torch.zeros(32, 2, 8),
+            audio_present=True,
+            **conditions,
+        )
 
 
 @pytest.mark.parametrize(
@@ -514,32 +561,32 @@ def test_h3_latent_writer_requires_binary_float32_audio_present_scalar(tmp_path:
 )
 def test_h3_text_writer_rejects_invalid_token_tags(tmp_path: Path, tags: torch.Tensor):
     item = _h3_item(tmp_path)
-    tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": tags,
-    }
 
     with pytest.raises(ValueError, match="token tags"):
-        save_text_encoder_output_cache_minimax_h3(item, tensors)
+        _save_text_rows(item, tags=tags)
 
 
 def test_h3_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_path: Path):
     item = _h3_item(tmp_path)
-    latent_tensors = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
-        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
-        "latents_first_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
-        "latents_last_1x4x4_float16": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        target_audio=torch.zeros(32, 2, 8),
+        audio_present=True,
+        visual_conditions={
+            "first": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+            "last": torch.ones(24, 1, 4, 4, dtype=torch.float16),
+        },
+        metadata={"task": "fl2va"},
+    )
+    _save_text_rows(item, metadata={"task": "t2va", "teacher_conditions": "first,last"}, teacher_kind="first,last", **_TEACHER_ROWS)
+
+    assert _saved_keys(item.text_encoder_output_cache_path) == {
+        "varlen_mmh3_hidden_states_bfloat16",
+        "varlen_mmh3_token_tags_int64",
+        "varlen_mmh3_teacher_hidden_states_bfloat16",
+        "varlen_mmh3_teacher_token_tags_int64",
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "first,last"})
 
     manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
     batch = manager[0]
@@ -552,39 +599,38 @@ def test_h3_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_path: P
 
 def test_h3_text_writer_rejects_a_one_sided_teacher_pair(tmp_path: Path):
     item = _h3_item(tmp_path)
-    student = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-    }
 
     with pytest.raises(ValueError, match="teacher"):
-        save_text_encoder_output_cache_minimax_h3(
-            item,
-            {**student, "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16)},
-        )
+        _save_text_rows(item, teacher_kind="first,last", teacher_hidden_states=torch.zeros(5, 5120, dtype=torch.bfloat16))
     with pytest.raises(ValueError, match="teacher"):
-        save_text_encoder_output_cache_minimax_h3(
-            item,
-            {**student, "varlen_mmh3_teacher_token_tags_int64": torch.ones(5, dtype=torch.int64)},
-        )
+        _save_text_rows(item, teacher_kind="ref", teacher_token_tags=torch.ones(5, dtype=torch.int64))
+    with pytest.raises(ValueError, match="teacher"):
+        _save_text_rows(item, **_TEACHER_ROWS)
+
+
+def test_h3_text_writer_rejects_an_unknown_teacher_kind(tmp_path: Path):
+    item = _h3_item(tmp_path)
+
+    with pytest.raises(ValueError, match="teacher kind"):
+        _save_text_rows(item, teacher_kind="first", **_TEACHER_ROWS)
 
 
 def test_h3_ref_teacher_text_rows_round_trip_through_the_bucket_collator(tmp_path: Path):
     # the ref teacher needs no endpoint condition latents: a plain T2VA latent cache suffices
     item = _h3_item(tmp_path)
-    latent_tensors = {
-        "latents_2x4x4_bfloat16": torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
-        "latents_audio_32x2x8_float32": torch.zeros(32, 2, 8),
-        AUDIO_PRESENT_KEY: torch.tensor(1.0, dtype=torch.float32),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 2, 4, 4, dtype=torch.bfloat16),
+        target_audio=torch.zeros(32, 2, 8),
+        audio_present=True,
+        metadata={"task": "t2va"},
+    )
+    _save_text_rows(item, metadata={"task": "t2va", "teacher_conditions": "ref"}, teacher_kind="ref", **_TEACHER_ROWS)
+
+    assert _saved_keys(item.text_encoder_output_cache_path) >= {
+        "varlen_mmh3_teacher_ref_hidden_states_bfloat16",
+        "varlen_mmh3_teacher_ref_token_tags_int64",
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-        "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "t2va"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "ref"})
 
     manager = BucketBatchManager({(64, 64, 5): [item]}, batch_size=1)
     batch = manager[0]
@@ -602,21 +648,27 @@ def test_h3_subject_ref_teacher_text_keys_round_trip_through_the_bucket_collator
     item = ItemInfo("view", "sks girl", (64, 64), (64, 64))
     item.latent_cache_path = str(tmp_path / "view_0064x0064_mmh3.safetensors")
     item.text_encoder_output_cache_path = str(tmp_path / "view_mmh3_te.safetensors")
-    latent_tensors = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_ref_000_image_1x4x4_float32": torch.ones(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(0, dtype=torch.int64),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 1, 4, 4),
+        target_audio=torch.zeros(32, 2, 2),
+        audio_present=False,
+        visual_conditions={"ref_000_image": torch.ones(24, 1, 4, 4)},
+        one_frame_target_index=0,
+        metadata={"task": "ref2va", "one_frame": "1"},
+    )
+    _save_text_rows(
+        item,
+        tags=torch.tensor([1, 1, 1], dtype=torch.int64),
+        metadata={"task": "t2va", "teacher_conditions": "subject_ref"},
+        teacher_kind="subject_ref",
+        **_TEACHER_ROWS,
+    )
+
+    assert _saved_keys(item.text_encoder_output_cache_path) >= {
+        "varlen_mmh3_teacher_subject_ref_hidden_states_bfloat16",
+        "varlen_mmh3_teacher_subject_ref_token_tags_int64",
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
-        "varlen_mmh3_teacher_subject_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_subject_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "ref2va", "one_frame": "1"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va", "teacher_conditions": "subject_ref"})
 
     batch = BucketBatchManager({(64, 64): [item]}, batch_size=1)[0]
 
@@ -625,57 +677,24 @@ def test_h3_subject_ref_teacher_text_keys_round_trip_through_the_bucket_collator
     assert batch["mmh3_teacher_subject_ref_hidden_states"][0].shape == (5, 5120)
     torch.testing.assert_close(batch["mmh3_teacher_subject_ref_token_tags"][0], torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64))
 
-    with pytest.raises(ValueError, match="mix"):
-        save_text_encoder_output_cache_minimax_h3(
-            item,
-            {
-                **text_tensors,
-                "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-                "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-            },
-        )
-
-
-def test_h3_text_writer_rejects_a_one_sided_ref_teacher_pair_and_mixed_teacher_kinds(tmp_path: Path):
-    item = _h3_item(tmp_path)
-    student = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-    }
-    fl_pair = {
-        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-    }
-    ref_pair = {
-        "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_ref_token_tags_int64": torch.tensor([1, 0, 0, 1, 1], dtype=torch.int64),
-    }
-
-    with pytest.raises(ValueError, match="teacher"):
-        save_text_encoder_output_cache_minimax_h3(
-            item,
-            {**student, "varlen_mmh3_teacher_ref_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16)},
-        )
-    with pytest.raises(ValueError, match="teacher"):
-        save_text_encoder_output_cache_minimax_h3(
-            item,
-            {**student, "varlen_mmh3_teacher_ref_token_tags_int64": torch.ones(5, dtype=torch.int64)},
-        )
-    with pytest.raises(ValueError, match="mix"):
-        save_text_encoder_output_cache_minimax_h3(item, {**student, **fl_pair, **ref_pair})
-
 
 def test_h3_text_writer_validates_teacher_rows_like_student_rows(tmp_path: Path):
     item = _h3_item(tmp_path)
-    tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-        "varlen_mmh3_teacher_hidden_states_bfloat16": torch.zeros(5, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_teacher_token_tags_int64": torch.tensor([1, 2, 0, 1, 1], dtype=torch.int64),
-    }
 
     with pytest.raises(ValueError, match="token tags"):
-        save_text_encoder_output_cache_minimax_h3(item, tensors)
+        _save_text_rows(
+            item,
+            teacher_kind="first,last",
+            teacher_hidden_states=torch.zeros(5, 5120, dtype=torch.bfloat16),
+            teacher_token_tags=torch.tensor([1, 2, 0, 1, 1], dtype=torch.int64),
+        )
+    with pytest.raises(ValueError, match=r"\[L,5120\]"):
+        _save_text_rows(
+            item,
+            teacher_kind="first,last",
+            teacher_hidden_states=torch.zeros(5, 4096, dtype=torch.bfloat16),
+            teacher_token_tags=torch.ones(5, dtype=torch.int64),
+        )
 
 
 class _FakeH3VideoVAE(torch.nn.Module):
@@ -763,16 +782,15 @@ def test_build_fl2va_latents_encodes_the_provided_audio_window(tmp_path: Path):
         allow_experimental_duration=True,
     )
 
-    assert set(payload.tensors) == {
-        "latents_2x4x4_float32",
-        "latents_audio_32x2x8_float32",
-        AUDIO_PRESENT_KEY,
-        "latents_first_1x4x4_float32",
-        "latents_last_1x4x4_float32",
+    assert payload.target_video.shape == (24, 2, 4, 4) and payload.target_video.dtype == torch.float32
+    assert payload.target_audio.shape == (32, 2, 8) and payload.target_audio.dtype == torch.float32
+    assert payload.audio_present is True
+    assert {role: tuple(latent.shape) for role, latent in payload.visual_conditions.items()} == {
+        "first": (24, 1, 4, 4),
+        "last": (24, 1, 4, 4),
     }
-    assert payload.tensors[AUDIO_PRESENT_KEY].shape == torch.Size([])
-    assert payload.tensors[AUDIO_PRESENT_KEY].dtype == torch.float32
-    assert payload.tensors[AUDIO_PRESENT_KEY].item() == 1.0
+    assert payload.audio_conditions == {}
+    assert payload.one_frame_target_index is None and payload.one_frame_control_indices is None
     assert decoder.audio_calls == []
     assert len(audio_vae.calls) == 1
     torch.testing.assert_close(audio_vae.calls[0], waveform.unsqueeze(0))
@@ -828,7 +846,7 @@ def test_missing_target_audio_encodes_silence_with_presence_zero(tmp_path: Path)
     assert len(audio_vae.calls) == 1
     assert audio_vae.calls[0].shape == (1, 2, 6400)
     assert torch.count_nonzero(audio_vae.calls[0]) == 0
-    assert payload.tensors[AUDIO_PRESENT_KEY].item() == 0.0
+    assert payload.audio_present is False
 
 
 def test_silence_placeholder_must_be_all_zeros(tmp_path: Path):
@@ -948,14 +966,15 @@ def test_build_ref2va_latents_preserves_ordered_numbered_roles(tmp_path: Path):
         allow_experimental_duration=True,
     )
 
-    assert set(payload.tensors) == {
-        "latents_2x4x4_float32",
-        "latents_audio_32x2x8_float32",
-        AUDIO_PRESENT_KEY,
-        "latents_ref_000_image_1x2x4_float32",
-        "latents_ref_001_video_2x4x2_float32",
-        "latents_ref_001_audio_32x2x8_float32",
-        "latents_ref_002_audio_32x2x2_float32",
+    assert payload.target_video.shape == (24, 2, 4, 4)
+    assert payload.target_audio.shape == (32, 2, 8)
+    assert {role: tuple(latent.shape) for role, latent in payload.visual_conditions.items()} == {
+        "ref_000_image": (24, 1, 2, 4),
+        "ref_001_video": (24, 2, 4, 2),
+    }
+    assert {role: tuple(latent.shape) for role, latent in payload.audio_conditions.items()} == {
+        "ref_001_audio": (32, 2, 8),
+        "ref_002_audio": (32, 2, 2),
     }
     assert [call[0].path for call in decoder.audio_calls] == [reference_video_audio, voice]
     assert decoder.audio_calls[0][1:] == (0, 6400, True)
@@ -1024,15 +1043,12 @@ def test_build_one_frame_latents_pack_silence_and_the_target_index(tmp_path: Pat
         media_fingerprints={image_path: "portrait-image"},
     )
 
-    assert set(payload.tensors) == {
-        "latents_1x4x4_float32",
-        "latents_audio_32x2x2_float32",
-        AUDIO_PRESENT_KEY,
-        ONE_FRAME_TARGET_INDEX_KEY,
-    }
-    assert payload.tensors[AUDIO_PRESENT_KEY].item() == 0.0
-    index = payload.tensors[ONE_FRAME_TARGET_INDEX_KEY]
-    assert index.dtype == torch.int64 and index.shape == torch.Size([]) and index.item() == 24
+    assert payload.target_video.shape == (24, 1, 4, 4)
+    assert payload.target_audio is silence
+    assert payload.audio_present is False
+    assert payload.visual_conditions == {} and payload.audio_conditions == {}
+    assert payload.one_frame_target_index == 24
+    assert payload.one_frame_control_indices is None
     assert [call.shape for call in video_vae.calls] == [(1, 3, 1, 64, 64)]
     assert payload.metadata["task"] == "t2va"
     assert payload.metadata["crop_start_frame"] == "0"
@@ -1073,18 +1089,22 @@ def test_one_frame_cache_keys_round_trip_through_the_bucket_collator(tmp_path: P
     item = ItemInfo("portrait", "an image caption", (64, 64), (64, 64))
     item.latent_cache_path = str(tmp_path / "portrait_0064x0064_mmh3.safetensors")
     item.text_encoder_output_cache_path = str(tmp_path / "portrait_mmh3_te.safetensors")
-    latent_tensors = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 1, 4, 4),
+        target_audio=torch.zeros(32, 2, 2),
+        audio_present=False,
+        one_frame_target_index=24,
+        metadata={"task": "t2va", "one_frame": "1"},
+    )
+    _save_text_rows(item, tags=torch.tensor([1, 1, 1], dtype=torch.int64), metadata={"task": "t2va"})
+
+    assert _saved_keys(item.latent_cache_path) == {
+        "latents_1x4x4_float32",
+        "latents_audio_32x2x2_float32",
+        AUDIO_PRESENT_KEY,
+        ONE_FRAME_TARGET_INDEX_KEY,
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "t2va", "one_frame": "1"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "t2va"})
 
     manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
     batch = manager[0]
@@ -1097,19 +1117,16 @@ def test_one_frame_cache_keys_round_trip_through_the_bucket_collator(tmp_path: P
 
 def test_h3_latent_writer_rejects_invalid_one_frame_target_indices(tmp_path: Path):
     item = _h3_item(tmp_path)
-    base = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-    }
-    invalid = (
-        torch.tensor([24], dtype=torch.int64),
-        torch.tensor(24, dtype=torch.int32),
-        torch.tensor(-1, dtype=torch.int64),
-    )
-    for index in invalid:
-        with pytest.raises(ValueError, match=ONE_FRAME_TARGET_INDEX_KEY):
-            save_latent_cache_minimax_h3(item, {**base, ONE_FRAME_TARGET_INDEX_KEY: index}, {"task": "t2va"})
+
+    with pytest.raises(ValueError, match="target index must be nonnegative"):
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=torch.zeros(24, 1, 4, 4),
+            target_audio=torch.zeros(32, 2, 2),
+            audio_present=False,
+            one_frame_target_index=-1,
+            metadata={"task": "t2va"},
+        )
 
 
 @pytest.mark.parametrize("control_indices", [[0], [0, 48], [0, 24, 48]])
@@ -1134,16 +1151,13 @@ def test_build_one_frame_latents_pack_controls_and_their_indices(tmp_path: Path,
 
     # one-frame conditions are the ordered cond_{i} slots (any count), never the video first/last roles
     expected_roles = tuple(f"cond_{index:03d}" for index in range(len(control_indices)))
-    assert set(payload.tensors) == {
-        "latents_1x4x4_float32",
-        "latents_audio_32x2x2_float32",
-        AUDIO_PRESENT_KEY,
-        ONE_FRAME_TARGET_INDEX_KEY,
-        ONE_FRAME_CONTROL_INDICES_KEY,
-        *(f"latents_{role}_1x4x4_float32" for role in expected_roles),
+    assert payload.target_video.shape == (24, 1, 4, 4)
+    assert {role: tuple(latent.shape) for role, latent in payload.visual_conditions.items()} == {
+        role: (24, 1, 4, 4) for role in expected_roles
     }
-    indices = payload.tensors[ONE_FRAME_CONTROL_INDICES_KEY]
-    assert indices.dtype == torch.int64 and indices.tolist() == control_indices
+    assert payload.audio_conditions == {}
+    assert payload.one_frame_target_index == 24
+    assert payload.one_frame_control_indices == tuple(control_indices)
     # target encode + one condition encode per control
     assert [call.shape for call in video_vae.calls] == [(1, 3, 1, 64, 64)] * (1 + len(control_indices))
     assert payload.metadata["task"] == "fl2va"
@@ -1195,26 +1209,32 @@ def test_one_frame_control_cache_keys_round_trip_through_the_bucket_collator(tmp
     item = ItemInfo("edit", "an editing caption", (64, 64), (64, 64, 1))
     item.latent_cache_path = str(tmp_path / "edit_0064x0064_mmh3.safetensors")
     item.text_encoder_output_cache_path = str(tmp_path / "edit_mmh3_te.safetensors")
-    latent_tensors = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_first_1x4x4_float32": torch.ones(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
-        ONE_FRAME_CONTROL_INDICES_KEY: torch.tensor([0], dtype=torch.int64),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 1, 4, 4),
+        target_audio=torch.zeros(32, 2, 2),
+        audio_present=False,
+        visual_conditions={"cond_000": torch.ones(24, 1, 4, 4)},
+        one_frame_target_index=24,
+        one_frame_control_indices=[0],
+        metadata={"task": "fl2va", "one_frame": "1"},
+    )
+    _save_text_rows(item, tags=torch.tensor([1, 1, 1], dtype=torch.int64), metadata={"task": "fl2va"})
+
+    assert _saved_keys(item.latent_cache_path) == {
+        "latents_1x4x4_float32",
+        "latents_cond_000_1x4x4_float32",
+        "latents_audio_32x2x2_float32",
+        AUDIO_PRESENT_KEY,
+        ONE_FRAME_TARGET_INDEX_KEY,
+        ONE_FRAME_CONTROL_INDICES_KEY,
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 1, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "fl2va", "one_frame": "1"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "fl2va"})
 
     manager = BucketBatchManager({(64, 64, 1): [item]}, batch_size=1)
     batch = manager[0]
 
     assert batch["latents"].shape == (1, 24, 1, 4, 4)
-    assert batch["latents_first"].shape == (1, 24, 1, 4, 4)
+    assert batch["latents_cond_000"].shape == (1, 24, 1, 4, 4)
     torch.testing.assert_close(batch["one_frame_target_index"], torch.tensor([24], dtype=torch.int64))
     torch.testing.assert_close(batch["one_frame_control_indices"], torch.tensor([[0]], dtype=torch.int64))
 
@@ -1267,16 +1287,16 @@ def test_build_one_frame_latents_pack_references_under_numbered_roles(tmp_path: 
         media_decoder=decoder,
     )
 
-    assert set(payload.tensors) == {
-        "latents_1x4x4_float32",
-        "latents_audio_32x2x2_float32",
-        AUDIO_PRESENT_KEY,
-        ONE_FRAME_TARGET_INDEX_KEY,
-        "latents_ref_000_image_1x2x4_float32",
-        "latents_ref_001_video_2x4x2_float32",
-        "latents_ref_001_audio_32x2x8_float32",
+    assert payload.target_video.shape == (24, 1, 4, 4)
+    assert payload.target_audio.shape == (32, 2, 2)
+    assert payload.audio_present is False
+    assert {role: tuple(latent.shape) for role, latent in payload.visual_conditions.items()} == {
+        "ref_000_image": (24, 1, 2, 4),
+        "ref_001_video": (24, 2, 4, 2),
     }
-    assert ONE_FRAME_CONTROL_INDICES_KEY not in payload.tensors
+    assert {role: tuple(latent.shape) for role, latent in payload.audio_conditions.items()} == {"ref_001_audio": (32, 2, 8)}
+    assert payload.one_frame_target_index == 24
+    assert payload.one_frame_control_indices is None
     # references are decoded with the one-frame policy: images capped to the target area,
     # videos to the released 15 s span (not a target duration, which a single frame lacks)
     assert [(call[1], call[2]) for call in decoder.visual_calls] == [(ONE_FRAME_REFERENCE_FRAME_CAP, (64, 64))] * 2
@@ -1335,25 +1355,35 @@ def test_one_frame_reference_cache_keys_round_trip_through_the_bucket_collator(t
     item = ItemInfo("view", "a reference caption", (64, 64), (64, 64))
     item.latent_cache_path = str(tmp_path / "view_0064x0064_mmh3.safetensors")
     item.text_encoder_output_cache_path = str(tmp_path / "view_mmh3_te.safetensors")
-    latent_tensors = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_ref_000_image_1x4x4_float32": torch.ones(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
+    save_latent_cache_minimax_h3(
+        item,
+        target_video=torch.zeros(24, 1, 4, 4),
+        target_audio=torch.zeros(32, 2, 2),
+        audio_present=False,
+        visual_conditions={"ref_000_image": torch.ones(24, 1, 4, 4), "ref_001_video": torch.ones(24, 2, 4, 4)},
+        audio_conditions={"ref_001_audio": torch.zeros(32, 2, 8)},
+        one_frame_target_index=24,
+        metadata={"task": "ref2va", "one_frame": "1"},
+    )
+    _save_text_rows(item, metadata={"task": "ref2va"})
+
+    assert _saved_keys(item.latent_cache_path) == {
+        "latents_1x4x4_float32",
+        "latents_ref_000_image_1x4x4_float32",
+        "latents_ref_001_video_2x4x4_float32",
+        "latents_ref_001_audio_32x2x8_float32",
+        "latents_audio_32x2x2_float32",
+        AUDIO_PRESENT_KEY,
+        ONE_FRAME_TARGET_INDEX_KEY,
     }
-    text_tensors = {
-        "varlen_mmh3_hidden_states_bfloat16": torch.zeros(3, 5120, dtype=torch.bfloat16),
-        "varlen_mmh3_token_tags_int64": torch.tensor([1, 0, 1], dtype=torch.int64),
-    }
-    save_latent_cache_minimax_h3(item, latent_tensors, {"task": "ref2va", "one_frame": "1"})
-    save_text_encoder_output_cache_minimax_h3(item, text_tensors, {"task": "ref2va"})
 
     manager = BucketBatchManager({(64, 64): [item]}, batch_size=1)
     batch = manager[0]
 
     assert batch["latents"].shape == (1, 24, 1, 4, 4)
     assert batch["latents_ref_000_image"].shape == (1, 24, 1, 4, 4)
+    assert batch["latents_ref_001_video"].shape == (1, 24, 2, 4, 4)
+    assert batch["latents_ref_001_audio"].shape == (1, 32, 2, 8)
     torch.testing.assert_close(batch["one_frame_target_index"], torch.tensor([24], dtype=torch.int64))
 
 
@@ -1583,22 +1613,24 @@ def test_one_frame_format_tag_makes_skip_existing_rebuild_pre_cond_caches(tmp_pa
     assert cache_metadata_matches(path, expected)
 
 
-def test_h3_latent_writer_rejects_invalid_one_frame_control_indices(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("one_frame", "message"),
+    [
+        ({"one_frame_target_index": 24, "one_frame_control_indices": [-1]}, "control indices must be nonnegative"),
+        ({"one_frame_target_index": 24, "one_frame_control_indices": []}, "at least one entry"),
+        ({"one_frame_control_indices": [0]}, "require the one-frame target index"),
+    ],
+)
+def test_h3_latent_writer_rejects_invalid_one_frame_control_indices(tmp_path: Path, one_frame: dict, message: str):
     item = _h3_item(tmp_path)
-    base = {
-        "latents_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_cond_000_1x4x4_float32": torch.zeros(24, 1, 4, 4),
-        "latents_audio_32x2x2_float32": torch.zeros(32, 2, 2),
-        AUDIO_PRESENT_KEY: torch.tensor(0.0, dtype=torch.float32),
-        ONE_FRAME_TARGET_INDEX_KEY: torch.tensor(24, dtype=torch.int64),
-    }
-    invalid = (
-        torch.tensor(0, dtype=torch.int64),
-        torch.tensor([0], dtype=torch.int32),
-        torch.tensor([-1], dtype=torch.int64),
-        torch.tensor([], dtype=torch.int64),
-        torch.zeros(1, 1, dtype=torch.int64),
-    )
-    for indices in invalid:
-        with pytest.raises(ValueError, match=ONE_FRAME_CONTROL_INDICES_KEY):
-            save_latent_cache_minimax_h3(item, {**base, ONE_FRAME_CONTROL_INDICES_KEY: indices}, {"task": "fl2va"})
+
+    with pytest.raises(ValueError, match=message):
+        save_latent_cache_minimax_h3(
+            item,
+            target_video=torch.zeros(24, 1, 4, 4),
+            target_audio=torch.zeros(32, 2, 2),
+            audio_present=False,
+            visual_conditions={"cond_000": torch.zeros(24, 1, 4, 4)},
+            metadata={"task": "fl2va"},
+            **one_frame,
+        )
