@@ -16,11 +16,13 @@
 
 Training on one-frame targets is available for plain image LoRA (T2VA), for editing/inbetween LoRA with time-annotated control images (FL2VA), and for reference-conditioned image LoRA (Ref2VA); see [One-frame training](#one-frame-training-t2va-image-lora), [One-frame editing training](#one-frame-editing-training-fl2va-control-images), and [One-frame reference training](#one-frame-reference-training-ref2va-image-references) below.
 
-## Time semantics: `--one_frame`
+## Time semantics: `--one_frame_inference`
 
 ```text
---one_frame "target_index=N,control_index=A;B"
+--one_frame_inference "target_index=N,control_index=A;B"
 ```
+
+(`--of` in prompt lines, for both the generation CLI's `--from_file`/`--interactive` modes and training-time samples. The cache scripts and the trainer have a `--one_frame` flag of their own that enables one-frame *training*; the generation option is named like the other architectures' `--one_frame_inference` to keep the two apart.)
 
 Positions on H3's rotary time axis are expressed as **0-based 24 fps pixel-frame indices** on a nominal timeline (one pixel frame = 5/3 rotary units = 1/24 s). All times are relative to the target-block cursor, which itself moves with the text length — only relative placement carries meaning.
 
@@ -57,13 +59,13 @@ One or two pictures is officially in-distribution for the FL2VA checkpoint (its 
 # generate "frame 24" of a nominal clip anchored by one condition image at frame 0
 ... --task fl2va --frame_count 1 \
   --first_frame anchor.png \
-  --one_frame "target_index=24,control_index=0" \
+  --one_frame_inference "target_index=24,control_index=0" \
   --prompt "..." --output frame24.png
 
 # three anchors: frames 0, 48 and 96, generating frame 24 (experimental)
 ... --task fl2va --frame_count 1 \
   --condition_image a.png --condition_image b.png --condition_image c.png \
-  --one_frame "target_index=24,control_index=0;48;96" \
+  --one_frame_inference "target_index=24,control_index=0;48;96" \
   --prompt "..." --output frame24.png
 ```
 
@@ -93,7 +95,7 @@ Audio-bearing video references are accepted and keep their own duration; combini
 
 ### Dataset configuration
 
-Image datasets use the standard image keys. `fp_1f_target_index` (optional, default 0) places the target on the rotary time axis, in the same 0-based 24 fps pixel-frame indices as generation's `--one_frame target_index=N`; for plain image LoRA the default is fine. Control images and `fp_1f_clean_indices` belong to the FL2VA editing mode (next section); `multiple_target` is not supported.
+Image datasets use the standard image keys. `fp_1f_target_index` (optional, default 0) places the target on the rotary time axis, in the same 0-based 24 fps pixel-frame indices as generation's `--one_frame_inference target_index=N`; for plain image LoRA the default is fine. Control images and `fp_1f_clean_indices` belong to the FL2VA editing mode (next section); `multiple_target` is not supported.
 
 ```toml
 [general]
@@ -184,7 +186,7 @@ fp_1f_target_index = 24       # target position — REQUIRED when controls are p
 
 ### Choosing indices
 
-The base model's strongest prior is **verbatim anchor copying at coinciding timestamps**: a control whose index equals the target index is reproduced almost exactly, so such a dataset trains head-on against copying — only do this when copy-at-the-anchor is the desired behavior. The recommended starting recipe for editing is `fp_1f_clean_indices = [0]`, `fp_1f_target_index = 24` (a one-second separation); inference must then use the same relative placement (`--one_frame "target_index=24,control_index=0"`). For inbetween triplets extracted from real videos, use the real frame distances: (first@0, last@N, target@αN) → `fp_1f_clean_indices = [0, N]`, `fp_1f_target_index = round(αN)`. Since the indices live in the dataset config, one α per dataset block; several blocks can share a TOML.
+The base model's strongest prior is **verbatim anchor copying at coinciding timestamps**: a control whose index equals the target index is reproduced almost exactly, so such a dataset trains head-on against copying — only do this when copy-at-the-anchor is the desired behavior. The recommended starting recipe for editing is `fp_1f_clean_indices = [0]`, `fp_1f_target_index = 24` (a one-second separation); inference must then use the same relative placement (`--one_frame_inference "target_index=24,control_index=0"`). For inbetween triplets extracted from real videos, use the real frame distances: (first@0, last@N, target@αN) → `fp_1f_clean_indices = [0, N]`, `fp_1f_target_index = round(αN)`. Since the indices live in the dataset config, one α per dataset block; several blocks can share a TOML.
 
 **Captions must follow the official alignment-line formats** (I2VA/L2VA/FL2VA opening lines from the prompt-writing guide): plain captions actively suppress the base model's continuous reading of condition times, which is exactly the pathway this training relies on.
 

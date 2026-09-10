@@ -37,8 +37,10 @@ from musubi_tuner.minimax_h3.packing import (
     one_frame_condition_role,
     reference_condition_role,
 )
+from musubi_tuner.minimax_h3.args import add_h3_vae_args
 from musubi_tuner.minimax_h3.media import (
     H3_AUDIO_SPEC,
+    H3_TASKS,
     ONE_FRAME_REFERENCE_FRAME_CAP,
     H3MediaDecoder,
     H3Record,
@@ -508,9 +510,8 @@ def log_audio_presence_summary(presence_counts: Mapping[bool, int]) -> None:
 
 def setup_parser() -> argparse.ArgumentParser:
     parser = cache_latents.setup_parser_common(include_vae=False)
-    parser.add_argument("--video_vae", type=str, required=True, help="MiniMax-H3 video VAE safetensors path or directory")
-    parser.add_argument("--audio_vae", type=str, required=True, help="MiniMax-H3 audio VAE safetensors path or directory")
-    parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), required=True)
+    add_h3_vae_args(parser, required=True)
+    parser.add_argument("--task", choices=H3_TASKS, required=True)
     parser.add_argument(
         "--one_frame",
         action="store_true",

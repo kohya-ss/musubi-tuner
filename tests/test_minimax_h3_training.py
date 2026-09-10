@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.hv_train_network import setup_parser_common
+from musubi_tuner.minimax_h3.generation_inputs import H3GenerationRequest
 from musubi_tuner.minimax_h3.model import MiniMaxH3Config, MiniMaxH3Model
 from musubi_tuner.minimax_h3.packing import FRAME_RESCALE, H3ReferenceGeometry, H3VideoGeometry, build_h3_layout
 from musubi_tuner.modules.convrot_int8_kernels import quantize_int8_convrot_weight
@@ -24,8 +25,8 @@ from musubi_tuner.minimax_h3_train_network import (
     MiniMaxH3NetworkTrainer,
     _apply_timestep_focus,
     _decomposed_flow_loss,
-    _normalize_h3_sample_parameter,
     _prediction_geometry_log,
+    _sample_request,
     minimax_h3_setup_parser,
 )
 from musubi_tuner.training.sampling_prompts import line_to_prompt_dict
@@ -176,15 +177,36 @@ def test_sample_prompt_line_parses_inline_refs_and_reference_jsonl():
     assert line_to_prompt_dict("a cat sings --rj refs/all.jsonl")["reference_jsonl"] == "refs/all.jsonl"
 
 
-def test_h3_sample_normalization_unescapes_newlines_like_the_generation_script(tmp_path):
+def test_h3_sample_request_unescapes_newlines_like_the_generation_script(tmp_path):
     args = _trainer_args(task="t2va", sample_prompts=str(tmp_path / "prompts.txt"))
 
-    sample = _normalize_h3_sample_parameter(args, {"prompt": "summary:\\n[Shot 1] a cat\\n\\ndetail"})
+    request = _sample_request(args, {"prompt": "summary:\\n[Shot 1] a cat\\n\\ndetail"})
 
-    assert sample["prompt"] == "summary:\n[Shot 1] a cat\n\ndetail"
+    assert request.prompt == "summary:\n[Shot 1] a cat\n\ndetail"
 
 
-def test_h3_ref2va_sample_normalization_resolves_inline_refs_from_the_prompt_file_directory(tmp_path):
+def test_h3_sample_request_starts_from_the_training_run_and_the_prompt_dict_vocabulary(tmp_path):
+    args = _trainer_args(task="t2va", sample_prompts=str(tmp_path / "prompts.txt"), h3_shift_video=7.0, h3_audio_cond_clean=0.5)
+
+    request = _sample_request(args, {"prompt": "p", "sample_steps": 4, "discrete_flow_shift_audio": 2.5, "enum": 3})
+
+    assert request == H3GenerationRequest(
+        task="t2va",
+        prompt="p",
+        ref_base_directory=tmp_path.resolve(),
+        steps=4,
+        h3_shift_video=7.0,
+        h3_shift_audio=2.5,
+        h3_audio_cond_clean=0.5,
+    )
+    # the generic sampling options H3 cannot honor are rejected, and the task is the run's
+    with pytest.raises(ValueError, match="cfg_scale"):
+        _sample_request(args, {"prompt": "p", "cfg_scale": 3.0})
+    with pytest.raises(ValueError, match="does not match the training --task"):
+        _sample_request(args, {"prompt": "p", "task": "fl2va"})
+
+
+def test_h3_ref2va_sample_request_resolves_inline_refs_from_the_prompt_file_directory(tmp_path):
     prompt_file = tmp_path / "prompts.txt"
     prompt_file.touch()
     face = tmp_path / "refs" / "face.png"
@@ -192,34 +214,32 @@ def test_h3_ref2va_sample_normalization_resolves_inline_refs_from_the_prompt_fil
     face.touch()
     args = _trainer_args(task="ref2va", sample_prompts=str(prompt_file))
 
-    sample = _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/face.png"]})
+    request = _sample_request(args, {"prompt": "a cat sings", "ref": ["refs/face.png"]})
 
-    assert sample["ref"] == ["refs/face.png"]
-    assert Path(sample["ref_base_directory"]) == tmp_path.resolve()
-    assert sample["reference_jsonl"] is None
+    assert request.ref == ["refs/face.png"]
+    assert request.ref_base_directory == tmp_path.resolve()
+    assert request.reference_jsonl is None
 
     with pytest.raises(ValueError, match="does not exist"):
-        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/missing.png"]})
-    with pytest.raises(ValueError, match="cannot combine"):
-        _normalize_h3_sample_parameter(
-            args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_jsonl": "refs/all.jsonl"}
-        )
-    with pytest.raises(ValueError, match="requires a prompt"):
-        _normalize_h3_sample_parameter(args, {"ref": ["refs/face.png"]})
+        _sample_request(args, {"prompt": "a cat sings", "ref": ["refs/missing.png"]})
+    with pytest.raises(ValueError, match="exactly one of"):
+        _sample_request(args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_jsonl": "refs/all.jsonl"})
+    with pytest.raises(ValueError, match="requires --prompt"):
+        _sample_request(args, {"ref": ["refs/face.png"]})
     with pytest.raises(ValueError, match="does not apply to --ref"):
-        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_index": 1})
+        _sample_request(args, {"prompt": "a cat sings", "ref": ["refs/face.png"], "reference_index": 1})
     with pytest.raises(ValueError, match="non-empty strings"):
-        _normalize_h3_sample_parameter(args, {"prompt": "a cat sings", "ref": " "})
+        _sample_request(args, {"prompt": "a cat sings", "ref": " "})
 
     for task in ("t2va", "fl2va"):
         with pytest.raises(ValueError, match="does not accept"):
-            _normalize_h3_sample_parameter(
+            _sample_request(
                 _trainer_args(task=task, sample_prompts=str(prompt_file)),
                 {"prompt": "a cat sings", "ref": ["refs/face.png"]},
             )
 
 
-def test_h3_ref2va_sample_normalization_resolves_relative_reference_jsonl_from_the_prompt_file(tmp_path):
+def test_h3_ref2va_sample_request_resolves_relative_reference_jsonl_from_the_prompt_file(tmp_path):
     prompt_directory = tmp_path / "sub"
     prompt_directory.mkdir()
     prompt_file = prompt_directory / "prompts.txt"
@@ -228,12 +248,12 @@ def test_h3_ref2va_sample_normalization_resolves_relative_reference_jsonl_from_t
     jsonl.touch()
     args = _trainer_args(task="ref2va", sample_prompts=str(prompt_file))
 
-    sample = _normalize_h3_sample_parameter(args, {"prompt": "p", "reference_jsonl": "refs.jsonl"})
+    request = _sample_request(args, {"prompt": "p", "reference_jsonl": "refs.jsonl"})
 
-    assert Path(sample["reference_jsonl"]) == jsonl.resolve()
+    assert Path(request.reference_jsonl) == jsonl.resolve()
 
     with pytest.raises(ValueError, match="does not exist"):
-        _normalize_h3_sample_parameter(args, {"prompt": "p", "reference_jsonl": "nowhere.jsonl"})
+        _sample_request(args, {"prompt": "p", "reference_jsonl": "nowhere.jsonl"})
 
 
 def test_h3_parser_defaults_to_the_only_supported_training_coordinates():
@@ -360,10 +380,15 @@ def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samp
     assert args.h3_allow_experimental_sample_duration is False
 
 
-def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_both_modalities(tmp_path, monkeypatch):
+@pytest.mark.parametrize("output_fps", [24, 12])
+def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_both_modalities(tmp_path, monkeypatch, output_fps):
     import musubi_tuner.minimax_h3_train_network as train
+    from musubi_tuner.minimax_h3.media import audio_latent_frames
 
     events = []
+    # 5 frames at the sample's rate: 24 fps = 6667 audio samples, 12 fps (--ofps 12) = 13333
+    audio_samples = round(5 * 32000 / output_fps)
+    audio_frames = audio_latent_frames(5, output_fps=output_fps)
 
     class Transformer:
         training = True
@@ -410,8 +435,9 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
 
         def decode(self, latents):
             events.append("decode_audio")
-            assert latents.shape == (1, 32, 2, 8)
-            return torch.zeros(1, 2, 6667)
+            assert latents.shape == (1, 32, 2, audio_frames)
+            # one extra sample past the planned duration, trimmed by the sync
+            return torch.zeros(1, 2, audio_samples + 1)
 
     captured = {}
     monkeypatch.setattr(
@@ -425,16 +451,14 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
         task="t2va",
         text_length=3,
         target_video=H3VideoGeometry(2, 4, 4),
-        target_audio_frames=8,
+        target_audio_frames=audio_frames,
+        output_fps=output_fps,
     )
     sample_parameter = {
         "enum": 0,
-        "prompt": "joint sample",
-        "sample_steps": 2,
-        "width": 64,
-        "height": 64,
-        "frame_count": 5,
-        "seed": 123,
+        "h3_request": H3GenerationRequest(
+            task="t2va", prompt="joint sample", steps=2, width=64, height=64, frame_count=5, seed=123, output_fps=output_fps
+        ),
         "h3_layout": layout,
         "h3_text_hidden_states": torch.zeros(1, 3, 12),
         "h3_text_token_tags": torch.tensor([[1, 0, 1]], dtype=torch.int64),
@@ -462,7 +486,9 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
     assert output == captured["output_path"]
     assert captured["output_path"].suffix == ".mp4"
     assert captured["decoded"].video.shape == (5, 8, 8, 3)
-    assert captured["decoded"].audio.shape == (2, 6667)
+    # the container plays the 5 frames at the sample's rate and the audio covers that duration
+    assert captured["decoded"].fps == output_fps
+    assert captured["decoded"].audio.shape == (2, audio_samples)
     assert events.index("sample_live_transformer") < events.index("decode_video") < events.index("decode_audio")
     assert transformer.training is True
 
@@ -553,7 +579,7 @@ def test_prepare_training_samples_encodes_text_once_and_returns_both_vaes_as_sam
     assert len(sample_parameters) == 1
     parameter = sample_parameters[0]
     assert parameter["h3_layout"].task == "t2va"
-    assert parameter["frame_count"] == 22
+    assert parameter["h3_request"].frame_count == 22  # 23 rounds down to the 17*n+5 grid
     assert parameter["h3_layout"].target_video == H3VideoGeometry(7, 4, 4)
     assert parameter["h3_layout"].target_audio_frames == 37
     assert parameter["h3_text_hidden_states"].shape == (1, 3, 12)
@@ -1285,17 +1311,17 @@ def test_one_frame_training_records_provenance_metadata():
     assert "ss_minimax_h3_one_frame" not in MiniMaxH3NetworkTrainer().extra_metadata(_trainer_args())
 
 
-def test_one_frame_sample_normalization_parses_the_of_option():
+def test_one_frame_sample_request_parses_the_of_option():
     args = _trainer_args(one_frame=True)
 
-    sample = _normalize_h3_sample_parameter(
+    request = _sample_request(
         args, {"prompt": "a lighthouse", "frame_count": 1, "one_frame": "target_index=24", "width": 64, "height": 64}
     )
 
-    assert sample["frame_count"] == 1
-    assert sample["one_frame_target_index"] == 24
-    default = _normalize_h3_sample_parameter(args, {"prompt": "a lighthouse", "frame_count": 1})
-    assert default["one_frame_target_index"] == 0
+    assert request.frame_count == 1
+    assert request.one_frame_indices() == (24, None)
+    default = _sample_request(args, {"prompt": "a lighthouse", "frame_count": 1})
+    assert default.one_frame_indices() == (0, None)
 
 
 @pytest.mark.parametrize(
@@ -1305,9 +1331,9 @@ def test_one_frame_sample_normalization_parses_the_of_option():
         (
             {"task": "ref2va", "sample_prompts": "prompts.txt"},
             {"prompt": "x", "frame_count": 1, "ref": ["face.png"], "one_frame": "target_index=0,control_index=0"},
-            "REF2VA one-frame training sample does not accept control_index",
+            "control_index applies only to FL2VA",
         ),
-        ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --f 1"),
+        ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --frame_count 1"),
         # fl2va one-frame: control_index is mandatory, one entry per condition image
         (
             {"task": "fl2va"},
@@ -1324,7 +1350,11 @@ def test_one_frame_sample_normalization_parses_the_of_option():
             {"prompt": "x", "frame_count": 1, "control_image_path": ["a.png", "b.png"], "one_frame": "control_index=0"},
             "one entry per condition image",
         ),
-        ({"task": "fl2va"}, {"prompt": "x", "frame_count": 1, "one_frame": "control_index=0"}, "requires condition images"),
+        (
+            {"task": "fl2va"},
+            {"prompt": "x", "frame_count": 1, "one_frame": "control_index=0"},
+            "requires --first_frame and/or --last_frame",
+        ),
         # --ci is the ordered one-frame list; --i/--ei alias its first two slots and cannot be mixed in
         (
             {"task": "fl2va"},
@@ -1342,19 +1372,19 @@ def test_one_frame_sample_normalization_parses_the_of_option():
         ({}, {"prompt": "x", "frame_count": 1, "control_image_path": ["a.png"]}, "does not accept condition"),
     ],
 )
-def test_one_frame_sample_normalization_rejects_invalid_requests(args_overrides, sample, message):
+def test_one_frame_sample_request_rejects_invalid_requests(args_overrides, sample, message):
     args = _trainer_args(**args_overrides)
 
     with pytest.raises(ValueError, match=message):
-        _normalize_h3_sample_parameter(args, sample)
+        _sample_request(args, sample)
 
 
-def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
+def test_one_frame_fl2va_sample_request_parses_control_indices(tmp_path):
     first = tmp_path / "first.png"
     first.touch()
     args = _trainer_args(task="fl2va", one_frame=True)
 
-    sample = _normalize_h3_sample_parameter(
+    request = _sample_request(
         args,
         {
             "prompt": "an edit",
@@ -1366,10 +1396,9 @@ def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
         },
     )
 
-    assert sample["frame_count"] == 1
-    assert sample["one_frame_target_index"] == 24
-    assert sample["one_frame_control_indices"] == (0,)
-    assert sample["condition_image"] is None
+    assert request.frame_count == 1
+    assert request.one_frame_indices() == (24, (0,))
+    assert request.condition_image is None
 
     # the ordered --ci list (sampling_prompts parses it as control_image_path), three conditions
     conditions = []
@@ -1377,7 +1406,7 @@ def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
         path = tmp_path / f"{name}.png"
         path.touch()
         conditions.append(str(path))
-    sample = _normalize_h3_sample_parameter(
+    request = _sample_request(
         args,
         {
             "prompt": "an inbetween",
@@ -1388,17 +1417,17 @@ def test_one_frame_fl2va_sample_normalization_parses_control_indices(tmp_path):
             "height": 64,
         },
     )
-    assert sample["condition_image"] == conditions
-    assert sample["one_frame_control_indices"] == (0, 24, 48)
+    assert request.condition_image == conditions
+    assert request.one_frame_indices() == (24, (0, 24, 48))
 
 
-def test_one_frame_ref2va_sample_normalization_accepts_inline_refs(tmp_path):
+def test_one_frame_ref2va_sample_request_accepts_inline_refs(tmp_path):
     prompt_file = tmp_path / "prompts.txt"
     prompt_file.touch()
     (tmp_path / "face.png").touch()
     args = _trainer_args(task="ref2va", one_frame=True, sample_prompts=str(prompt_file))
 
-    sample = _normalize_h3_sample_parameter(
+    request = _sample_request(
         args,
         {
             "prompt": "a novel view",
@@ -1410,10 +1439,9 @@ def test_one_frame_ref2va_sample_normalization_accepts_inline_refs(tmp_path):
         },
     )
 
-    assert sample["frame_count"] == 1
-    assert sample["one_frame_target_index"] == 24
-    assert sample["one_frame_control_indices"] is None
-    assert sample["ref"] == ["face.png"]
+    assert request.frame_count == 1
+    assert request.one_frame_indices() == (24, None)
+    assert request.ref == ["face.png"]
 
 
 def test_t2va_draws_no_condition_noise(monkeypatch):

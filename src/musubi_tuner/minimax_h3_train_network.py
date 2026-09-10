@@ -5,9 +5,8 @@ import gc
 import logging
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -19,26 +18,30 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_MINIMAX_H3_FULL,
     round_down_frame_count,
 )
+from musubi_tuner.minimax_h3.args import add_h3_sampling_args, add_h3_text_encoder_args, add_h3_vae_args
 from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
+    DEFAULT_FRAME_COUNT,
     VIDEO_VAE_SPATIAL_RATIO,
+    H3GenerationRequest,
+    build_generation_layout,
     build_reference_geometries,
     decode_generation_visuals,
     encode_audio_conditions,
     encode_visual_conditions,
-    fl_condition_entries,
     load_generation_record,
-    parse_one_frame_options,
+    reference_video_frame_counts,
+    request_overrides,
+    require_path,
+    validate_generation_request,
 )
 from musubi_tuner.minimax_h3.media import (
     H3_AUDIO_SPEC,
-    TARGET_FPS,
+    H3_TASKS,
+    H3Record,
     PyAVH3MediaDecoder,
-    audio_latent_frames,
     module_device_dtype,
-    parse_inline_references,
     reject_one_frame_audio_references,
-    video_latent_frames,
 )
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.packing import (
@@ -49,18 +52,14 @@ from musubi_tuner.minimax_h3.packing import (
     H3ReferenceGeometry,
     H3TimeOverrides,
     H3VideoGeometry,
-    ONE_FRAME_AUDIO_LATENT_FRAMES,
     ONE_FRAME_VIDEO_LATENT_FRAMES,
     build_h3_layout,
     one_frame_condition_roles,
     parse_condition_role,
 )
 from musubi_tuner.minimax_h3.sampling import (
-    augment_condition_latents,
-    create_sampling_generator,
     decoded_video_to_uint8,
-    initialize_target_latents,
-    sample_joint_av,
+    sample_joint_av_latents,
     synchronize_decoded_av,
     write_image,
     write_joint_av,
@@ -92,163 +91,42 @@ logger = logging.getLogger(__name__)
 SIGMA_MAX_RECOMMENDED_COMPLETE_INFORMATION = 0.75
 
 
-def _require_sampling_path(value: str | None, label: str) -> Path:
-    if not value:
-        raise ValueError(f"MiniMax-H3 training-time sampling requires --{label}")
-    path = Path(value).expanduser()
-    if not path.exists():
-        raise ValueError(f"MiniMax-H3 --{label} does not exist: {path}")
-    return path
-
-
-def _normalize_h3_sample_parameter(args: argparse.Namespace, parameter: dict[str, Any]) -> dict[str, Any]:
-    sample = parameter.copy()
-    sample_task = sample.get("task", args.task)
+def _sample_request(args: argparse.Namespace, parameter: Mapping[str, Any]) -> H3GenerationRequest:
+    """The generation request of one ``--sample_prompts`` entry: the same contract as the
+    generation CLI (generation_inputs), with the training run's task and sampler flags as the
+    base and the prompt file's directory as the root of relative reference paths."""
+    sample_task = parameter.get("task", args.task)
     if sample_task != args.task:
         raise ValueError(f"MiniMax-H3 sample prompt task {sample_task!r} does not match the training --task {args.task!r}")
-    if sample.get("negative_prompt") not in {None, ""}:
-        raise ValueError("MiniMax-H3 training-time sampling does not support negative prompts or CFG")
-    if sample.get("cfg_scale") not in {None, 1, 1.0}:
-        raise ValueError("MiniMax-H3 training-time sampling does not support --cfg_scale")
-    if sample.get("guidance_scale") not in {None, 1, 1.0}:
-        raise ValueError("MiniMax-H3 training-time sampling does not support --guidance_scale")
-    if sample.get("discrete_flow_shift") not in {None, 1, 1.0}:
-        raise ValueError("MiniMax-H3 sample prompts use --h3_shift_video and --h3_shift_audio, not discrete_flow_shift")
-
-    width = int(sample.get("width", 768))
-    height = int(sample.get("height", 1344))
-    requested_frame_count = int(sample.get("frame_count", 124))
-    one_frame_spec = sample.get("one_frame")
-    if requested_frame_count == 1:
-        # experimental one-frame (image) sample: single-token target, no duration semantics
-        frame_count = 1
-        target_index, control_indices = parse_one_frame_options(one_frame_spec) if one_frame_spec else (0, None)
-        if args.task != "fl2va" and control_indices is not None:
-            raise ValueError(f"MiniMax-H3 {args.task.upper()} one-frame training sample does not accept control_index")
-        sample["one_frame_target_index"] = target_index
-        sample["one_frame_control_indices"] = control_indices
-    else:
-        if one_frame_spec is not None:
-            raise ValueError("MiniMax-H3 sample --of options require --f 1")
+    prompt_directory = Path(args.sample_prompts).expanduser().resolve().parent if args.sample_prompts else Path.cwd()
+    overrides = request_overrides(parameter)
+    if args.h3_allow_experimental_sample_duration:
+        overrides["allow_experimental_duration"] = True
+    requested_frame_count = overrides.get("frame_count", DEFAULT_FRAME_COUNT)
+    if requested_frame_count != 1:
+        # the house sample convention: an off-grid frame count rounds down instead of failing
         frame_count = round_down_frame_count(requested_frame_count, ARCHITECTURE_MINIMAX_H3, 17)
         if frame_count != requested_frame_count:
-            logger.warning(
-                "MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)",
-                requested_frame_count,
-                frame_count,
-            )
-        video_latent_frames(frame_count)
-        duration = frame_count / TARGET_FPS
-        allow_experimental = bool(args.h3_allow_experimental_sample_duration or sample.get("allow_experimental_duration", False))
-        if not allow_experimental and not 5.0 <= duration <= 15.0:
-            raise ValueError(
-                f"MiniMax-H3 sample duration {duration:.3f}s is outside the released 5-15s range; "
-                "pass --h3_allow_experimental_sample_duration to proceed"
-            )
-    sample_steps = int(sample.get("sample_steps", 30))
-    if width <= 0 or height <= 0 or width % 32 or height % 32:
-        raise ValueError(f"MiniMax-H3 sample width and height must be positive and divisible by 32, got {width}x{height}")
-    if sample_steps <= 0:
-        raise ValueError("MiniMax-H3 sample_steps must be positive")
-
-    prompt = sample.get("prompt")
-    if isinstance(prompt, str):
-        # same rule as minimax_h3_generate_video.py: the literal "\n" becomes a newline so a
-        # one-line prompt file can carry the multi-line official caption format
-        prompt = prompt.replace("\\n", "\n")
-        sample["prompt"] = prompt
-    first_frame = sample.get("first_frame") or sample.get("image_path")
-    last_frame = sample.get("last_frame") or sample.get("end_image_path")
-    condition_images = sample.get("condition_image") or sample.get("control_image_path")
-    reference_jsonl = sample.get("reference_jsonl")
-    ref_specs = sample.get("ref")
-    reference_index = int(sample.get("reference_index", 0))
-    ref_base_directory = None
-    if ref_specs is not None:
-        if not isinstance(ref_specs, list) or not all(isinstance(spec, str) and spec.strip() for spec in ref_specs):
-            raise ValueError("MiniMax-H3 training sample --ref entries must be non-empty strings")
-    if condition_images is not None:
-        if not isinstance(condition_images, list) or not all(isinstance(path, str) and path.strip() for path in condition_images):
-            raise ValueError("MiniMax-H3 training sample --ci entries must be non-empty paths")
-    if args.task == "t2va":
-        if not prompt:
-            raise ValueError("MiniMax-H3 T2VA training sample requires a prompt")
-        if first_frame or last_frame or condition_images or reference_jsonl or ref_specs:
-            raise ValueError("MiniMax-H3 T2VA training sample does not accept condition/first/last/reference inputs")
-    elif args.task == "fl2va":
-        if not prompt:
-            raise ValueError("MiniMax-H3 FL2VA training sample requires a prompt")
-        if reference_jsonl or ref_specs:
-            raise ValueError("MiniMax-H3 FL2VA training sample does not accept reference_jsonl or --ref")
-        # the same condition rules as the generation CLI: video samples take first/last, one-frame
-        # samples an ordered list (--ci, or --i/--ei for the first two slots)
-        entries = fl_condition_entries(
-            SimpleNamespace(
-                frame_count=frame_count, first_frame=first_frame, last_frame=last_frame, condition_image=condition_images
-            )
-        )
-        if frame_count == 1:
-            # one control_index per condition image (mandatory: the placement is the training signal)
-            if not entries:
-                raise ValueError("MiniMax-H3 one-frame FL2VA training sample requires condition images (--ci, or --i/--ei)")
-            control_indices = sample.get("one_frame_control_indices")
-            if control_indices is None or len(control_indices) != len(entries):
-                raise ValueError(
-                    "MiniMax-H3 one-frame FL2VA training sample requires --of control_index with one entry"
-                    " per condition image, e.g. --of target_index=24,control_index=0"
-                )
-            for role, value in entries:
-                _require_sampling_path(value, role)
-        else:
-            _require_sampling_path(first_frame, "first_frame")
-            _require_sampling_path(last_frame, "last_frame")
-    else:
-        if first_frame or last_frame or condition_images:
-            raise ValueError("MiniMax-H3 Ref2VA training sample does not accept condition/first/last frames")
-        prompt_directory = Path(args.sample_prompts).expanduser().resolve().parent
-        if ref_specs:
-            if reference_jsonl:
-                raise ValueError("MiniMax-H3 Ref2VA training sample cannot combine --ref with --rj/reference_jsonl")
-            if not prompt:
-                raise ValueError("MiniMax-H3 Ref2VA training sample with --ref requires a prompt")
-            if reference_index:
-                raise ValueError("MiniMax-H3 reference_index selects a reference_jsonl record and does not apply to --ref")
-            ref_base_directory = str(prompt_directory)
-            # validate the specs (existence, probes, count limits) before the heavyweight
-            # sampling models are loaded; load_generation_record re-parses them later
-            parse_inline_references(ref_specs, prompt_directory)
-        else:
-            # relative reference_jsonl paths resolve from the prompt file's directory,
-            # falling back to the historical CWD-relative behavior
-            if reference_jsonl and not Path(reference_jsonl).expanduser().is_absolute():
-                prompt_relative = prompt_directory / Path(reference_jsonl).expanduser()
-                if prompt_relative.exists():
-                    reference_jsonl = str(prompt_relative)
-            _require_sampling_path(reference_jsonl, "reference_jsonl")
-            if reference_index < 0:
-                raise ValueError("MiniMax-H3 reference_index must be nonnegative")
-
-    seed = sample.get("seed")
-    # the normalized sample carries every field the generation-input helpers read (they are
-    # shared with minimax_h3_generate_video.py, whose argparse namespace defines them all)
-    sample.update(
+            logger.warning("MiniMax-H3 sample frame count %d was rounded down to %d (17*n+5)", requested_frame_count, frame_count)
+        overrides["frame_count"] = frame_count
+    reference_jsonl = overrides.get("reference_jsonl")
+    if reference_jsonl and not Path(reference_jsonl).expanduser().is_absolute():
+        # relative reference_jsonl paths resolve from the prompt file's directory, falling
+        # back to the historical CWD-relative behavior
+        prompt_relative = prompt_directory / Path(reference_jsonl).expanduser()
+        if prompt_relative.exists():
+            overrides["reference_jsonl"] = str(prompt_relative)
+    request = H3GenerationRequest(
         task=args.task,
-        prompt=prompt,
-        first_frame=first_frame,
-        last_frame=last_frame,
-        condition_image=condition_images,
-        reference_jsonl=reference_jsonl,
-        ref=ref_specs,
-        ref_base_directory=ref_base_directory,
-        reference_index=reference_index,
-        width=width,
-        height=height,
-        frame_count=frame_count,
-        output_fps=TARGET_FPS,  # training samples run on the native timeline
-        sample_steps=sample_steps,
-        seed=None if seed is None else int(seed),
+        ref_base_directory=prompt_directory,
+        h3_shift_video=args.h3_shift_video,
+        h3_shift_audio=args.h3_shift_audio,
+        h3_visual_cond_clean=args.h3_visual_cond_clean,
+        h3_audio_cond_clean=args.h3_audio_cond_clean,
     )
-    return sample
+    request = replace(request, **overrides)
+    validate_generation_request(request)
+    return request
 
 
 def _validate_audio_present(value: Any, batch_size: int) -> torch.Tensor:
@@ -815,6 +693,25 @@ class H3SamplingResources:
     audio_vae: torch.nn.Module
 
 
+@dataclass
+class _SamplePreparation:
+    """Per-prompt state of prepare_sampling between its model phases (text encoder, video VAE,
+    audio VAE); the tensors that survive into the sample dict are copied out at the end."""
+
+    request: H3GenerationRequest
+    record: H3Record
+    visual_conditions: tuple[torch.Tensor, ...] = ()
+    visual_geometries: tuple[H3VideoGeometry, ...] = ()
+    reference_visual_geometries: dict[int, H3VideoGeometry] = field(default_factory=dict)
+    reference_video_frame_counts: dict[int, int] = field(default_factory=dict)
+    audio_conditions: tuple[torch.Tensor, ...] = ()
+    reference_audio_frames: dict[int, int] = field(default_factory=dict)
+
+    @property
+    def has_audio_conditions(self) -> bool:
+        return any(reference.audio is not None for reference in self.record.references)
+
+
 class MiniMaxH3NetworkTrainer(NetworkTrainer):
     audio_spec = H3_AUDIO_SPEC
 
@@ -845,8 +742,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         self._control_training = False
         self.default_guidance_scale = 1.0
         self.default_discrete_flow_shift = 1.0
-        if args.task not in {"t2va", "fl2va", "ref2va"}:
-            raise ValueError("MiniMax-H3 requires --task t2va, fl2va, or ref2va")
+        if args.task not in H3_TASKS:
+            raise ValueError(f"MiniMax-H3 requires --task {', '.join(H3_TASKS)}")
         if args.one_frame:
             if (
                 args.h3_teacher_matching
@@ -1028,12 +925,21 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if not args.sample_prompts:
             return None, None
         for label, value in (("video_vae", args.video_vae), ("audio_vae", args.audio_vae), ("text_encoder", args.text_encoder)):
-            _require_sampling_path(value, label)
+            require_path(value, label)
         sample_prompts = args.sample_prompts
         logger.info("Preparing MiniMax-H3 joint AV training samples from %s", sample_prompts)
-        parameters = [_normalize_h3_sample_parameter(args, item) for item in load_prompts(sample_prompts)]
+        parameters = load_prompts(sample_prompts)
         if not parameters:
             raise ValueError("MiniMax-H3 sample prompt file is empty")
+        # every request and record is resolved before the first model loads, so a bad prompt
+        # line fails fast instead of after the text encoder
+        preparations = []
+        for parameter in parameters:
+            request = _sample_request(args, parameter)
+            record = load_generation_record(request)
+            if request.one_frame:
+                reject_one_frame_audio_references(record)
+            preparations.append(_SamplePreparation(request=request, record=record))
         device = accelerator.device
         decoder = PyAVH3MediaDecoder()
 
@@ -1050,17 +956,12 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         )
         text_encoder.eval().requires_grad_(False)
         try:
-            for parameter in parameters:
-                request = SimpleNamespace(**parameter)
-                record = load_generation_record(request, ref_base_directory=parameter["ref_base_directory"])
-                if parameter["frame_count"] == 1:
-                    reject_one_frame_audio_references(record)
-                raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
-                presentation = build_presentation(record, args.task, text_visuals)
+            for parameter, preparation in zip(parameters, preparations):
+                raw_visuals, text_visuals = decode_generation_visuals(preparation.request, preparation.record, decoder)
+                presentation = build_presentation(preparation.record, args.task, text_visuals)
                 hidden_states, token_tags = encode_h3_presentation(processor, text_encoder, presentation)
                 parameter["h3_text_hidden_states"] = hidden_states.to(torch.bfloat16).unsqueeze(0).cpu()
                 parameter["h3_text_token_tags"] = token_tags.unsqueeze(0).cpu()
-                parameter["_h3_record"] = record
                 del raw_visuals, text_visuals, presentation
         finally:
             del processor, text_encoder
@@ -1080,42 +981,24 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         try:
             if video_vae.vae_ratio != VIDEO_VAE_SPATIAL_RATIO:
                 raise ValueError(f"MiniMax-H3 video VAE spatial ratio must be {VIDEO_VAE_SPATIAL_RATIO}, got {video_vae.vae_ratio}")
-            for parameter in parameters:
-                if args.task == "t2va":
-                    parameter["h3_visual_conditions"] = ()
-                    parameter["_h3_visual_geometries"] = ()
-                    parameter["_h3_reference_visual_geometries"] = {}
-                    parameter["_h3_reference_video_frame_counts"] = {}
-                    parameter["_h3_has_audio_conditions"] = False
-                    continue
-                request = SimpleNamespace(**parameter)
-                record = parameter["_h3_record"]
-                # Re-decode here instead of retaining hundreds of MB of pixels across model teardown.
-                raw_visuals, text_visuals = decode_generation_visuals(request, record, decoder)
-                visual_conditions, visual_geometries, reference_visual_geometries = encode_visual_conditions(
-                    request,
-                    record,
-                    raw_visuals,
-                    video_vae,
-                )
-                parameter["h3_visual_conditions"] = visual_conditions
-                parameter["_h3_visual_geometries"] = visual_geometries
-                parameter["_h3_reference_visual_geometries"] = reference_visual_geometries
-                parameter["_h3_reference_video_frame_counts"] = {
-                    index: int(raw_visuals[reference.path].shape[0])
-                    for index, reference in enumerate(record.references)
-                    if reference.type == "video"
-                }
-                parameter["_h3_has_audio_conditions"] = any(reference.audio is not None for reference in record.references)
-                parameter["_h3_record"] = record
-                del raw_visuals, text_visuals
+            if has_visual_conditions:
+                for preparation in preparations:
+                    # Re-decode here instead of retaining hundreds of MB of pixels across model teardown.
+                    raw_visuals, text_visuals = decode_generation_visuals(preparation.request, preparation.record, decoder)
+                    (
+                        preparation.visual_conditions,
+                        preparation.visual_geometries,
+                        preparation.reference_visual_geometries,
+                    ) = encode_visual_conditions(preparation.request, preparation.record, raw_visuals, video_vae)
+                    preparation.reference_video_frame_counts = reference_video_frame_counts(preparation.record, raw_visuals)
+                    del raw_visuals, text_visuals
         finally:
             video_vae.to(device="cpu", dtype=VIDEO_VAE_DECODE_DTYPE)
             gc.collect()
             clean_memory_on_device(device)
 
         logger.info("Loading MiniMax-H3 audio VAE for training samples")
-        has_audio_conditions = any(parameter["_h3_has_audio_conditions"] for parameter in parameters)
+        has_audio_conditions = any(preparation.has_audio_conditions for preparation in preparations)
         audio_vae = load_audio_vae(
             args.audio_vae,
             device=device if has_audio_conditions else torch.device("cpu"),
@@ -1124,83 +1007,39 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         )
         audio_vae.eval().requires_grad_(False)
         try:
-            for parameter in parameters:
-                if not parameter["_h3_has_audio_conditions"]:
-                    parameter["h3_audio_conditions"] = ()
-                    parameter["_h3_reference_audio_frames"] = {}
+            for preparation in preparations:
+                if not preparation.has_audio_conditions:
                     continue
-                request = SimpleNamespace(**parameter)
-                audio_conditions, reference_audio_frames = encode_audio_conditions(
-                    request,
-                    parameter["_h3_record"],
+                preparation.audio_conditions, preparation.reference_audio_frames = encode_audio_conditions(
+                    preparation.request,
+                    preparation.record,
                     decoder,
                     audio_vae,
-                    reference_video_frame_counts=parameter["_h3_reference_video_frame_counts"],
+                    reference_video_frame_counts=preparation.reference_video_frame_counts,
                 )
-                parameter["h3_audio_conditions"] = audio_conditions
-                parameter["_h3_reference_audio_frames"] = reference_audio_frames
         finally:
             audio_vae.to("cpu")
             gc.collect()
             clean_memory_on_device(device)
 
-        for parameter in parameters:
+        for parameter, preparation in zip(parameters, preparations):
             references = (
                 build_reference_geometries(
-                    parameter["_h3_record"],
-                    parameter["_h3_reference_visual_geometries"],
-                    parameter["_h3_reference_audio_frames"],
+                    preparation.record, preparation.reference_visual_geometries, preparation.reference_audio_frames
                 )
                 if args.task == "ref2va"
                 else ()
             )
-            one_frame_sample = parameter["frame_count"] == 1
-            time_overrides = None
-            if one_frame_sample:
-                # one-frame FL2VA conditions are the ordered cond_{i} slots (the layout derives the
-                # roles); their times come from --of control_index, one per condition image
-                control_indices = parameter.get("one_frame_control_indices")
-                time_overrides = H3TimeOverrides(
-                    condition_times=(
-                        tuple(FRAME_RESCALE * index for index in control_indices) if control_indices is not None else ()
-                    ),
-                    target_time=FRAME_RESCALE * parameter["one_frame_target_index"],
-                )
-            parameter["h3_layout"] = build_h3_layout(
-                task=args.task,
+            logger.info("MiniMax-H3 training sample %d: %r", parameter["enum"], preparation.request.prompt)
+            parameter["h3_request"] = preparation.request
+            parameter["h3_layout"] = build_generation_layout(
+                preparation.request,
                 text_length=parameter["h3_text_hidden_states"].shape[1],
-                target_video=H3VideoGeometry(
-                    ONE_FRAME_VIDEO_LATENT_FRAMES if one_frame_sample else video_latent_frames(parameter["frame_count"]),
-                    parameter["height"] // VIDEO_VAE_SPATIAL_RATIO,
-                    parameter["width"] // VIDEO_VAE_SPATIAL_RATIO,
-                ),
-                target_audio_frames=(
-                    ONE_FRAME_AUDIO_LATENT_FRAMES if one_frame_sample else audio_latent_frames(parameter["frame_count"])
-                ),
-                visual_conditions=parameter["_h3_visual_geometries"],
-                references=references,
-                one_frame=one_frame_sample,
-                time_overrides=time_overrides,
+                visual_geometries=preparation.visual_geometries,
+                reference_geometries=references,
             )
-            layout = parameter["h3_layout"]
-            logger.info(
-                "MiniMax-H3 training sample %d: task=%s video=%s audio_frames=%d text_rows=%d packed_rows=%d",
-                parameter["enum"],
-                layout.task,
-                layout.target_video,
-                layout.target_audio_frames,
-                layout.text_length,
-                layout.row_count,
-            )
-            for key in (
-                "_h3_record",
-                "_h3_visual_geometries",
-                "_h3_reference_visual_geometries",
-                "_h3_reference_video_frame_counts",
-                "_h3_reference_audio_frames",
-                "_h3_has_audio_conditions",
-            ):
-                parameter.pop(key)
+            parameter["h3_visual_conditions"] = preparation.visual_conditions
+            parameter["h3_audio_conditions"] = preparation.audio_conditions
         return parameters, H3SamplingResources(video_vae=video_vae, audio_vae=audio_vae)
 
     def sample_image_inference(
@@ -1220,10 +1059,10 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             raise RuntimeError("MiniMax-H3 training sample VAEs were not prepared")
         video_vae = sample_resources.video_vae
         audio_vae = sample_resources.audio_vae
+        request: H3GenerationRequest = sample_parameter["h3_request"]
         layout = sample_parameter["h3_layout"]
-        sample_steps = sample_parameter["sample_steps"]
-        frame_count = sample_parameter["frame_count"]
-        seed = sample_parameter.get("seed")
+        frame_count = request.frame_count
+        seed = request.seed
         if seed is None:
             seed = torch.seed()
             if torch.cuda.is_available():
@@ -1234,11 +1073,11 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 torch.cuda.manual_seed_all(seed)
         logger.info(
             "MiniMax-H3 joint sample: prompt=%r size=%dx%d frames=%d steps=%d seed=%d",
-            sample_parameter.get("prompt", ""),
-            sample_parameter["width"],
-            sample_parameter["height"],
+            request.prompt,
+            request.width,
+            request.height,
             frame_count,
-            sample_steps,
+            request.steps,
             seed,
         )
 
@@ -1248,57 +1087,31 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         if not has_self_ref_orig_mod:
             transformer.eval()
         try:
-            generator = create_sampling_generator(seed)
-            initial_video, initial_audio = initialize_target_latents(
-                video_shape=(
-                    1,
-                    24,
-                    layout.target_video.frames,
-                    layout.target_video.height,
-                    layout.target_video.width,
-                ),
-                audio_shape=(1, 32, 2, layout.target_audio_frames),
-                generator=generator,
-                device=device,
-                video_dtype=torch.float32,
-                audio_dtype=torch.float32,
-            )
-            visual_conditions, audio_conditions = augment_condition_latents(
-                sample_parameter["h3_visual_conditions"],
-                sample_parameter["h3_audio_conditions"],
-                generator=generator,
-                visual_clean=args.h3_visual_cond_clean,
-                audio_clean=args.h3_audio_cond_clean,
-                device=device,
-            )
-            text_hidden_states = sample_parameter["h3_text_hidden_states"].to(device=device, dtype=torch.bfloat16)
-            text_token_tags = sample_parameter["h3_text_token_tags"].to(device)
             with tqdm(
-                total=sample_steps,
+                total=request.steps,
                 desc=f"MiniMax-H3 sample {sample_parameter.get('enum', 0)}",
                 unit="step",
                 disable=not accelerator.is_local_main_process,
             ) as progress:
-                sample = sample_joint_av(
+                sample = sample_joint_av_latents(
                     transformer,
                     layout=layout,
-                    text_hidden_states=text_hidden_states,
-                    text_token_tags=text_token_tags,
-                    initial_video=initial_video,
-                    initial_audio=initial_audio,
-                    steps=sample_steps,
-                    video_shift=args.h3_shift_video,
-                    audio_shift=args.h3_shift_audio,
-                    visual_condition_latents=visual_conditions,
-                    audio_condition_latents=audio_conditions,
-                    visual_condition_clean=args.h3_visual_cond_clean,
-                    audio_condition_clean=args.h3_audio_cond_clean,
+                    seed=seed,
+                    text_hidden_states=sample_parameter["h3_text_hidden_states"],
+                    text_token_tags=sample_parameter["h3_text_token_tags"],
+                    visual_conditions=sample_parameter["h3_visual_conditions"],
+                    audio_conditions=sample_parameter["h3_audio_conditions"],
+                    steps=request.steps,
+                    video_shift=request.h3_shift_video,
+                    audio_shift=request.h3_shift_audio,
+                    visual_condition_clean=request.h3_visual_cond_clean,
+                    audio_condition_clean=request.h3_audio_cond_clean,
+                    device=device,
                     step_callback=lambda completed, total: progress.update(1),
                 )
-            video_latents = sample.video.cpu()
-            audio_latents = sample.audio.cpu()
-            del sample, initial_video, initial_audio, visual_conditions, audio_conditions
-            del text_hidden_states, text_token_tags
+            video_latents = sample.video
+            audio_latents = sample.audio
+            del sample
             synchronize_device(device)
             clean_memory_on_device(device)
 
@@ -1312,8 +1125,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
 
             timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
             number = f"e{epoch:06d}" if epoch is not None else f"{steps:06d}"
-            original_seed = sample_parameter.get("seed")
-            seed_suffix = "" if original_seed is None else f"_{original_seed}"
+            seed_suffix = "" if request.seed is None else f"_{request.seed}"
             prompt_index = sample_parameter.get("enum", 0)
             prefix = "" if args.output_name is None else f"{args.output_name}_"
             output_stem = f"{prefix}{number}_{prompt_index:02d}_{timestamp}{seed_suffix}"
@@ -1333,7 +1145,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 del audio_latents
                 clean_memory_on_device(device)
 
-                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count)
+                # a stretched sample (--ofps) plays its frame_count frames over the stretched real
+                # duration, like the generation CLI: the container rate and the audio trim follow it
+                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count, fps=request.output_fps)
                 output_path = Path(save_dir) / f"{output_stem}.mp4"
                 write_joint_av(decoded, output_path)
                 logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
@@ -1351,7 +1165,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     if frame_count == 1:
                         wandb_tracker.log({f"sample_{prompt_index}": wandb.Image(str(output_path))}, step=steps)
                     else:
-                        wandb_tracker.log({f"sample_{prompt_index}": wandb.Video(str(output_path), fps=24)}, step=steps)
+                        wandb_tracker.log(
+                            {f"sample_{prompt_index}": wandb.Video(str(output_path), fps=request.output_fps)}, step=steps
+                        )
             return output_path
         finally:
             video_vae.to("cpu")
@@ -1921,7 +1737,7 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         discrete_flow_shift=1.0,
         network_module="networks.lora_minimax_h3",
     )
-    parser.add_argument("--task", choices=("t2va", "fl2va", "ref2va"), default=None, help="MiniMax-H3 training task")
+    parser.add_argument("--task", choices=H3_TASKS, default=None, help="MiniMax-H3 training task")
     parser.add_argument(
         "--one_frame",
         action="store_true",
@@ -1931,57 +1747,9 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         " Video batches are unaffected, so image and video datasets can mix in one run",
     )
     add_audio_train_args(parser)
-    parser.add_argument("--h3_shift_video", type=float, default=12.0, help="MiniMax-H3 target-video flow shift")
-    parser.add_argument("--h3_shift_audio", type=float, default=3.0, help="MiniMax-H3 target-audio flow shift")
-    parser.add_argument(
-        "--h3_visual_cond_clean",
-        type=float,
-        default=0.999,
-        help="clean coefficient used to augment MiniMax-H3 visual conditions",
-    )
-    parser.add_argument(
-        "--h3_audio_cond_clean",
-        type=float,
-        default=1.0,
-        help="clean coefficient used to augment MiniMax-H3 audio conditions",
-    )
-    parser.add_argument(
-        "--video_vae",
-        type=str,
-        default=None,
-        help="MiniMax-H3 video VAE checkpoint used for training-time joint AV samples",
-    )
-    parser.add_argument(
-        "--audio_vae",
-        type=str,
-        default=None,
-        help="MiniMax-H3 audio VAE checkpoint used for training-time joint AV samples",
-    )
-    parser.add_argument(
-        "--text_encoder",
-        type=str,
-        default=None,
-        help="MiniMax-H3 Qwen3-VL checkpoint used to encode training sample prompts",
-    )
-    parser.add_argument(
-        "--nvfp4_scaled_mm",
-        action="store_true",
-        help="use W4A4 scaled_mm for an NVFP4 text encoder (requires PyTorch 2.10+ and Blackwell; default is weight-only dequantization)",
-    )
-    parser.add_argument(
-        "--text_encoder_blocks_to_swap",
-        type=int,
-        default=0,
-        help="number of the 50 Qwen3-VL decoder layers to stream from CPU while encoding training sample prompts"
-        " (0 = disabled, 50 = minimum VRAM; requires CUDA; unrelated to the transformer's --blocks_to_swap)",
-    )
-    parser.add_argument(
-        "--text_encoder_attn_mode",
-        choices=("sdpa", "flash_attention_2", "eager"),
-        default=None,
-        help="attention implementation for the sample-prompt text encoder (default: transformers default, sdpa)."
-        " Use flash_attention_2 for long presentations: sdpa falls back to the O(L^2) math kernel and can OOM",
-    )
+    add_h3_sampling_args(parser)
+    add_h3_vae_args(parser, note="training-time joint AV samples")
+    add_h3_text_encoder_args(parser, note="training-time sample prompts")
     parser.add_argument(
         "--h3_allow_experimental_sample_duration",
         action="store_true",

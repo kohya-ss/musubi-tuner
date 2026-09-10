@@ -19,12 +19,16 @@ from musubi_tuner.dataset.media_utils import load_video
 
 
 H3Task = Literal["t2va", "fl2va", "ref2va"]
+H3_TASKS: tuple[H3Task, ...] = ("t2va", "fl2va", "ref2va")
 H3ReferenceType = Literal["image", "video", "audio"]
 H3MediaProbe = Callable[[Path], "H3MediaInfo"]
 
 TARGET_FPS = 24
 AUDIO_SAMPLE_RATE = 32000
 AUDIO_TERMINAL_TOLERANCE_SAMPLES = 800
+# the released target duration range in seconds (generation and training targets; reference
+# videos have their own 2-15 s window)
+RELEASED_DURATION_SECONDS = (5.0, 15.0)
 # with a one-frame (image) target, reference videos keep their full released span instead of
 # being capped by the target duration (shared by generation and the one-frame caches)
 ONE_FRAME_REFERENCE_FRAME_CAP = 15 * TARGET_FPS
