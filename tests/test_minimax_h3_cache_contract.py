@@ -24,10 +24,10 @@ from musubi_tuner.minimax_h3.media import (
     video_latent_frames,
     waveform_samples,
 )
+from musubi_tuner.minimax_h3.cache_plan import cache_metadata_matches
 from musubi_tuner.minimax_h3_cache_latents import (
     build_latent_tensors,
     build_one_frame_latent_tensors,
-    cache_metadata_matches,
     encode_one_frame_silence_latent,
     log_audio_presence_summary,
     record_media_paths,
@@ -1517,7 +1517,7 @@ def test_h3_jsonl_control_paths_become_references_unless_the_record_has_its_own(
 def test_h3_image_dataset_task_matrix(has_control, indices, task, record_task, message):
     from types import SimpleNamespace
 
-    from musubi_tuner.minimax_h3_cache_latents import validate_h3_image_dataset_task
+    from musubi_tuner.minimax_h3.cache_plan import validate_h3_image_dataset_task
 
     dataset = SimpleNamespace(has_control=has_control, fp_1f_clean_indices=indices)
     if message is None:
