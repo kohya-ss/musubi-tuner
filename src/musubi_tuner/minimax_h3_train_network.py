@@ -38,7 +38,6 @@ from musubi_tuner.minimax_h3.generation_inputs import (
 from musubi_tuner.minimax_h3.media import (
     H3_AUDIO_SPEC,
     H3_TASKS,
-    TARGET_FPS,
     H3Record,
     PyAVH3MediaDecoder,
     module_device_dtype,
@@ -1146,7 +1145,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 del audio_latents
                 clean_memory_on_device(device)
 
-                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count)
+                # a stretched sample (--ofps) plays its frame_count frames over the stretched real
+                # duration, like the generation CLI: the container rate and the audio trim follow it
+                decoded = synchronize_decoded_av(decoded_video, decoded_audio, frame_count=frame_count, fps=request.output_fps)
                 output_path = Path(save_dir) / f"{output_stem}.mp4"
                 write_joint_av(decoded, output_path)
                 logger.info("Saved MiniMax-H3 joint training sample: %s", output_path)
@@ -1164,7 +1165,9 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                     if frame_count == 1:
                         wandb_tracker.log({f"sample_{prompt_index}": wandb.Image(str(output_path))}, step=steps)
                     else:
-                        wandb_tracker.log({f"sample_{prompt_index}": wandb.Video(str(output_path), fps=TARGET_FPS)}, step=steps)
+                        wandb_tracker.log(
+                            {f"sample_{prompt_index}": wandb.Video(str(output_path), fps=request.output_fps)}, step=steps
+                        )
             return output_path
         finally:
             video_vae.to("cpu")

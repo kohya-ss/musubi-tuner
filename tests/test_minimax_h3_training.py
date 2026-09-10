@@ -380,10 +380,15 @@ def test_h3_parser_exposes_the_dual_vae_and_text_assets_needed_for_training_samp
     assert args.h3_allow_experimental_sample_duration is False
 
 
-def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_both_modalities(tmp_path, monkeypatch):
+@pytest.mark.parametrize("output_fps", [24, 12])
+def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_both_modalities(tmp_path, monkeypatch, output_fps):
     import musubi_tuner.minimax_h3_train_network as train
+    from musubi_tuner.minimax_h3.media import audio_latent_frames
 
     events = []
+    # 5 frames at the sample's rate: 24 fps = 6667 audio samples, 12 fps (--ofps 12) = 13333
+    audio_samples = round(5 * 32000 / output_fps)
+    audio_frames = audio_latent_frames(5, output_fps=output_fps)
 
     class Transformer:
         training = True
@@ -430,8 +435,9 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
 
         def decode(self, latents):
             events.append("decode_audio")
-            assert latents.shape == (1, 32, 2, 8)
-            return torch.zeros(1, 2, 6667)
+            assert latents.shape == (1, 32, 2, audio_frames)
+            # one extra sample past the planned duration, trimmed by the sync
+            return torch.zeros(1, 2, audio_samples + 1)
 
     captured = {}
     monkeypatch.setattr(
@@ -445,12 +451,13 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
         task="t2va",
         text_length=3,
         target_video=H3VideoGeometry(2, 4, 4),
-        target_audio_frames=8,
+        target_audio_frames=audio_frames,
+        output_fps=output_fps,
     )
     sample_parameter = {
         "enum": 0,
         "h3_request": H3GenerationRequest(
-            task="t2va", prompt="joint sample", steps=2, width=64, height=64, frame_count=5, seed=123
+            task="t2va", prompt="joint sample", steps=2, width=64, height=64, frame_count=5, seed=123, output_fps=output_fps
         ),
         "h3_layout": layout,
         "h3_text_hidden_states": torch.zeros(1, 3, 12),
@@ -479,7 +486,9 @@ def test_h3_training_sample_uses_the_live_transformer_then_decodes_and_muxes_bot
     assert output == captured["output_path"]
     assert captured["output_path"].suffix == ".mp4"
     assert captured["decoded"].video.shape == (5, 8, 8, 3)
-    assert captured["decoded"].audio.shape == (2, 6667)
+    # the container plays the 5 frames at the sample's rate and the audio covers that duration
+    assert captured["decoded"].fps == output_fps
+    assert captured["decoded"].audio.shape == (2, audio_samples)
     assert events.index("sample_live_transformer") < events.index("decode_video") < events.index("decode_audio")
     assert transformer.training is True
 
