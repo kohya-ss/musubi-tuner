@@ -42,6 +42,10 @@ class AttentionParams:
     cu_seqlens: Optional[torch.Tensor] = None
     max_seqlen: Optional[int] = None
 
+    def __post_init__(self):
+        if self.attn_mode == "sdpa":
+            self.attn_mode = "torch"
+
     @staticmethod
     def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":
         return AttentionParams(attn_mode, split_attn)
