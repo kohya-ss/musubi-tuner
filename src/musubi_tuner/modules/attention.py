@@ -16,6 +16,11 @@ except ImportError:
     flash_attn_func = None
 
 try:
+    import flash_attn_interface  # FlashAttention 3 (Hopper)
+except ImportError:
+    flash_attn_interface = None
+
+try:
     from sageattention import sageattn_varlen, sageattn
 except ImportError:
     sageattn_varlen = None
@@ -77,6 +82,11 @@ class AttentionParams:
                 attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
 
             return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
+
+
+def _flash3_output(result):
+    # older FlashAttention 3 releases return (out, softmax_lse); newer ones return out only
+    return result[0] if isinstance(result, tuple) else result
 
 
 def attention(
@@ -284,8 +294,48 @@ def attention(
             # Reshape x with shape [(bxs), a, d] to [b, s, a, d]
             x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
 
+    elif attn_params.attn_mode == "flash3":
+        # FlashAttention 3 groups GQA heads in the kernel like flash; it has no dropout support
+        if flash_attn_interface is None:
+            raise RuntimeError("FlashAttention 3 was selected but flash_attn_interface is not installed")
+        if attn_params.split_attn:
+            x = []
+            for i in range(len(q)):
+                x_i = _flash3_output(flash_attn_interface.flash_attn_func(q[i], k[i], v[i]))  # B, L, H, D
+                q[i] = None
+                k[i] = None
+                v[i] = None
+                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, L, H, D
+            x = torch.cat(x, dim=0)
+            q, k, v = None, None, None
+        elif attn_params.cu_seqlens is None:  # all tokens are valid
+            x = _flash3_output(flash_attn_interface.flash_attn_func(q, k, v))  # B, L, H, D
+            q, k, v = None, None, None
+        else:
+            # Reshape to [(bxs), a, d]
+            batch_size, seqlen = q.shape[0], q.shape[1]
+            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
+            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
+            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
+
+            # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
+            x = _flash3_output(
+                flash_attn_interface.flash_attn_varlen_func(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q=attn_params.cu_seqlens,
+                    cu_seqlens_k=attn_params.cu_seqlens,
+                    max_seqlen_q=attn_params.max_seqlen,
+                    max_seqlen_k=attn_params.max_seqlen,
+                )
+            )
+            q, k, v = None, None, None
+
+            # Reshape x with shape [(bxs), a, d] to [b, s, a, d]
+            x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
+
     else:
-        # Currently only PyTorch SDPA and xformers are implemented
         raise ValueError(f"Unsupported attention mode: {attn_params.attn_mode}")
 
     x = transpose_fn(x)  # [B, L, H, D]

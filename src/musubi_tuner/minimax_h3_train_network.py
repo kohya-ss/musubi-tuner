@@ -855,7 +855,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             args.text_encoder,
             device=device,
             dtype=torch.bfloat16,
-            disable_mmap=args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
             nvfp4_scaled_mm=args.nvfp4_scaled_mm,
             blocks_to_swap=args.text_encoder_blocks_to_swap,
             attn_mode=args.text_encoder_attn_mode,
@@ -881,7 +881,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             args.video_vae,
             device=video_vae_device,
             dtype=VIDEO_VAE_ENCODE_DTYPE if has_visual_conditions else VIDEO_VAE_DECODE_DTYPE,
-            disable_mmap=args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         video_vae.eval().requires_grad_(False)
         try:
@@ -909,7 +909,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             args.audio_vae,
             device=device if has_audio_conditions else torch.device("cpu"),
             dtype=torch.float32,
-            disable_mmap=args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
         )
         audio_vae.eval().requires_grad_(False)
         try:
@@ -1129,7 +1129,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             dtype=torch.bfloat16,
             attn_mode=attn_mode,
             split_attn=split_attn,
-            disable_mmap=args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
             # quantization runs on the accelerator device even when the weights load to CPU

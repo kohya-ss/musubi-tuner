@@ -72,7 +72,7 @@ class Ideogram4LoraDiscoveryTests(unittest.TestCase):
 
         from safetensors.torch import save_file
 
-        from musubi_tuner import ideogram4_generate_image
+        from musubi_tuner.utils.lora_utils import attach_lora_weights
 
         class Attention(nn.Module):
             def __init__(self):
@@ -115,13 +115,8 @@ class Ideogram4LoraDiscoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lora_path = os.path.join(tmp, "lora.safetensors")
             save_file(weights_sd, lora_path)
-            args = SimpleNamespace(
-                lora_weight=[lora_path],
-                lora_multiplier=[1.0],
-                include_patterns=None,
-                exclude_patterns=None,
-            )
-            ideogram4_generate_image._apply_lora_weights(root_test, args, torch.device("cpu"))
+            networks = attach_lora_weights(lora_ideogram4, root_test, [lora_path], [1.0], None, None, torch.device("cpu"))
+        self.assertEqual(len(networks), 1)
 
         y_lora = root_test.layers[0].attention.qkv(x)
         self.assertFalse(torch.allclose(y_base, y_lora))

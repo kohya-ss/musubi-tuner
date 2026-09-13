@@ -265,7 +265,7 @@ def setup_parser() -> argparse.ArgumentParser:
         " teacher_caption), for image or video targets",
     )
     parser.add_argument("--text_cache_dtype", choices=("bf16", "float32"), default="bf16")
-    parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
+    parser.add_argument("--disable_numpy_memmap", action="store_true", help="disable numpy memmap while loading safetensors")
     parser.add_argument(
         "--uncond_output",
         type=str,
@@ -331,7 +331,7 @@ def main() -> None:
         args.text_encoder,
         device=device,
         dtype=torch.bfloat16,
-        disable_mmap=args.disable_mmap,
+        disable_numpy_memmap=args.disable_numpy_memmap,
         nvfp4_scaled_mm=args.nvfp4_scaled_mm,
         blocks_to_swap=args.text_encoder_blocks_to_swap,
         attn_mode=args.text_encoder_attn_mode,

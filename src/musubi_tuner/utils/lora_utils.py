@@ -1,10 +1,12 @@
 import os
 import re
+from types import ModuleType
 from typing import Dict, List, Optional, Union
 import torch
 
 import logging
 
+from safetensors.torch import load_file
 from tqdm import tqdm
 
 from musubi_tuner.utils.device_utils import synchronize_device
@@ -60,6 +62,49 @@ def filter_lora_state_dict(
             logger.warning("No keys left after filtering.")
 
     return weights_sd
+
+
+def attach_lora_weights(
+    lora_module: ModuleType,
+    model: torch.nn.Module,
+    lora_weights: Optional[List[str]],
+    lora_multipliers: Optional[List[float]],
+    include_patterns: Optional[List[str]],
+    exclude_patterns: Optional[List[str]],
+    device: torch.device,
+) -> List[torch.nn.Module]:
+    """Attach LoRAs to a model as runtime additive branches instead of merging them (inference).
+
+    The base weights are never modified: each LoRA keeps its own multiplier and precision for
+    the lifetime of the returned networks. This is the route for bases that cannot be merged
+    into (pre-quantized INT8/FP8 tensors) and for small-magnitude adapters whose per-element
+    deltas a merge would round away on the base storage grid. Multiple LoRAs stack, each
+    wrapping the previous forward. The caller keeps the returned networks alive while sampling.
+
+    Args:
+        lora_module: architecture LoRA module, e.g. lora_wan (provides create_arch_network_from_weights)
+        model: DiT model
+        lora_weights: paths to LoRA weights
+        lora_multipliers: multipliers for LoRA weights, aligned with lora_weights
+        include_patterns: regex patterns to include LoRA modules, aligned with lora_weights
+        exclude_patterns: regex patterns to exclude LoRA modules, aligned with lora_weights
+        device: device the attached networks run on
+    """
+    networks = []
+    for i, lora_weight in enumerate(lora_weights or []):
+        multiplier = lora_multipliers[i] if lora_multipliers is not None and len(lora_multipliers) > i else 1.0
+        include = include_patterns[i] if include_patterns is not None and len(include_patterns) > i else None
+        exclude = exclude_patterns[i] if exclude_patterns is not None and len(exclude_patterns) > i else None
+        logger.info(f"Attaching LoRA weights from {lora_weight} with multiplier {multiplier}")
+        weights_sd = filter_lora_state_dict(load_file(lora_weight), include, exclude)
+        network = lora_module.create_arch_network_from_weights(multiplier, weights_sd, unet=model, for_inference=True)
+        if not network.unet_loras:
+            raise ValueError(f"LoRA {lora_weight} contains no modules that match the model")
+        network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+        network.load_state_dict(weights_sd, strict=True)
+        network.eval().requires_grad_(False).to(device)
+        networks.append(network)
+    return networks
 
 
 def load_safetensors_with_lora_and_fp8(

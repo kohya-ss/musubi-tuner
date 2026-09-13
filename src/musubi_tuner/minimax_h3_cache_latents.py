@@ -527,7 +527,7 @@ def setup_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow target crops outside the released 5-15 second duration range",
     )
-    parser.add_argument("--disable_mmap", action="store_true", help="disable memory-mapped safetensors loading")
+    parser.add_argument("--disable_numpy_memmap", action="store_true", help="disable numpy memmap while loading safetensors")
     return parser
 
 
@@ -583,10 +583,10 @@ def main() -> None:
         args.video_vae,
         device=device,
         dtype=VIDEO_VAE_ENCODE_DTYPE,
-        disable_mmap=args.disable_mmap,
+        disable_numpy_memmap=args.disable_numpy_memmap,
     )
     logger.info("Loading MiniMax-H3 audio VAE from %s", args.audio_vae)
-    audio_vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_mmap=args.disable_mmap)
+    audio_vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_numpy_memmap=args.disable_numpy_memmap)
 
     silence_audio_latent: torch.Tensor | None = None
     if any(plan.is_image for plan in plans):

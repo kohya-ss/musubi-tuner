@@ -97,7 +97,7 @@ def _load_tiny_convrot(files, config: MiniMaxH3Config) -> MiniMaxH3Model:
         bwd_mode="bf16",
         attn_mode="torch",
         split_attn=False,
-        disable_mmap=False,
+        disable_numpy_memmap=False,
     )
 
 

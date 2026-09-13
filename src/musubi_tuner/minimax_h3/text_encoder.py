@@ -284,7 +284,7 @@ def load_h3_text_encoder(
     *,
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
-    disable_mmap: bool = False,
+    disable_numpy_memmap: bool = False,
     nvfp4_scaled_mm: bool = False,
     blocks_to_swap: int = 0,
     attn_mode: str | None = None,
@@ -341,13 +341,13 @@ def load_h3_text_encoder(
             fp8_optimization=False,
             calc_device=device,
             move_to_device=not streaming,
-            disable_numpy_memmap=disable_mmap,
+            disable_numpy_memmap=disable_numpy_memmap,
             quantizer=quantizer,
         )
         return {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
 
     files = resolve_safetensors_files(checkpoint_path)
-    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_mmap)
+    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_numpy_memmap)
     if formats == {FORMAT_CONVROT_INT8}:
         # pre-quantized ConvRot INT8 artifact; an empty target list disables dynamic quantization
         quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
@@ -377,7 +377,7 @@ def load_h3_text_encoder(
     else:
         sd = {}
         for file in files:
-            shard = load_safetensors(str(file), device=load_device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+            shard = load_safetensors(str(file), device=load_device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap)
             sd.update({normalize_h3_text_encoder_key(key): value for key, value in shard.items()})
 
     # quantization scale tensors keep their own dtypes (fp32 row scales, fp8 block scales)

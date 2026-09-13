@@ -5,7 +5,7 @@ from importlib.util import find_spec
 import random
 import os
 import time
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -50,7 +50,7 @@ def get_time_flag():
     return datetime.fromtimestamp(time.time()).strftime("%Y%m%d-%H%M%S-%f")[:-3]
 
 
-def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, fps=24):
+def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, fps=24, crf: Optional[int] = None):
     """save videos by video tensor
        copy from https://github.com/guoyww/AnimateDiff/blob/e92bd5671ba62c0d774a32951453e328018b7c5b/animatediff/utils/util.py#L61
 
@@ -60,6 +60,8 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
         rescale (bool, optional): rescale the video tensor from [-1, 1] to  . Defaults to False.
         n_rows (int, optional): Defaults to 1.
         fps (int, optional): video save fps. Defaults to 8.
+        crf (int, optional): libx264 constant rate factor. None keeps the fixed 4 Mbit/s bit rate; a CRF
+            keeps the quality independent of resolution and content (16 is evaluation grade, 23 the x264 default).
     """
     videos = rearrange(videos, "b c t h w -> t b c h w")
     outputs = []
@@ -93,11 +95,12 @@ def save_videos_grid(videos: torch.Tensor, path: str, rescale=False, n_rows=1, f
     # create video stream
     codec = "libx264"
     pixel_format = "yuv420p"
-    stream = container.add_stream(codec, rate=fps)
+    stream = container.add_stream(codec, rate=fps, options=None if crf is None else {"crf": str(crf)})
     stream.width = width
     stream.height = height
     stream.pix_fmt = pixel_format
-    stream.bit_rate = 4000000  # 4Mbit/s
+    if crf is None:
+        stream.bit_rate = 4000000  # 4Mbit/s
 
     for frame_array in outputs:
         frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
