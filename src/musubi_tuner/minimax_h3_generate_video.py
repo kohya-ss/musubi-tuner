@@ -9,7 +9,6 @@ import random
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 
 from safetensors import safe_open
@@ -17,6 +16,7 @@ from safetensors.torch import load_file, save_file
 import torch
 from tqdm.auto import tqdm
 
+from musubi_tuner.hv_generate_video import get_time_flag
 from musubi_tuner.minimax_h3.args import add_h3_sampling_args, add_h3_text_encoder_args, add_h3_vae_args
 from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
@@ -87,12 +87,16 @@ LATENT_FILE_FORMAT = "minimax-h3-latents-v1"
 TEXT_CONDITIONING_CACHE_ENTRIES = 16
 
 
-def _time_flag() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+class _VideoSizeAction(argparse.Action):
+    """--video_size HEIGHT WIDTH lands on the ``height`` / ``width`` namespace attributes, the
+    H3GenerationRequest field names that the rest of the script and the prompt-line overrides use."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        namespace.height, namespace.width = values
 
 
 def _output_is_directory(raw_output: str) -> bool:
-    """Directory interpretation of a single-generation --output: an existing directory, a
+    """Directory interpretation of a single-generation --save_path: an existing directory, a
     trailing path separator, or an extension-free path selects auto-naming inside that
     directory; a recognized extension names an explicit file, and any other extension
     stays an error (typo guard). Directory names containing a dot need the trailing
@@ -108,9 +112,9 @@ def _explicit_output_name(args: argparse.Namespace, *, directory_output: bool) -
         return None
     if directory_output:
         return Path(args.output_name) if args.output_name else None
-    if _output_is_directory(args.output):
+    if _output_is_directory(args.save_path):
         return None
-    return Path(args.output)
+    return Path(args.save_path)
 
 
 def validate_session_args(args: argparse.Namespace) -> None:
@@ -167,11 +171,11 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
     validate_generation_request(request)
     one_frame = request.one_frame
     if args.output_type in ("images", "latent_images"):
-        # --output is a directory holding an auto-named per-generation subdirectory; a
-        # media extension signals a video command line reused without adjusting --output
-        if Path(args.output).suffix.lower() in (*VIDEO_OUTPUT_SUFFIXES, ".png", ".safetensors"):
+        # --save_path is a directory holding an auto-named per-generation subdirectory; a
+        # media extension signals a video command line reused without adjusting --save_path
+        if Path(args.save_path).suffix.lower() in (*VIDEO_OUTPUT_SUFFIXES, ".png", ".safetensors"):
             raise ValueError(
-                f"MiniMax-H3 --output_type {args.output_type} writes into a directory; --output must not name a media file"
+                f"MiniMax-H3 --output_type {args.output_type} writes into a directory; --save_path must not name a media file"
             )
     checked_output = _explicit_output_name(args, directory_output=directory_output)
     if checked_output is not None:
@@ -752,7 +756,7 @@ def _resolve_seed(args: argparse.Namespace) -> int:
 
 
 def _auto_output_name(args: argparse.Namespace, seed: int) -> str:
-    base = f"{_time_flag()}_{seed}"
+    base = f"{get_time_flag()}_{seed}"
     if args.output_type == "latent":
         return f"{base}_latent.safetensors"
     if args.output_type in ("images", "latent_images"):
@@ -775,16 +779,16 @@ def _dedupe_output_path(path: Path) -> Path:
 def _resolve_output_path(args: argparse.Namespace, seed: int, *, directory_mode: bool) -> Path:
     """Resolve the primary output target: the media file for video/both, the latent file
     for latent, or the image-sequence directory for images/latent_images. A single
-    generation writes to --output itself when it names a file and auto-names inside it
+    generation writes to --save_path itself when it names a file and auto-names inside it
     when it selects a directory (see _output_is_directory); the multi-prompt modes and
-    the image-sequence types always auto-name inside the --output directory."""
+    the image-sequence types always auto-name inside the --save_path directory."""
     images = args.output_type in ("images", "latent_images")
-    if directory_mode or images or _output_is_directory(args.output):
-        output_dir = Path(args.output).expanduser()
+    if directory_mode or images or _output_is_directory(args.save_path):
+        output_dir = Path(args.save_path).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
         output_name = args.output_name if directory_mode else None
         return _dedupe_output_path(output_dir / (output_name or _auto_output_name(args, seed)))
-    return _dedupe_output_path(Path(args.output).expanduser())
+    return _dedupe_output_path(Path(args.save_path).expanduser())
 
 
 def _resolve_latent_path(args: argparse.Namespace, output_path: Path) -> Path | None:
@@ -994,7 +998,7 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
     if not items:
         logger.warning("MiniMax-H3 --from_file %s contains no prompts", args.from_file)
         return
-    output_dir = Path(args.output).expanduser()
+    output_dir = Path(args.save_path).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     shared = H3SharedModels(device=device)
     decoder = PyAVH3MediaDecoder()
@@ -1061,7 +1065,7 @@ def process_from_file(args: argparse.Namespace, device: torch.device) -> None:
                 # the 2-frame audio target is a byproduct of the joint layout, not an output
                 item.audio_latents = None
             item.latent_file = _save_latent_file(
-                output_dir / f"{_time_flag()}_{item.index:03d}_{item.seed}_latent.safetensors",
+                output_dir / f"{get_time_flag()}_{item.index:03d}_{item.seed}_latent.safetensors",
                 item.video_latents,
                 item.audio_latents,
                 item.request,
@@ -1109,7 +1113,7 @@ def process_interactive(args: argparse.Namespace, device: torch.device) -> None:
     --text_encoder_blocks_to_swap 50 and a generous --blocks_to_swap."""
     shared = H3SharedModels(device=device)
     decoder = PyAVH3MediaDecoder()
-    Path(args.output).expanduser().mkdir(parents=True, exist_ok=True)
+    Path(args.save_path).expanduser().mkdir(parents=True, exist_ok=True)
 
     print("Interactive mode. Enter prompts (Ctrl+D or Ctrl+Z (Windows) to exit):")
     try:
@@ -1174,7 +1178,7 @@ def _parse_output_fps_metadata(source: Path, metadata: dict, requested_fps: int)
 
 def process_latent_decode(args: argparse.Namespace, device: torch.device) -> None:
     """Decode-only mode for --from_file intermediate latents; only the VAEs are loaded."""
-    output_dir = Path(args.output).expanduser()
+    output_dir = Path(args.save_path).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     loaded = []
     for path in args.latent_path:
@@ -1191,10 +1195,10 @@ def process_latent_decode(args: argparse.Namespace, device: torch.device) -> Non
             item_args.output_fps = _parse_output_fps_metadata(source, metadata, args.output_fps)
             seed = metadata.get("seeds", "0")
             if args.output_type == "images":
-                output_path = output_dir / f"{_time_flag()}_{seed}_{source.stem}"
+                output_path = output_dir / f"{get_time_flag()}_{seed}_{source.stem}"
             else:
                 suffix = ".png" if frame_count == 1 else ".mp4"
-                output_path = output_dir / f"{_time_flag()}_{seed}_{source.stem}{suffix}"
+                output_path = output_dir / f"{get_time_flag()}_{seed}_{source.stem}{suffix}"
             _decode_and_save(item_args, video_latents, audio_latents, output_path, device, shared)
         except Exception as error:
             logger.error("MiniMax-H3 latent decode failed for %s: %s", source, error, exc_info=True)
@@ -1244,7 +1248,7 @@ def setup_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         metavar="PATH",
-        help="one-frame FL2VA condition image, repeatable (requires --frame_count 1): the ordered condition list,"
+        help="one-frame FL2VA condition image, repeatable (requires --video_length 1): the ordered condition list,"
         " numbered <Picture i> in this order and placed by --one_frame control_index in the same order. Any count"
         " (the released FL2VA API takes one or two pictures; three or more is experimental). --first_frame /"
         " --last_frame are aliases for the first two slots and cannot be combined with this option",
@@ -1261,12 +1265,26 @@ def setup_parser() -> argparse.ArgumentParser:
         " extension unless ;type= overrides it; ;audio= attaches an external audio track to a video reference."
         " Validation matches the JSONL references schema exactly. Mutually exclusive with --reference_jsonl.",
     )
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
-    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    # The house generation vocabulary (--video_size / --video_length / --infer_steps, as in
+    # wan_generate_video.py) lands on the H3GenerationRequest field names (height+width /
+    # frame_count / steps): request_from_args copies the namespace one to one and the prompt-line
+    # overrides (apply_overrides) already speak the request vocabulary, so only the flags differ.
+    parser.set_defaults(height=DEFAULT_HEIGHT, width=DEFAULT_WIDTH)
     parser.add_argument(
-        "--frame_count",
+        "--video_size",
+        action=_VideoSizeAction,
+        type=int,
+        nargs=2,
+        default=argparse.SUPPRESS,
+        metavar=("HEIGHT", "WIDTH"),
+        help=f"video size, height and width (default {DEFAULT_HEIGHT} {DEFAULT_WIDTH})",
+    )
+    parser.add_argument(
+        "--video_length",
+        dest="frame_count",
         type=int,
         default=DEFAULT_FRAME_COUNT,
+        metavar="N",
         help="pixel frame count, 17*n+5 for video; 1 enables the experimental one-frame (image) mode, which writes"
         " a PNG and skips audio decoding",
     )
@@ -1274,7 +1292,7 @@ def setup_parser() -> argparse.ArgumentParser:
         "--one_frame_inference",
         default=None,
         metavar="target_index=N,control_index=A;B",
-        help="one-frame mode time options (requires --frame_count 1; --of in prompt lines): 0-based 24 fps"
+        help="one-frame mode time options (requires --video_length 1; --of in prompt lines): 0-based 24 fps"
         " pixel-frame indices on the nominal timeline, converted to RoPE times relative to the target-block cursor."
         " target_index (default 0) places the generated frame; control_index places the FL2VA condition images in"
         " --condition_image order (or --first_frame, --last_frame) and is required when conditions are present."
@@ -1285,7 +1303,7 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=TARGET_FPS,
         help="experimental temporal stretch: sample the generated timeline at this rate (1-24) instead of"
-        " 24 fps. The --frame_count frames then cover frame_count/fps seconds -- target RoPE spans scale"
+        " 24 fps. The --video_length frames then cover video_length/fps seconds -- target RoPE spans scale"
         " by 24/fps, the audio track covers the stretched duration, and the output container is written"
         " at this rate. The model was trained at 24 fps only, so lower rates trade temporal resolution"
         " (and possibly quality) for compute; pair with --stretch_keep_bands, see docs. 24 disables the"
@@ -1305,16 +1323,23 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow_experimental_duration", action="store_true", help="allow durations outside the released 5-15 s range"
     )
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument(
+        "--infer_steps",
+        dest="steps",
+        type=int,
+        default=DEFAULT_STEPS,
+        help=f"number of inference steps, default is {DEFAULT_STEPS}",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random when omitted")
     parser.add_argument(
-        "--output",
+        "--save_path",
         required=True,
-        help="output target. For a single generation: a file path (.png for one-frame, .mp4/.mkv/.mov otherwise,"
-        " .safetensors with --output_type latent), or a directory for auto-named files (an existing directory,"
-        " a trailing path separator, or an extension-free path). Always a directory with --output_type"
-        " images/latent_images, --interactive, --from_file, and --latent_path. An existing output is never"
-        " overwritten; the new file gets a numeric suffix instead",
+        help="output target. A directory receives auto-named files (<timestamp>_<seed> plus the output type's"
+        " extension) like the other architectures' --save_path: an existing directory, a trailing path separator,"
+        " or an extension-free path selects that. For a single generation it may instead name the file itself"
+        " (.png for one-frame, .mp4/.mkv/.mov otherwise, .safetensors with --output_type latent). Always a"
+        " directory with --output_type images/latent_images, --interactive, --from_file, and --latent_path."
+        " An existing output is never overwritten; the new file gets a numeric suffix instead",
     )
     parser.add_argument(
         "--output_type",
@@ -1322,14 +1347,14 @@ def setup_parser() -> argparse.ArgumentParser:
         default="video",
         help="what to save: the muxed video (or one-frame PNG; default), the sampled latents as a safetensors"
         " file decodable later with --latent_path, both (latent saved next to the video), a numbered PNG"
-        " sequence plus audio.wav in an auto-named directory under --output, or that sequence plus the latents",
+        " sequence plus audio.wav in an auto-named directory under --save_path, or that sequence plus the latents",
     )
     parser.add_argument(
         "--from_file",
         default=None,
         help="batch mode: read prompt lines (with inline --w/--h/--f/--d/--s/--fs/--fsa/--ofps/--skb/--i/--ei/--ci/--ref/--of/--o"
         " options) from a file and run them in phases, loading each model family once. Sampled latents are saved"
-        " to the --output directory before decoding so a crash loses nothing; the files are removed after their"
+        " to the --save_path directory before decoding so a crash loses nothing; the files are removed after their"
         " output is written unless --output_type keeps latents. See docs/minimax_h3.md",
     )
     parser.add_argument(
@@ -1343,7 +1368,7 @@ def setup_parser() -> argparse.ArgumentParser:
         nargs="*",
         default=None,
         help="decode-only mode: decode latents safetensors saved by --from_file or --output_type into the"
-        " --output directory (only the VAEs are loaded; supports --output_type video or images)",
+        " --save_path directory (only the VAEs are loaded; supports --output_type video or images)",
     )
     parser.add_argument(
         "--bell",

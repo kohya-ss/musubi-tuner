@@ -334,7 +334,7 @@ def _generation_args(tmp_path, *, task="t2va", **overrides):
         "allow_experimental_duration": False,
         "steps": 2,
         "seed": 1,
-        "output": str(tmp_path / "output.mp4"),
+        "save_path": str(tmp_path / "output.mp4"),
         "output_type": "video",
         "output_name": None,
         "condition_image": None,
@@ -471,15 +471,15 @@ def test_one_frame_time_overrides_map_pixel_frame_indices_to_rotary_units():
 
 def test_generation_validation_gates_the_one_frame_mode(tmp_path):
     png = str(tmp_path / "output.png")
-    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png))
-    validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame_inference="target_index=240"))
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, save_path=png))
+    validate_generation_args(_generation_args(tmp_path, frame_count=1, save_path=png, one_frame_inference="target_index=240"))
 
     with pytest.raises(ValueError, match="must use .png"):
         validate_generation_args(_generation_args(tmp_path, frame_count=1))
-    with pytest.raises(ValueError, match="require --frame_count 1"):
+    with pytest.raises(ValueError, match="require --video_length 1"):
         validate_generation_args(_generation_args(tmp_path, one_frame_inference="target_index=1"))
     with pytest.raises(ValueError, match="control_index applies only to FL2VA"):
-        validate_generation_args(_generation_args(tmp_path, frame_count=1, output=png, one_frame_inference="control_index=0"))
+        validate_generation_args(_generation_args(tmp_path, frame_count=1, save_path=png, one_frame_inference="control_index=0"))
 
     first = tmp_path / "first.png"
     first.touch()
@@ -488,27 +488,27 @@ def test_generation_validation_gates_the_one_frame_mode(tmp_path):
             tmp_path,
             task="fl2va",
             frame_count=1,
-            output=png,
+            save_path=png,
             first_frame=str(first),
             one_frame_inference="target_index=24,control_index=0",
         )
     )
     with pytest.raises(ValueError, match="one entry per condition image"):
-        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, output=png, first_frame=str(first)))
+        validate_generation_args(_generation_args(tmp_path, task="fl2va", frame_count=1, save_path=png, first_frame=str(first)))
     with pytest.raises(ValueError, match="one entry per condition image"):
         validate_generation_args(
             _generation_args(
                 tmp_path,
                 task="fl2va",
                 frame_count=1,
-                output=png,
+                save_path=png,
                 first_frame=str(first),
                 one_frame_inference="control_index=0;240",
             )
         )
     with pytest.raises(ValueError, match="requires --first_frame and/or --last_frame"):
         validate_generation_args(
-            _generation_args(tmp_path, task="fl2va", frame_count=1, output=png, one_frame_inference="control_index=0")
+            _generation_args(tmp_path, task="fl2va", frame_count=1, save_path=png, one_frame_inference="control_index=0")
         )
 
 
@@ -629,7 +629,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(tmp_path / "result.mp4"),
+        save_path=str(tmp_path / "result.mp4"),
         device="cpu",
         attn_mode="torch",
         split_attn=False,
@@ -699,7 +699,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
 
     output = generate.run_generation(args)
 
-    assert output == Path(args.output)
+    assert output == Path(args.save_path)
     assert [event[0] for event in events] == [
         "transformer",
         "load_video_vae",
@@ -710,7 +710,7 @@ def test_generation_orchestrates_t2va_sampling_decode_and_mux_without_co_residen
     assert next(event for event in events if event[0] == "load_video_vae")[2] is torch.float16
     assert captured["decoded"].video.shape == (5, 4, 4, 3)
     assert captured["decoded"].audio.shape == (2, 6667)
-    assert captured["output"] == Path(args.output)
+    assert captured["output"] == Path(args.save_path)
 
 
 def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tmp_path, monkeypatch):
@@ -720,7 +720,7 @@ def test_generation_trajectory_dump_writes_sigma_schedule_and_per_step_videos(tm
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(tmp_path / "result.mp4"),
+        save_path=str(tmp_path / "result.mp4"),
         device="cpu",
         attn_mode="torch",
         split_attn=False,
