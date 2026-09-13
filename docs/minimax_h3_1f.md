@@ -5,9 +5,9 @@
 
 ## Overview
 
-`--frame_count 1` switches `minimax_h3_generate_video.py` into one-frame mode:
+`--video_length 1` switches `minimax_h3_generate_video.py` into one-frame mode:
 
-- The target is one video latent token plus the two audio latent frames the joint layout requires. The audio is a byproduct and is never decoded; the output is a PNG (`--output` must use `.png`).
+- The target is one video latent token plus the two audio latent frames the joint layout requires. The audio is a byproduct and is never decoded; the output is a PNG (`--save_path` must use `.png`).
 - The single-token VAE decode duplicates the latent to a pseudo two-token clip and keeps pixel frame 0 (a solo token decode breaks down; the duplication decodes within ~1-2 dB of a true two-token decode). This happens inside the VAE automatically.
 - All tasks are available: `t2va` (plain image), `fl2va` with one or more condition images (editing/inbetween-style probes; one or two is the released API, three or more is experimental), and `ref2va` (reference-driven images, including single-image novel-view generation).
 - `--trajectory_dir` writes per-step PNGs instead of per-step videos.
@@ -42,11 +42,11 @@ python minimax_h3_generate_video.py \
   --audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
   --text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors \
   --prompt "A watercolor lighthouse at dusk." \
-  --width 1024 --height 1024 \
-  --frame_count 1 \
-  --steps 30 --seed 42 \
+  --video_size 1024 1024 \
+  --video_length 1 \
+  --infer_steps 30 --seed 42 \
   --blocks_to_swap 48 \
-  --output output.png
+  --save_path output.png
 ```
 
 ## Conditioned images (FL2VA, one or more pictures)
@@ -57,16 +57,16 @@ One or two pictures is officially in-distribution for the FL2VA checkpoint (its 
 
 ```bash
 # generate "frame 24" of a nominal clip anchored by one condition image at frame 0
-... --task fl2va --frame_count 1 \
+... --task fl2va --video_length 1 \
   --first_frame anchor.png \
   --one_frame_inference "target_index=24,control_index=0" \
-  --prompt "..." --output frame24.png
+  --prompt "..." --save_path frame24.png
 
 # three anchors: frames 0, 48 and 96, generating frame 24 (experimental)
-... --task fl2va --frame_count 1 \
+... --task fl2va --video_length 1 \
   --condition_image a.png --condition_image b.png --condition_image c.png \
   --one_frame_inference "target_index=24,control_index=0;48;96" \
-  --prompt "..." --output frame24.png
+  --prompt "..." --save_path frame24.png
 ```
 
 For best results the caption should follow the official alignment-line formats from the prompt-writing guide (I2VA/L2VA/FL2VA opening lines); the base model reads condition times far more continuously with official-format captions than with plain ones.
@@ -77,9 +77,9 @@ Ref2VA one-frame combines with inline `--ref` references (see `docs/minimax_h3.m
 
 ```bash
 ... --task ref2va --dit /models/minimax_h3_ref2va_bf16.safetensors \
-  --frame_count 1 \
+  --video_length 1 \
   --ref character.png \
-  --prompt "..." --output view.png
+  --prompt "..." --save_path view.png
 ```
 
 With a full-reference-style caption, a single image reference yields novel views of the referenced subject (front/side/back selectable by text) with the environment plausibly extended — useful for synthesizing character-LoRA training data. Note that for dense 2D illustrations the reference is re-drawn rather than preserved pixel-exactly, and unseen-angle environments are plausible inventions, not geometry.

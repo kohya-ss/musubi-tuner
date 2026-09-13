@@ -108,9 +108,11 @@ def parse_one_frame_options(spec: str) -> tuple[int, tuple[int, ...] | None]:
 class H3GenerationRequest:
     """One generation, as the shared helpers read it.
 
-    The fields are named like the generation CLI's arguments (``request_from_args`` copies them
-    one to one); a training sample prompt dict reaches the same shape through
-    ``request_overrides``. A request is only trusted after ``validate_generation_request``.
+    The fields are named like the generation CLI's namespace attributes (``request_from_args``
+    copies them one to one; the house flags ``--video_size`` / ``--video_length`` /
+    ``--infer_steps`` land on ``height``+``width`` / ``frame_count`` / ``steps``); a training
+    sample prompt dict reaches the same shape through ``request_overrides``. A request is only
+    trusted after ``validate_generation_request``.
     """
 
     task: H3Task
@@ -156,7 +158,7 @@ def unescape_prompt(prompt: str | None) -> str | None:
 
 
 def request_from_args(args) -> H3GenerationRequest:
-    """The request of a generation CLI namespace (the parser in minimax_h3_generate_video.py defines every field)."""
+    """The request of a generation CLI namespace (the parser in minimax_h3_generate_video.py defines every attribute)."""
     return H3GenerationRequest(
         task=args.task,
         prompt=unescape_prompt(args.prompt),
@@ -305,7 +307,7 @@ def validate_generation_request(request: H3GenerationRequest) -> None:
             raise ValueError("MiniMax-H3 --one_frame_inference control_index applies only to FL2VA conditions")
     else:
         if request.one_frame_inference is not None:
-            raise ValueError("MiniMax-H3 --one_frame_inference options require --frame_count 1 (--f 1 in prompt lines)")
+            raise ValueError("MiniMax-H3 --one_frame_inference options require --video_length 1 (--f 1 in prompt lines)")
         video_latent_frames(request.frame_count)
         # with a temporal stretch the rotary timeline spans the real (stretched) duration,
         # so that is the quantity to hold inside the released range
@@ -317,7 +319,7 @@ def validate_generation_request(request: H3GenerationRequest) -> None:
                 "pass --allow_experimental_duration to proceed"
             )
     if request.steps <= 0:
-        raise ValueError("MiniMax-H3 --steps must be positive")
+        raise ValueError("MiniMax-H3 --infer_steps must be positive (--s in prompt lines)")
     validate_shift(request.h3_shift_video, "--h3_shift_video")
     validate_shift(request.h3_shift_audio, "--h3_shift_audio")
     validate_clean_coefficient(request.h3_visual_cond_clean, "--h3_visual_cond_clean")
@@ -414,7 +416,7 @@ def fl_condition_entries(request: H3GenerationRequest) -> tuple[tuple[str, str],
     if not request.one_frame:
         if condition_images:
             raise ValueError(
-                "MiniMax-H3 --condition_image applies to one-frame targets (--frame_count 1); video FL2VA takes"
+                "MiniMax-H3 --condition_image applies to one-frame targets (--video_length 1); video FL2VA takes"
                 " --first_frame and/or --last_frame"
             )
         return tuple((role, path) for role, path in (("first", first_frame), ("last", last_frame)) if path)

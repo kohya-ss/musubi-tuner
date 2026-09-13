@@ -1460,7 +1460,7 @@ def test_one_frame_sample_request_parses_the_of_option():
             {"prompt": "x", "frame_count": 1, "ref": ["face.png"], "one_frame": "target_index=0,control_index=0"},
             "control_index applies only to FL2VA",
         ),
-        ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --frame_count 1"),
+        ({}, {"prompt": "x", "frame_count": 124, "one_frame": "target_index=24"}, r"require --video_length 1"),
         # fl2va one-frame: control_index is mandatory, one entry per condition image
         (
             {"task": "fl2va"},

@@ -407,25 +407,24 @@ python minimax_h3_generate_video.py \
   --audio_vae /models/minimax_h3_audio_vae_fp32.safetensors \
   --text_encoder /models/qwen3vl_32b_minimax_h3_bf16.safetensors \
   --prompt "A singer performs under stage lights." \
-  --width 768 \
-  --height 1344 \
-  --frame_count 124 \
-  --steps 30 \
+  --video_size 1344 768 \
+  --video_length 124 \
+  --infer_steps 30 \
   --seed 42 \
   --blocks_to_swap 48 \
-  --output output.mp4
+  --save_path output.mp4
 ```
 
 `--seed` is optional: when omitted, each generation draws a fresh random seed and logs it (auto-named outputs embed it in the filename).
 
-`--output` accepts either a file name or a directory: an existing directory, a trailing path separator, or an extension-free path selects auto-naming (`<timestamp>_<seed>` plus the output type's extension) inside that directory, while any other unrecognized extension stays an error (a directory name containing a dot needs the trailing-separator spelling, e.g. `some.dir/`). An existing output is never overwritten — the new file is renamed with a `-1`, `-2`, ... suffix and a warning is logged — so re-running an edited command line without changing `--output` cannot destroy earlier results.
+The generation options follow the other architectures' vocabulary: `--video_size HEIGHT WIDTH` (multiples of 32), `--video_length` (pixel frames, `17*n+5`), `--infer_steps`, `--save_path`. `--save_path` accepts either a directory (the other architectures' convention) or a file name: an existing directory, a trailing path separator, or an extension-free path selects auto-naming (`<timestamp>_<seed>` plus the output type's extension) inside that directory, while any other unrecognized extension stays an error (a directory name containing a dot needs the trailing-separator spelling, e.g. `some.dir/`). An existing output is never overwritten — the new file is renamed with a `-1`, `-2`, ... suffix and a warning is logged — so re-running an edited command line without changing `--save_path` cannot destroy earlier results.
 
 `--output_type {video,latent,both,images,latent_images}` (default `video`) selects what is saved:
 
 - `video` — the muxed video (or the one-frame PNG), as above.
 - `latent` — only the sampled video+audio latents, as a safetensors file (a `.safetensors` output name, or auto-named `<timestamp>_<seed>_latent.safetensors`); VAE decoding is skipped and `--latent_path` turns the file into a video later. `--trajectory_dir` requires decoding and is rejected.
 - `both` — the video plus the latents as `<name>_latent.safetensors` next to it.
-- `images` — the decoded frames as `00000.png`-numbered files plus the decoded audio as `audio.wav`, written into an auto-named `<timestamp>_<seed>/` directory under `--output` (which always names a directory for the image types, so two runs never mix their frames).
+- `images` — the decoded frames as `00000.png`-numbered files plus the decoded audio as `audio.wav`, written into an auto-named `<timestamp>_<seed>/` directory under `--save_path` (which always names a directory for the image types, so two runs never mix their frames).
 - `latent_images` — `images` plus `latent.safetensors` inside the same directory.
 
 In `--from_file` mode the latent-bearing types simply keep the intermediate latent files (with their `<timestamp>_<index>_<seed>_latent.safetensors` names) instead of removing them, and `--output_type latent` skips the decode phase entirely; `--latent_path` decoding accepts `video` and `images`.
@@ -446,7 +445,7 @@ For FL2VA, keep the FL2VA base and replace the task inputs:
 --task fl2va --prompt "..." --first_frame first.png --last_frame last.png
 ```
 
-Condition images are fitted to the `--width`/`--height` canvas the way training fits controls to the bucket: scaled to cover the canvas, then center-cropped (never stretched), so a LoRA sees its conditions preprocessed exactly as during training. Pass images with the canvas aspect ratio to keep the whole picture.
+Condition images are fitted to the `--video_size` canvas the way training fits controls to the bucket: scaled to cover the canvas, then center-cropped (never stretched), so a LoRA sees its conditions preprocessed exactly as during training. Pass images with the canvas aspect ratio to keep the whole picture.
 
 The official prompt guide treats I2VA (first frame only) and L2VA (last frame only) as FL2VA variants, and the released FL2VA base supports both: pass only `--first_frame` to develop forward from the image, or only `--last_frame` to converge onto it. The lone picture is `<Picture 1>` in either case — the released prompt builder numbers the pictures that are present — and the first/last distinction is carried by the rotary anchor times (a lone last frame keeps its end-of-video anchor), so the prompt should use the matching official instruction line: the I2VA "at 0.00 seconds ... fully referenced" form, or the L2VA alignment form anchoring `<Picture 1>` at the final second mark.
 
@@ -469,9 +468,9 @@ Alternatively, inline references skip the JSONL (and its target `video_path` pla
 
 T2VA and Ref2VA generation may use `--text_cache` instead of `--text_encoder`. The cache must match the requested task, cache format version, and exact presentation fingerprint (which covers the prompt, frame count, and size+mtime identities of the reference media, so the cache must be used on the machine holding the original files). T2VA still requires `--prompt` so that identity can be verified; Ref2VA uses the selected record caption unless `--prompt` overrides it. FL2VA generation does not accept a dataset text cache because external first/last images cannot be proven identical to the crop presentation that produced that cache.
 
-`--frame_count 1` switches to the experimental one-frame (image) mode — PNG output, no audio, optional `--one_frame_inference` time indices; see `docs/minimax_h3_1f.md`.
+`--video_length 1` switches to the experimental one-frame (image) mode — PNG output, no audio, optional `--one_frame_inference` time indices; see `docs/minimax_h3_1f.md`.
 
-`--steps N` means N model evaluations, so the schedule uses N+1 grid points. The released implementations (SGLang serving and the diffusers scheduler) instead count grid points: their `num_inference_steps = N` performs N-1 evaluations. Musubi `--steps N` is therefore grid-identical to official `num_inference_steps = N+1`; to reproduce the official 50-step serving default exactly, pass `--steps 49`.
+`--infer_steps N` means N model evaluations, so the schedule uses N+1 grid points. The released implementations (SGLang serving and the diffusers scheduler) instead count grid points: their `num_inference_steps = N` performs N-1 evaluations. Musubi `--infer_steps N` is therefore grid-identical to official `num_inference_steps = N+1`; to reproduce the official 50-step serving default exactly, pass `--infer_steps 49`.
 
 `--compile` wraps the 50 DiT blocks with torch.compile using the same flags as training (`--compile_backend`, `--compile_mode`, `--compile_dynamic`, `--compile_fullgraph`, `--compile_cache_size_limit`; requires triton). The exclusions also match training: with block swap or a ConvRot INT8 base the Linear layers stay eager (the INT8 path's custom autograd + Triton kernels are not dynamo-traceable), so the speedup comes from fusing the rest of the block graph. The first sampling steps pay the compilation latency, and each new latent shape triggers a recompile — in interactive or batch sessions with varying resolutions or frame counts, pass `--compile_dynamic true` or budget one recompilation per shape.
 
@@ -481,9 +480,9 @@ The native sampler builds one common base grid, derives independent shifted vide
 
 ### Temporal stretch (experimental)
 
-`--output_fps N` (default 24, accepted range 1-24; rates above the native 24 are rejected until the squeeze direction is validated) samples the generated timeline at N fps instead of the trained 24. `--frame_count` still counts generated pixel frames, so the clip covers `frame_count / N` seconds: the target video's rotary time spans scale by `24/N` (the H3 time axis is real-time, 1 unit = 1/40 s), the audio track keeps its native 40 Hz latent rate over the stretched real duration, and the output container, trajectory dumps, and intermediate latent files all carry the requested rate. The released 5-15 s duration gate applies to the real (stretched) duration. References, FL2VA conditions, and one-frame mode keep native 24 fps spans (one-frame mode rejects a stretch).
+`--output_fps N` (default 24, accepted range 1-24; rates above the native 24 are rejected until the squeeze direction is validated) samples the generated timeline at N fps instead of the trained 24. `--video_length` still counts generated pixel frames, so the clip covers `video_length / N` seconds: the target video's rotary time spans scale by `24/N` (the H3 time axis is real-time, 1 unit = 1/40 s), the audio track keeps its native 40 Hz latent rate over the stretched real duration, and the output container, trajectory dumps, and intermediate latent files all carry the requested rate. The released 5-15 s duration gate applies to the real (stretched) duration. References, FL2VA conditions, and one-frame mode keep native 24 fps spans (one-frame mode rejects a stretch).
 
-Two ways to use it: keeping `--frame_count` fixed doubles the clip length at 12 fps for nearly the same compute (only the audio rows grow), while generating the same real duration with proportionally fewer frames cuts the packed sequence roughly in half at 12 fps (about a quarter of the video-video attention cost; 124 frames at 12 fps measured ~2.1x faster than the equal-duration 243 frames at 24 fps).
+Two ways to use it: keeping `--video_length` fixed doubles the clip length at 12 fps for nearly the same compute (only the audio rows grow), while generating the same real duration with proportionally fewer frames cuts the packed sequence roughly in half at 12 fps (about a quarter of the video-video attention cost; 124 frames at 12 fps measured ~2.1x faster than the equal-duration 243 frames at 24 fps).
 
 The model was trained at 24 fps only, so a plain stretch produces periodic artifacts with a 17-pixel-frame period: the leading (highest-frequency) temporal RoPE bands have periods at or below the latent token spacing and carry a per-token lattice phase rather than time, and stretching re-dials that phase against the `(1,4,4,4,4)` VAE token grouping. `--stretch_keep_bands K` rotates the K leading temporal bands by the unstretched grid instead, which restores the trained lattice phase while the remaining bands carry the stretched clock. Recommended values: `3` at 12 fps (where `4` also removes the last residual glitches), `2` at 16 fps, `1` at 20 fps — the count of bands whose per-token rotation changes regime at that stretch.
 
@@ -501,10 +500,10 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 
 | Line option | Maps to |
 | --- | --- |
-| `--w`, `--h` | `--width`, `--height` |
-| `--f` | `--frame_count` (`--f 1` selects one-frame mode) |
+| `--w`, `--h` | `--video_size` (`--w` is the width, `--h` the height) |
+| `--f` | `--video_length` (`--f 1` selects one-frame mode) |
 | `--d` | `--seed` |
-| `--s` | `--steps` |
+| `--s` | `--infer_steps` |
 | `--fs`, `--fsa` | `--h3_shift_video`, `--h3_shift_audio` |
 | `--ofps`, `--skb` | `--output_fps`, `--stretch_keep_bands` |
 | `--i`, `--ei` | `--first_frame`, `--last_frame` (end image) |
@@ -513,11 +512,11 @@ A singer performs under stage lights. --w 768 --h 1344 --f 124 --d 42 --s 30
 | `--of` | `--one_frame_inference` |
 | `--o` | output filename inside the output directory |
 
-The line vocabulary is the shared training sample-prompt one (`training/sampling_prompts.py`, the same lines `--sample_prompts` reads), so an unknown option is logged as a warning and ignored rather than failing the line, and the generic `--n`/`--l`/`--g` options are rejected (H3 has no negative prompt or CFG). Unspecified options inherit the command-line values, so a fixed `--ref` set with varying prompts works. A line starting with `--` carries only options and keeps the command-line `--prompt` in effect — with a session prompt, `--d 43` alone re-runs it with a new seed. The literal string `\n` in prompt text (line prompts and `--prompt` alike) becomes a newline, so the multi-line official prompt format fits on one line. `--task`, the model artifacts, and the LoRA configuration are fixed for the session, and `--text_cache` and `--trajectory_dir` are not accepted. In both modes `--output` names a directory (created if missing); files are auto-named `<timestamp>_<seed>` with the output type's extension (a per-generation directory for the image types) unless a line overrides the name with `--o`, and omitting `--d` draws a fresh random seed per line.
+The line vocabulary is the shared training sample-prompt one (`training/sampling_prompts.py`, the same lines `--sample_prompts` reads), so an unknown option is logged as a warning and ignored rather than failing the line, and the generic `--n`/`--l`/`--g` options are rejected (H3 has no negative prompt or CFG). Unspecified options inherit the command-line values, so a fixed `--ref` set with varying prompts works. A line starting with `--` carries only options and keeps the command-line `--prompt` in effect — with a session prompt, `--d 43` alone re-runs it with a new seed. The literal string `\n` in prompt text (line prompts and `--prompt` alike) becomes a newline, so the multi-line official prompt format fits on one line. `--task`, the model artifacts, and the LoRA configuration are fixed for the session, and `--text_cache` and `--trajectory_dir` are not accepted. In both modes `--save_path` names a directory (created if missing); files are auto-named `<timestamp>_<seed>` with the output type's extension (a per-generation directory for the image types) unless a line overrides the name with `--o`, and omitting `--d` draws a fresh random seed per line.
 
-**`--from_file prompts.txt`** runs the prompts in four phases, loading each model family exactly once: condition VAE encoding for every line (lines starting with `#` and empty lines are skipped), then all text encodings, then all samplings, then all decodes. Peak VRAM therefore matches single-shot generation — the same `--blocks_to_swap`/`--text_encoder_blocks_to_swap` settings apply unchanged. Each sampled result is written to `<output>/<timestamp>_<index>_<seed>_latent.safetensors` before any decoding, so a crash never loses finished sampling work; the file is removed once its output is written (unless `--output_type` keeps latents) and kept (with a log message) when decoding fails. A failing line is reported and skipped without aborting the rest of the batch.
+**`--from_file prompts.txt`** runs the prompts in four phases, loading each model family exactly once: condition VAE encoding for every line (lines starting with `#` and empty lines are skipped), then all text encodings, then all samplings, then all decodes. Peak VRAM therefore matches single-shot generation — the same `--blocks_to_swap`/`--text_encoder_blocks_to_swap` settings apply unchanged. Each sampled result is written to `<save_path>/<timestamp>_<index>_<seed>_latent.safetensors` before any decoding, so a crash never loses finished sampling work; the file is removed once its output is written (unless `--output_type` keeps latents) and kept (with a log message) when decoding fails. A failing line is reported and skipped without aborting the rest of the batch.
 
-**`--latent_path FILE...`** decodes those intermediate latent files without loading the transformer or text encoder — only the VAEs (`--audio_vae` may be omitted when every file is a one-frame latent). Outputs go to the `--output` directory.
+**`--latent_path FILE...`** decodes those intermediate latent files without loading the transformer or text encoder — only the VAEs (`--audio_vae` may be omitted when every file is a one-frame latent). Outputs go to the `--save_path` directory.
 
 **`--interactive`** reads prompt lines from the console and keeps every model resident for the whole session: the text encoder and the transformer stay loaded with their configured placements, and the VAEs idle on the CPU between prompts. Unlike the batch phases, both large models coexist, so VRAM-limited setups (24 GB and below) should combine a quantized transformer plus a generous `--blocks_to_swap` with `--text_encoder_blocks_to_swap 50` (and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations). The CPU-resident copies mean host RAM must hold both artifacts — 64 GB is a comfortable floor for the quantized pair. Text conditioning is cached by prompt and media fingerprints, so re-running a line with only a new seed skips the text encoder entirely. Ctrl+D (or Ctrl+Z on Windows) exits; Ctrl+C interrupts the current generation and returns to the prompt. `--bell` rings the terminal bell after each generation (in the other modes, once at the end).
 

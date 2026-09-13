@@ -23,14 +23,22 @@ from musubi_tuner.training.sampling_prompts import line_to_prompt_dict
 
 
 def test_generation_cli_defaults_are_the_request_defaults():
-    args = generation_parser().parse_args(["--task", "t2va", "--output", "out.mp4"])
+    args = generation_parser().parse_args(["--task", "t2va", "--save_path", "out.mp4"])
 
     assert request_from_args(args) == H3GenerationRequest(task="t2va")
+
+    # the house flags land on the request field names: --video_size is height then width
+    args = generation_parser().parse_args(
+        ["--task", "t2va", "--save_path", "out", "--video_size", "1344", "768", "--video_length", "39", "--infer_steps", "7"]
+    )
+    request = request_from_args(args)
+    assert (request.height, request.width, request.frame_count, request.steps) == (1344, 768, 39, 7)
+    assert not hasattr(args, "video_size")
 
 
 def test_trainer_and_generation_share_the_sampler_and_text_encoder_options():
     train = vars(minimax_h3_setup_parser(argparse.ArgumentParser()).parse_args(["--task", "t2va"]))
-    generate = vars(generation_parser().parse_args(["--task", "t2va", "--output", "out.mp4"]))
+    generate = vars(generation_parser().parse_args(["--task", "t2va", "--save_path", "out.mp4"]))
 
     for name in (
         "h3_shift_video",
@@ -103,7 +111,7 @@ def test_request_validation_covers_the_canvas_timeline_and_task_inputs(tmp_path)
     with pytest.raises(ValueError, match="released 5-15s"):
         validate_generation_request(H3GenerationRequest(task="t2va", prompt="p", frame_count=39))
     validate_generation_request(H3GenerationRequest(task="t2va", prompt="p", frame_count=39, allow_experimental_duration=True))
-    with pytest.raises(ValueError, match="--steps must be positive"):
+    with pytest.raises(ValueError, match="--infer_steps must be positive"):
         validate_generation_request(H3GenerationRequest(task="t2va", prompt="p", steps=0))
     with pytest.raises(ValueError, match="h3_shift_audio"):
         validate_generation_request(H3GenerationRequest(task="t2va", prompt="p", h3_shift_audio=0.0))

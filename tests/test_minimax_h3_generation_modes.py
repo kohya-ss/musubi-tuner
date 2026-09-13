@@ -59,7 +59,7 @@ def _session_args(tmp_path, *, task="t2va", **overrides):
         "allow_experimental_duration": False,
         "steps": 2,
         "seed": 1,
-        "output": str(tmp_path / "output.mp4"),
+        "save_path": str(tmp_path / "output.mp4"),
         "output_type": "video",
         "output_name": None,
         "blocks_to_swap": 0,
@@ -166,7 +166,7 @@ def test_session_validation_enforces_mode_exclusivity_and_multi_prompt_restricti
 
 
 def test_prompt_validation_checks_output_name_suffixes_in_directory_modes(tmp_path):
-    args = _session_args(tmp_path, output=str(tmp_path))
+    args = _session_args(tmp_path, save_path=str(tmp_path))
     validate_prompt_args(args, directory_output=True)
 
     args.output_name = "clip.mp4"
@@ -175,7 +175,7 @@ def test_prompt_validation_checks_output_name_suffixes_in_directory_modes(tmp_pa
     with pytest.raises(ValueError, match="must use .mp4"):
         validate_prompt_args(args, directory_output=True)
 
-    image_args = _session_args(tmp_path, frame_count=1, output=str(tmp_path))
+    image_args = _session_args(tmp_path, frame_count=1, save_path=str(tmp_path))
     image_args.output_name = "image.png"
     validate_prompt_args(image_args, directory_output=True)
     image_args.output_name = "image.mp4"
@@ -188,7 +188,7 @@ def test_fl2va_accepts_single_anchor_frames(tmp_path):
     first.touch()
     last = tmp_path / "last.png"
     last.touch()
-    base = {"task": "fl2va", "output": str(tmp_path / "out.mp4")}
+    base = {"task": "fl2va", "save_path": str(tmp_path / "out.mp4")}
     validate_prompt_args(_session_args(tmp_path, **base, first_frame=str(first)))
     validate_prompt_args(_session_args(tmp_path, **base, last_frame=str(last)))
     validate_prompt_args(_session_args(tmp_path, **base, first_frame=str(first), last_frame=str(last)))
@@ -198,48 +198,48 @@ def test_fl2va_accepts_single_anchor_frames(tmp_path):
 
 def test_output_validation_covers_output_types_and_directory_interpretation(tmp_path):
     # latent-only output names must be .safetensors
-    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.safetensors"), output_type="latent"))
+    validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "out.safetensors"), output_type="latent"))
     with pytest.raises(ValueError, match=r"must use \.safetensors"):
-        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp4"), output_type="latent"))
+        validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "out.mp4"), output_type="latent"))
 
-    # image-sequence outputs are directories, so a media-file --output is rejected
+    # image-sequence outputs are directories, so a media-file --save_path is rejected
     with pytest.raises(ValueError, match="must not name a media file"):
-        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp4"), output_type="images"))
-    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "frames"), output_type="images"))
+        validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "out.mp4"), output_type="images"))
+    validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "frames"), output_type="images"))
 
     # an existing directory, a trailing separator, or an extension-free path selects auto-naming
-    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path)))
-    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "newdir") + "/"))
-    validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "newdir")))
+    validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path)))
+    validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "newdir") + "/"))
+    validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "newdir")))
     with pytest.raises(ValueError, match=r"must use \.mp4"):
-        validate_prompt_args(_session_args(tmp_path, output=str(tmp_path / "out.mp3")))
+        validate_prompt_args(_session_args(tmp_path, save_path=str(tmp_path / "out.mp3")))
 
     # the per-step trajectory diagnostic requires decoding
     with pytest.raises(ValueError, match="cannot combine with --output_type latent"):
         validate_prompt_args(
-            _session_args(tmp_path, output=str(tmp_path / "out.safetensors"), output_type="latent", trajectory_dir=str(tmp_path))
+            _session_args(tmp_path, save_path=str(tmp_path / "out.safetensors"), output_type="latent", trajectory_dir=str(tmp_path))
         )
 
 
 def test_resolve_output_path_auto_names_directories_and_never_overwrites(tmp_path):
     existing = tmp_path / "clip.mp4"
     existing.touch()
-    resolved = generate._resolve_output_path(_session_args(tmp_path, output=str(existing)), 7, directory_mode=False)
+    resolved = generate._resolve_output_path(_session_args(tmp_path, save_path=str(existing)), 7, directory_mode=False)
     assert resolved == tmp_path / "clip-1.mp4"
 
-    resolved = generate._resolve_output_path(_session_args(tmp_path, output=str(tmp_path / "outdir")), 7, directory_mode=False)
+    resolved = generate._resolve_output_path(_session_args(tmp_path, save_path=str(tmp_path / "outdir")), 7, directory_mode=False)
     assert resolved.parent == tmp_path / "outdir" and resolved.parent.is_dir()
     assert resolved.name.endswith("_7.mp4")
 
-    latent_args = _session_args(tmp_path, output=str(tmp_path / "outdir"), output_type="latent")
+    latent_args = _session_args(tmp_path, save_path=str(tmp_path / "outdir"), output_type="latent")
     resolved = generate._resolve_output_path(latent_args, 7, directory_mode=False)
     assert resolved.name.endswith("_7_latent.safetensors")
 
-    image_args = _session_args(tmp_path, output=str(tmp_path / "frames"), output_type="images")
+    image_args = _session_args(tmp_path, save_path=str(tmp_path / "frames"), output_type="images")
     resolved = generate._resolve_output_path(image_args, 7, directory_mode=False)
     assert resolved.parent == tmp_path / "frames" and resolved.suffix == ""
 
-    both_args = _session_args(tmp_path, output=str(tmp_path / "clip2.mp4"), output_type="both")
+    both_args = _session_args(tmp_path, save_path=str(tmp_path / "clip2.mp4"), output_type="both")
     output_path = generate._resolve_output_path(both_args, 7, directory_mode=False)
     assert generate._resolve_latent_path(both_args, output_path) == tmp_path / "clip2_latent.safetensors"
 
@@ -253,7 +253,7 @@ def test_one_frame_fl2va_control_index_error_reports_the_counts(tmp_path):
         frame_count=1,
         first_frame=str(first),
         one_frame_inference="target_index=6,control_index=0;123",
-        output=str(tmp_path / "out.png"),
+        save_path=str(tmp_path / "out.png"),
     )
 
     with pytest.raises(ValueError, match=r"got 2 control_index entries for 1 condition images \(.*first\.png\)"):
@@ -266,7 +266,7 @@ def test_one_frame_fl2va_accepts_an_ordered_condition_image_list(tmp_path):
         path = tmp_path / f"{name}.png"
         path.touch()
         conditions.append(str(path))
-    base = dict(task="fl2va", frame_count=1, output=str(tmp_path / "out.png"))
+    base = dict(task="fl2va", frame_count=1, save_path=str(tmp_path / "out.png"))
 
     validate_prompt_args(
         _session_args(tmp_path, **base, condition_image=conditions, one_frame_inference="target_index=24,control_index=0;24;48")
@@ -408,7 +408,7 @@ def _batch_args(tmp_path, prompt_lines):
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(output_dir),
+        save_path=str(output_dir),
         from_file=str(prompts),
         device="cpu",
         attn_mode="torch",
@@ -481,7 +481,7 @@ def test_run_generation_latent_only_saves_a_decodable_file_without_vaes(tmp_path
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(tmp_path / "out.safetensors"),
+        save_path=str(tmp_path / "out.safetensors"),
         output_type="latent",
         device="cpu",
         attn_mode="torch",
@@ -507,7 +507,7 @@ def test_run_generation_writes_an_image_sequence_with_audio_and_latents(tmp_path
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(tmp_path / "frames"),
+        save_path=str(tmp_path / "frames"),
         output_type="latent_images",
         device="cpu",
         attn_mode="torch",
@@ -541,7 +541,7 @@ def test_compile_wraps_the_dit_once_with_training_parity_exclusions(tmp_path, mo
         tmp_path,
         frame_count=5,
         allow_experimental_duration=True,
-        output=str(tmp_path / "result.mp4"),
+        save_path=str(tmp_path / "result.mp4"),
         device="cpu",
         attn_mode="torch",
         split_attn=False,
@@ -573,7 +573,7 @@ def test_latent_decode_mode_loads_only_the_vaes(tmp_path, monkeypatch):
 
     args = _session_args(
         tmp_path,
-        output=str(tmp_path / "decoded"),
+        save_path=str(tmp_path / "decoded"),
         latent_path=[str(video_file), str(image_file)],
         disable_numpy_memmap=False,
     )

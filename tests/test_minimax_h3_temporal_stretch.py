@@ -129,7 +129,9 @@ def test_layout_validation_rejects_inconsistent_stretch_combinations():
 
 
 def _prompt_args(**overrides):
-    args = generate.setup_parser().parse_args(["--task", "t2va", "--output", "out.mp4", "--prompt", "p", "--frame_count", "124"])
+    args = generate.setup_parser().parse_args(
+        ["--task", "t2va", "--save_path", "out.mp4", "--prompt", "p", "--video_length", "124"]
+    )
     args.output_name = None
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -145,7 +147,7 @@ def test_prompt_validation_bounds_the_stretch_arguments():
     with pytest.raises(ValueError, match="requires an --output_fps below"):
         generate.validate_prompt_args(_prompt_args(stretch_keep_bands=3))
     with pytest.raises(ValueError, match="one-frame"):
-        generate.validate_prompt_args(_prompt_args(frame_count=1, output_fps=12, output="out.png"))
+        generate.validate_prompt_args(_prompt_args(frame_count=1, output_fps=12, save_path="out.png"))
     # the released 5-15 s duration gate reads the real (stretched) duration
     generate.validate_prompt_args(_prompt_args(output_fps=12))  # 124/12 = 10.3 s
     with pytest.raises(ValueError, match="outside the released 5-15s range"):
