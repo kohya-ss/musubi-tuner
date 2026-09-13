@@ -204,6 +204,10 @@ def _load_generation_module(monkeypatch):
     target = "_isolated_minimax_h3_generate_video"
     noop = lambda *args, **kwargs: None
     _stub(monkeypatch, "transformers", CLIPTextModel=torch.nn.Module)
+    # the shared generation helpers pull in diffusers/transformers at import; the routing
+    # test below replaces them anyway
+    _stub(monkeypatch, "musubi_tuner.hv_generate_video", get_time_flag=noop, save_videos_grid=noop)
+    _stub(monkeypatch, "musubi_tuner.wan_generate_video", merge_lora_weights=noop)
     _stub(monkeypatch, "musubi_tuner.minimax_h3.audio_vae", load_audio_vae=noop)
     _stub(
         monkeypatch,
@@ -248,33 +252,42 @@ def test_generation_selects_merge_for_bf16_and_attachment_for_int8(monkeypatch):
     generate = _load_generation_module(monkeypatch)
     calls = []
     attached = [object()]
-    monkeypatch.setattr(generate, "_merge_lora_weights", lambda transformer, args: calls.append(("merge", transformer)))
+    # the shared inference helpers (wan merge_lora_weights / lora_utils.attach_lora_weights)
+    # take (lora_module, model, weights, multipliers, includes, excludes, device)
+    monkeypatch.setattr(generate, "merge_lora_weights", lambda module, transformer, *rest: calls.append(("merge", transformer)))
     monkeypatch.setattr(
         generate,
-        "_apply_lora_weights",
-        lambda transformer, args, device: calls.append(("attach", transformer, device)) or attached,
-        raising=False,
+        "attach_lora_weights",
+        lambda module, transformer, *rest: calls.append(("attach", transformer, rest[-1])) or attached,
     )
     device = torch.device("cpu")
     bf16 = SimpleNamespace(is_convrot_int8=False)
     int8 = SimpleNamespace(is_convrot_int8=True)
 
-    # plain BF16 base: one-time destructive CPU merge
-    args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False, lora_runtime_attach=False)
+    def lora_args(**overrides):
+        defaults = dict(
+            lora_weight=["adapter.safetensors"],
+            lora_multiplier=None,
+            include_patterns=None,
+            exclude_patterns=None,
+            convrot_int8=False,
+            lora_runtime_attach=False,
+        )
+        return SimpleNamespace(**{**defaults, **overrides})
+
+    # plain BF16 base: one-time destructive merge
+    args = lora_args()
     assert generate._configure_lora_weights(bf16, args, device, prequantized=False) == []
     # pre-quantized INT8 base (auto-detected): runtime additive branches
     assert generate._configure_lora_weights(int8, args, device, prequantized=True) is attached
     # BF16 base + --convrot_int8: merged during the streaming load, nothing to do here
-    dynamic_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True, lora_runtime_attach=False)
-    assert generate._configure_lora_weights(int8, dynamic_args, device, prequantized=False) == []
+    assert generate._configure_lora_weights(int8, lora_args(convrot_int8=True), device, prequantized=False) == []
     # no LoRA: nothing happens on any route
-    no_lora = SimpleNamespace(lora_weight=None, convrot_int8=False, lora_runtime_attach=False)
-    assert generate._configure_lora_weights(bf16, no_lora, device, prequantized=False) == []
+    assert generate._configure_lora_weights(bf16, lora_args(lora_weight=None), device, prequantized=False) == []
     # --lora_runtime_attach overrides both merge routes with runtime branches (the merge
     # rounds small-magnitude LoRAs -- e.g. teacher matching -- out of the BF16 weights)
-    attach_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=False, lora_runtime_attach=True)
-    assert generate._configure_lora_weights(bf16, attach_args, device, prequantized=False) is attached
-    attach_int8_args = SimpleNamespace(lora_weight=["adapter.safetensors"], convrot_int8=True, lora_runtime_attach=True)
+    assert generate._configure_lora_weights(bf16, lora_args(lora_runtime_attach=True), device, prequantized=False) is attached
+    attach_int8_args = lora_args(convrot_int8=True, lora_runtime_attach=True)
     assert generate._configure_lora_weights(int8, attach_int8_args, device, prequantized=False) is attached
     assert calls == [("merge", bf16), ("attach", int8, device), ("attach", bf16, device), ("attach", int8, device)]
 
@@ -329,14 +342,9 @@ def test_attached_lora_forward_does_not_mutate_int8_base(tmp_path: Path, monkeyp
     model = _tiny_model()
     target_paths = _prepare_int8_targets(model)
     snapshots = {path: model.get_submodule(path).weight.detach().clone() for path in target_paths}
-    args = SimpleNamespace(
-        lora_weight=[str(lora_path)],
-        lora_multiplier=[0.75],
-        include_patterns=None,
-        exclude_patterns=None,
+    networks = generate.attach_lora_weights(
+        generate.lora_minimax_h3, model, [str(lora_path)], [0.75], None, None, torch.device("cpu")
     )
-
-    networks = generate._apply_lora_weights(model, args, torch.device("cpu"))
     output = model.blocks[0].attn.qkv_proj(torch.randn(3, 16))
 
     assert len(networks) == 1

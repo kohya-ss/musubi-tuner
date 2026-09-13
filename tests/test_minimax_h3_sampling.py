@@ -16,13 +16,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket
 from musubi_tuner.minimax_h3.packing import H3VideoGeometry, build_h3_layout
+from musubi_tuner.minimax_h3 import sampling as h3_sampling
 from musubi_tuner.minimax_h3.sampling import (
     augment_condition_latents,
     build_shifted_schedule,
     create_sampling_generator,
-    decode_joint_av,
     initialize_target_latents,
     sample_joint_av,
+    synchronize_decoded_av,
     write_joint_av,
 )
 from musubi_tuner.minimax_h3.generation_inputs import (
@@ -37,11 +38,18 @@ from musubi_tuner.minimax_h3.sampling import write_image
 from musubi_tuner.minimax_h3_generate_video import (
     load_cached_text_conditioning,
     setup_parser,
-    validate_generation_args,
+    validate_prompt_args,
+    validate_session_args,
 )
 
 # the parser moved to generation_inputs so the trainer's sample prompts share it
 _parse_one_frame_options = parse_one_frame_options
+
+
+def validate_generation_args(args):
+    # the script validates the session once and each prompt separately; the tests below check both
+    validate_session_args(args)
+    return validate_prompt_args(args)
 
 
 def _layout():
@@ -257,10 +265,9 @@ def test_joint_decode_trims_video_and_audio_to_one_planned_duration():
             assert latents.shape == (1, 32, 2, 8)
             return torch.linspace(-1.0, 1.0, 2 * 8000).reshape(1, 2, 8000)
 
-    decoded = decode_joint_av(
-        VideoVAE(),
-        AudioVAE(),
-        SimpleNamespace(video=torch.zeros(1, 24, 2, 4, 4), audio=torch.zeros(1, 32, 2, 8)),
+    decoded = synchronize_decoded_av(
+        VideoVAE().decode(torch.zeros(1, 24, 2, 4, 4)),
+        AudioVAE().decode(torch.zeros(1, 32, 2, 8)),
         frame_count=5,
     )
 
@@ -272,12 +279,13 @@ def test_joint_decode_trims_video_and_audio_to_one_planned_duration():
     assert decoded.sample_rate == 32000
 
 
-def test_joint_output_uses_a_replaceable_mux_boundary(tmp_path):
+def test_joint_output_muxes_the_decoded_streams_at_their_rates(tmp_path, monkeypatch):
     captured = {}
 
     def muxer(video, audio, output_path, *, fps, sample_rate):
         captured.update(video=video, audio=audio, output_path=output_path, fps=fps, sample_rate=sample_rate)
 
+    monkeypatch.setattr(h3_sampling, "mux_audio_video", muxer)
     decoded = SimpleNamespace(
         video=torch.zeros(5, 8, 8, 3, dtype=torch.uint8),
         audio=torch.zeros(2, 6667),
@@ -286,7 +294,7 @@ def test_joint_output_uses_a_replaceable_mux_boundary(tmp_path):
     )
     output_path = tmp_path / "result.mp4"
 
-    write_joint_av(decoded, output_path, muxer=muxer)
+    write_joint_av(decoded, output_path)
 
     assert captured == {
         "video": decoded.video,

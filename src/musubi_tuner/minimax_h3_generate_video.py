@@ -16,7 +16,7 @@ from safetensors.torch import load_file, save_file
 import torch
 from tqdm.auto import tqdm
 
-from musubi_tuner.hv_generate_video import get_time_flag
+from musubi_tuner.hv_generate_video import get_time_flag, save_videos_grid
 from musubi_tuner.minimax_h3.args import add_h3_sampling_args, add_h3_text_encoder_args, add_h3_vae_args
 from musubi_tuner.minimax_h3.audio_vae import load_audio_vae
 from musubi_tuner.minimax_h3.generation_inputs import (
@@ -51,6 +51,7 @@ from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
 from musubi_tuner.modules.convrot_int8_utils import has_comfy_quant_tensors
 from musubi_tuner.minimax_h3.model import load_h3_transformer
 from musubi_tuner.minimax_h3.sampling import (
+    H3_VIDEO_CRF,
     build_shifted_schedule,
     decoded_video_to_uint8,
     sample_joint_av_latents,
@@ -59,7 +60,6 @@ from musubi_tuner.minimax_h3.sampling import (
     write_image,
     write_image_sequence,
     write_joint_av,
-    write_video_only,
 )
 from musubi_tuner.minimax_h3.text_encoder import (
     TEXT_CACHE_FORMAT,
@@ -75,8 +75,9 @@ from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.sampling_prompts import line_to_prompt_dict
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import attach_lora_weights, filter_lora_state_dict
 from musubi_tuner.utils.model_utils import compile_transformer, setup_parser_compile
+from musubi_tuner.wan_generate_video import merge_lora_weights
 
 
 logger = logging.getLogger(__name__)
@@ -200,11 +201,6 @@ def validate_prompt_args(args: argparse.Namespace, *, directory_output: bool = F
     return request
 
 
-def validate_generation_args(args: argparse.Namespace) -> H3GenerationRequest:
-    validate_session_args(args)
-    return validate_prompt_args(args)
-
-
 def load_cached_text_conditioning(
     path: str | Path,
     *,
@@ -280,7 +276,7 @@ class H3SharedModels:
 @contextmanager
 def _borrowed_video_vae(args: argparse.Namespace, device: torch.device, dtype: torch.dtype, shared: H3SharedModels | None):
     if shared is None:
-        vae = load_video_vae(args.video_vae, device=device, dtype=dtype, disable_mmap=args.disable_numpy_memmap)
+        vae = load_video_vae(args.video_vae, device=device, dtype=dtype, disable_numpy_memmap=args.disable_numpy_memmap)
         try:
             yield vae
         finally:
@@ -290,7 +286,7 @@ def _borrowed_video_vae(args: argparse.Namespace, device: torch.device, dtype: t
         return
     vae = shared.video_vaes.get(dtype)
     if vae is None:
-        vae = load_video_vae(args.video_vae, device="cpu", dtype=dtype, disable_mmap=args.disable_numpy_memmap)
+        vae = load_video_vae(args.video_vae, device="cpu", dtype=dtype, disable_numpy_memmap=args.disable_numpy_memmap)
         shared.video_vaes[dtype] = vae
     vae.to(device)
     try:
@@ -303,7 +299,7 @@ def _borrowed_video_vae(args: argparse.Namespace, device: torch.device, dtype: t
 @contextmanager
 def _borrowed_audio_vae(args: argparse.Namespace, device: torch.device, shared: H3SharedModels | None):
     if shared is None:
-        vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_mmap=args.disable_numpy_memmap)
+        vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_numpy_memmap=args.disable_numpy_memmap)
         try:
             yield vae
         finally:
@@ -312,7 +308,9 @@ def _borrowed_audio_vae(args: argparse.Namespace, device: torch.device, shared: 
             clean_memory_on_device(device)
         return
     if shared.audio_vae is None:
-        shared.audio_vae = load_audio_vae(args.audio_vae, device="cpu", dtype=torch.float32, disable_mmap=args.disable_numpy_memmap)
+        shared.audio_vae = load_audio_vae(
+            args.audio_vae, device="cpu", dtype=torch.float32, disable_numpy_memmap=args.disable_numpy_memmap
+        )
     shared.audio_vae.to(device)
     try:
         yield shared.audio_vae
@@ -378,7 +376,7 @@ def _encode_text(
             args.text_encoder,
             device=device,
             dtype=torch.bfloat16,
-            disable_mmap=args.disable_numpy_memmap,
+            disable_numpy_memmap=args.disable_numpy_memmap,
             nvfp4_scaled_mm=args.nvfp4_scaled_mm,
             blocks_to_swap=args.text_encoder_blocks_to_swap,
             attn_mode=args.text_encoder_attn_mode,
@@ -412,78 +410,41 @@ def _load_lora_state_dicts(args) -> list[dict]:
     return state_dicts
 
 
-def _merge_lora_weights(transformer, args) -> None:
-    weights = args.lora_weight or []
-    multipliers = args.lora_multiplier or []
-    includes = args.include_patterns or []
-    excludes = args.exclude_patterns or []
-    for index, path in enumerate(weights):
-        multiplier = multipliers[index] if index < len(multipliers) else 1.0
-        include = includes[index] if index < len(includes) else None
-        exclude = excludes[index] if index < len(excludes) else None
-        logger.info("Merging MiniMax-H3 LoRA %s with multiplier %s", path, multiplier)
-        state = filter_lora_state_dict(load_file(path), include, exclude)
-        network = lora_minimax_h3.create_arch_network_from_weights(
-            multiplier,
-            state,
-            unet=transformer,
-            for_inference=True,
-        )
-        if not network.unet_loras:
-            raise ValueError(f"MiniMax-H3 LoRA {path} contains no compatible target modules")
-        network.merge_to(None, transformer, state, dtype=torch.bfloat16, device="cpu")
-
-
-def _apply_lora_weights(transformer, args, device: torch.device) -> list[torch.nn.Module]:
-    """Attach LoRAs as runtime additive branches (pre-quantized INT8 bases).
-
-    The INT8 base tensors are never modified or requantized; each LoRA stays a separate
-    branch with its own multiplier for the sampling lifetime.
-    """
-    weights = args.lora_weight or []
-    multipliers = args.lora_multiplier or []
-    includes = args.include_patterns or []
-    excludes = args.exclude_patterns or []
-    networks = []
-    for index, path in enumerate(weights):
-        multiplier = multipliers[index] if index < len(multipliers) else 1.0
-        include = includes[index] if index < len(includes) else None
-        exclude = excludes[index] if index < len(excludes) else None
-        logger.info("Attaching MiniMax-H3 LoRA %s with multiplier %s", path, multiplier)
-        state = filter_lora_state_dict(load_file(path), include, exclude)
-        network = lora_minimax_h3.create_arch_network_from_weights(
-            multiplier,
-            state,
-            unet=transformer,
-            for_inference=True,
-        )
-        if not network.unet_loras:
-            raise ValueError(f"MiniMax-H3 LoRA {path} contains no compatible target modules")
-        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-        network.load_state_dict(state, strict=True)
-        network.eval().requires_grad_(False).to(device)
-        networks.append(network)
-    return networks
-
-
 def _configure_lora_weights(transformer, args, device: torch.device, *, prequantized: bool) -> list[torch.nn.Module]:
-    """Route LoRA application by base artifact.
+    """Route LoRA application by base artifact, through the shared inference helpers.
 
-    Pre-quantized INT8 bases get runtime additive branches; a BF16 base with
-    --convrot_int8 was already merged during the streaming load (no-op here); a plain
-    BF16 base gets the one-time destructive CPU merge. --lora_runtime_attach forces the
-    runtime-branch route on any base: merging rounds the fused weights to the base
-    storage grid (BF16 mantissa step, or the INT8 quantization grid), which silently
-    erases LoRAs whose per-element deltas sit below it -- small-magnitude adapters such
-    as teacher-matching LoRAs. The runtime branch keeps the LoRA in its own precision,
-    matching how it ran during training.
+    Pre-quantized INT8 bases get runtime additive branches (attach_lora_weights); a BF16
+    base with --convrot_int8 was already merged during the streaming load (no-op here); a
+    plain BF16 base gets the one-time destructive merge (merge_lora_weights: each weight is
+    fused on the accelerator and written back to the CPU-resident tensor).
+    --lora_runtime_attach forces the runtime-branch route on any base: merging rounds the
+    fused weights to the base storage grid (BF16 mantissa step, or the INT8 quantization
+    grid), which silently erases LoRAs whose per-element deltas sit below it --
+    small-magnitude adapters such as teacher-matching LoRAs. The runtime branch keeps the
+    LoRA in its own precision, matching how it ran during training.
     """
     if not args.lora_weight:
         return []
     if prequantized or args.lora_runtime_attach:
-        return _apply_lora_weights(transformer, args, device)
+        return attach_lora_weights(
+            lora_minimax_h3,
+            transformer,
+            args.lora_weight,
+            args.lora_multiplier,
+            args.include_patterns,
+            args.exclude_patterns,
+            device,
+        )
     if not args.convrot_int8:
-        _merge_lora_weights(transformer, args)
+        merge_lora_weights(
+            lora_minimax_h3,
+            transformer,
+            args.lora_weight,
+            args.lora_multiplier,
+            args.include_patterns,
+            args.exclude_patterns,
+            device,
+        )
     return []
 
 
@@ -492,7 +453,7 @@ def _load_transformer(args: argparse.Namespace, device: torch.device) -> tuple[t
     # - BF16 base + --convrot_int8: merge into BF16 during the streaming load, then quantize.
     # - Pre-quantized INT8 base (auto-detected): attach LoRAs as runtime additive branches;
     #   the INT8 tensors cannot be merged into.
-    # - Plain BF16 base: one-time destructive CPU merge after loading (fastest inference).
+    # - Plain BF16 base: one-time destructive merge after loading (fastest inference).
     # --lora_runtime_attach overrides the two merge routes with runtime branches, for
     # small-magnitude LoRAs whose deltas would be rounded away by the merge.
     prequantized = has_comfy_quant_tensors(resolve_safetensors_files(args.dit), disable_numpy_memmap=args.disable_numpy_memmap)
@@ -507,7 +468,7 @@ def _load_transformer(args: argparse.Namespace, device: torch.device) -> tuple[t
         dtype=torch.bfloat16,
         attn_mode="torch" if args.attn_mode == "sdpa" else args.attn_mode,
         split_attn=args.split_attn,
-        disable_mmap=args.disable_numpy_memmap,
+        disable_numpy_memmap=args.disable_numpy_memmap,
         convrot_int8=args.convrot_int8,
         quant_device=device,
         lora_weights=lora_weights,
@@ -703,8 +664,13 @@ def _decode_and_save(
                     write_image(decoded_video_to_uint8(step_video, frame_limit=1)[0], step_path)
                 else:
                     step_path = trajectory_dir / f"{step_stem}.mp4"
-                    write_video_only(
-                        decoded_video_to_uint8(step_video, frame_limit=args.frame_count), step_path, fps=args.output_fps
+                    # silent per-step dump through the shared saver ([1,3,F,H,W] in [-1,1])
+                    save_videos_grid(
+                        step_video[:, :, : args.frame_count].float(),
+                        str(step_path),
+                        rescale=True,
+                        fps=args.output_fps,
+                        crf=H3_VIDEO_CRF,
                     )
                 del step_video
                 clean_memory_on_device(device)

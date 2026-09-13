@@ -3,13 +3,12 @@ import logging
 import os
 
 import torch
-from safetensors.torch import load_file
 
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.sampler_configs import PRESETS
 from musubi_tuner.networks import lora_ideogram4
 from musubi_tuner.utils.device_utils import clean_memory_on_device
-from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.lora_utils import attach_lora_weights
 from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
@@ -64,31 +63,6 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="disable numpy memmap while loading safetensors")
     parser.add_argument("--warn_on_caption_issues", action="store_true", help="warn instead of failing on caption verifier issues")
     return parser
-
-
-def _apply_lora_weights(transformer, args, device):
-    """Apply one or more LoRA weights to the conditional DiT as non-merged forward hooks.
-
-    Ideogram 4's DiT is a frozen pre-quantized FP8 base that cannot have LoRA merged into it
-    (re-quantizing the merged delta would weaken it), so we attach the LoRA via apply_to like
-    the training-time sampler does. Multiple LoRAs stack (each wraps the previous forward).
-    """
-    multipliers = args.lora_multiplier or []
-    includes = args.include_patterns or []
-    excludes = args.exclude_patterns or []
-    for i, lora_weight in enumerate(args.lora_weight):
-        multiplier = multipliers[i] if i < len(multipliers) else 1.0
-        include = includes[i] if i < len(includes) else None
-        exclude = excludes[i] if i < len(excludes) else None
-        logger.info(f"Loading LoRA from {lora_weight} (multiplier={multiplier})")
-        weights_sd = load_file(lora_weight)
-        weights_sd = filter_lora_state_dict(weights_sd, include, exclude)
-        network = lora_ideogram4.create_arch_network_from_weights(multiplier, weights_sd, unet=transformer, for_inference=True)
-        network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-        info = network.load_state_dict(weights_sd, strict=True)
-        logger.info(f"Applied LoRA: {info}")
-        network.eval()
-        network.to(device)
 
 
 def _save_images(images, save_path: str):
@@ -148,8 +122,18 @@ def main():
         attn_mode=attn_mode,
         split_attn=args.split_attn,
     )
-    if args.lora_weight:
-        _apply_lora_weights(conditional_transformer, args, device)
+    # Ideogram 4's DiT is a frozen pre-quantized FP8 base that cannot have LoRA merged into it
+    # (re-quantizing the merged delta would weaken it), so the LoRAs stay runtime branches like
+    # in the training-time sampler (the patched forwards keep the LoRA modules alive)
+    attach_lora_weights(
+        lora_ideogram4,
+        conditional_transformer,
+        args.lora_weight,
+        args.lora_multiplier,
+        args.include_patterns,
+        args.exclude_patterns,
+        device,
+    )
     unconditional_transformer = None
     if args.unconditional_dit:
         logger.info("Loading unconditional DiT")

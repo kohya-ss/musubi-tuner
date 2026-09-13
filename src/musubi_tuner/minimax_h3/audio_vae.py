@@ -452,7 +452,7 @@ def load_audio_vae(
     path,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = torch.float32,
-    disable_mmap: bool = False,
+    disable_numpy_memmap: bool = False,
 ) -> MiniMaxH3AudioVAE:
     from accelerate import init_empty_weights
 
@@ -463,7 +463,7 @@ def load_audio_vae(
         vae = MiniMaxH3AudioVAE()
     # loading straight to the target device avoids a resident full-model CPU copy
     device = torch.device(device)
-    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap)
     sd = strip_key_prefixes(sd, ("audio_vae.", "vae."))
     for key in sd.keys():
         if sd[key].is_floating_point():
