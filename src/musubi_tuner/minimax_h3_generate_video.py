@@ -466,7 +466,7 @@ def _load_transformer(args: argparse.Namespace, device: torch.device) -> tuple[t
         args.dit,
         device="cpu" if load_on_cpu else device,
         dtype=torch.bfloat16,
-        attn_mode="torch" if args.attn_mode == "sdpa" else args.attn_mode,
+        attn_mode=args.attn_mode,
         split_attn=args.split_attn,
         disable_numpy_memmap=args.disable_numpy_memmap,
         convrot_int8=args.convrot_int8,

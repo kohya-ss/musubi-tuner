@@ -424,7 +424,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.inner_dim = num_heads * head_dim
-        self.attn_mode = "torch" if attn_mode == "sdpa" else attn_mode
+        self.attn_mode = attn_mode
         self.split_attn = split_attn
         self.qkv_proj = nn.Linear(hidden_size, self.inner_dim * 3, bias=False, dtype=dtype, device=device)
         self.q_norm = nn.RMSNorm(head_dim, eps=qk_norm_eps, dtype=dtype, device=device)

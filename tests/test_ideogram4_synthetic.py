@@ -631,7 +631,7 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
         args = parser.parse_args(base + ["--attn_mode", "flash", "--split_attn"])
         self.assertEqual(args.attn_mode, "flash")
         self.assertTrue(args.split_attn)
-        # "sdpa" is accepted as a choice (normalized to "torch" inside main()).
+        # "sdpa" is accepted as a choice (the shared attention dispatcher treats it as "torch").
         args_sdpa = parser.parse_args(base + ["--attn_mode", "sdpa"])
         self.assertEqual(args_sdpa.attn_mode, "sdpa")
 
