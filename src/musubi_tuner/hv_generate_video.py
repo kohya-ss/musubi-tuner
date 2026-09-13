@@ -652,8 +652,6 @@ def main():
         loading_device = "cpu"  # if blocks_to_swap > 0 else device
 
         logger.info(f"Loading DiT model from {args.dit}")
-        if args.attn_mode == "sdpa":
-            args.attn_mode = "torch"
 
         # if image_latents is given, the model should be I2V model, so the in_channels should be 32
         dit_in_channels = args.dit_in_channels if args.dit_in_channels is not None else (32 if image_latents is not None else 16)
