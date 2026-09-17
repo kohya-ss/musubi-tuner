@@ -192,7 +192,9 @@ def process_images(args):
         prompt = DEFAULT_PROMPT
 
     # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
+    device = torch.device(device)
+
     logger.info(f"Using device: {device}")
     logger.info(f"Output format: {args.output_format}")
     if args.fp8_vl:
