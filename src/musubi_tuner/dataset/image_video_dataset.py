@@ -566,6 +566,16 @@ class ImageDataset(BaseDataset):
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
+        # when a JSONL datasource is used, restrict to items it actually declares; without this,
+        # a shared cache directory leaks files from other splits (e.g. validation) into training
+        valid_basenames = None
+        if isinstance(self.datasource, ImageJsonlDatasource):
+            valid_basenames = set()
+            for item in self.datasource.data:
+                path = item.get("image_path") or item.get("image_path_0")
+                if path:
+                    valid_basenames.add(os.path.splitext(os.path.basename(path))[0])
+
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
@@ -577,6 +587,8 @@ class ImageDataset(BaseDataset):
             image_size = (image_width, image_height)
 
             item_key = "_".join(tokens[:-2])
+            if valid_basenames is not None and item_key not in valid_basenames:
+                continue
             text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
@@ -971,6 +983,12 @@ class VideoDataset(BaseDataset):
         # glob cache files
         latent_cache_files = glob.glob(os.path.join(self.cache_directory, f"*_{self.architecture}.safetensors"))
 
+        # when a JSONL datasource is used, restrict to items it actually declares; without this,
+        # a shared cache directory leaks files from other splits (e.g. validation) into training
+        valid_basenames = None
+        if isinstance(self.datasource, VideoJsonlDatasource):
+            valid_basenames = {os.path.splitext(os.path.basename(item["video_path"]))[0] for item in self.datasource.data}
+
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
         for cache_file in latent_cache_files:
@@ -984,6 +1002,8 @@ class VideoDataset(BaseDataset):
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])
+            if valid_basenames is not None and item_key not in valid_basenames:
+                continue
             if self.architecture == ARCHITECTURE_MINIMAX_H3:
                 text_item_key = f"{item_key}_{tokens[-3]}"
             else:
