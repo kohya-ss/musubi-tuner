@@ -24,8 +24,15 @@ swizzled layout directly, the dequantizing fallback unswizzles on the fly) and
 ``.weight_scale_2`` becomes ``.nvfp4_scale``; the embedding scale becomes
 ``.scale_weight`` (same dequant semantics as the ConvRot INT8 layout).
 
-Inference only: NVFP4 modules are frozen, the patched forwards have no autograd
-support. Dynamic (on-the-fly) NVFP4 quantization is deliberately not offered — the
+The base NVFP4 weights are always frozen. Inference uses W4A4 with no autograd; training
+adds a ``grad_x``-only backward through ``NvFp4LinearFn`` (see
+``quantize_nvfp4_weight_columnwise``). No weight gradient is produced for the base, so only
+the adapter on top trains.
+
+The NVFP4 GEMMs follow arXiv:2509.25149 Appendix B: an FP32 per-tensor decode scale plus
+F8_E4M3 global-normalized per-16-block decode scales.
+
+Dynamic (on-the-fly) NVFP4 quantization is deliberately not offered — the
 published artifacts are AWQ-calibrated, which cannot be reproduced without
 calibration data, and dynamically quantizing BF16 weights would silently produce a
 lower-quality model than ConvRot INT8.
@@ -54,6 +61,14 @@ from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen, Tensor
 logger = logging.getLogger(__name__)
 
 NVFP4_BLOCK_SIZE = 16
+
+# torch.nn.functional.scaled_mm's NVFP4 recipe treats the operands as float4_e2m1fn_x2 (two FP4
+# values per byte) and checks that the packed contraction dimension is a multiple of 16. For a
+# weight [N, K] that means the forward needs K % 32 == 0, and the columnwise backward weight
+# [K, N] needs N % 32 == 0. The 1x16 block-scale format itself only requires K % 16 == 0, so the
+# loader accepts more than scaled_mm can execute; apply_nvfp4_monkey_patch enforces the extra
+# alignment up front (verified empirically: K=48 raises CUBLAS_STATUS_NOT_SUPPORTED at runtime).
+NVFP4_SCALED_MM_ALIGN = 32
 
 F4_E2M1_MAX = 6.0
 F8_E4M3_MAX = 448.0
@@ -261,6 +276,10 @@ def _quantize_nvfp4_2d_prepare(
     lets a caller quantize row-chunks of a larger tensor against one shared, tensor-wide scale
     (see ``_quantize_nvfp4_2d_chunked``), which keeps the chunked result numerically identical
     to calling this function once on the whole tensor.
+
+    Naming: ``per_tensor_scale`` is the FP32 decode scale ``amax / (448*6)`` (the paper's
+    ``s_dec``), matching the value ``scaled_mm`` multiplies back in. An all-zero tensor is the
+    only special case: the scale is 0 and every value quantizes to 0.
     """
     orig_rows, cols = x.shape
     if cols % NVFP4_BLOCK_SIZE != 0:
@@ -274,7 +293,15 @@ def _quantize_nvfp4_2d_prepare(
 
     blocks = x.reshape(padded_rows, -1, NVFP4_BLOCK_SIZE)
     block_scale = torch.amax(blocks.abs(), dim=-1).float() / F4_E2M1_MAX
-    scaled = torch.clamp(block_scale / torch.clamp(per_tensor_scale, min=torch.finfo(torch.float32).tiny), max=F8_E4M3_MAX)
+    # Normalize by the *actual* per-tensor decode scale -- the same value returned to the
+    # caller and multiplied back in by scaled_mm. Only the exact-zero case needs a guard: 
+    # flooring the divisor (previously min=torch.finfo(torch.float32).tiny) made this encode
+    # normalizer and `total` below disagree whenever per_tensor_scale was subnormal, so the
+    # round trip decoded a different value than was encoded.
+    per_tensor_is_zero = per_tensor_scale == 0
+    per_tensor_safe = torch.where(per_tensor_is_zero, torch.ones_like(per_tensor_scale), per_tensor_scale)
+    scaled = torch.where(per_tensor_is_zero, torch.zeros_like(block_scale), block_scale / per_tensor_safe)
+    scaled = torch.clamp(scaled, max=F8_E4M3_MAX)
     scaled_f8 = scaled.to(torch.float8_e4m3fn)
     total = per_tensor_scale * scaled_f8.float()
     total_safe = torch.where(total == 0, torch.ones_like(total), total)
@@ -395,8 +422,7 @@ def quantize_nvfp4_activation_stochastic(x: torch.Tensor) -> Tuple[torch.Tensor,
     Dispatches to the fused Triton kernel (nvfp4_kernels.triton_quantize_nvfp4_stochastic) when
     available, mirroring quantize_nvfp4_activation's dispatch -- unlike the unchunked eager
     fallback below, the kernel never materializes _e2m1_stochastic_code's full-size temporaries,
-    which is what made the eager path OOM-prone for a large grad_out batch (see
-    docs/superpowers/plans/2026-09-02-nvfp4-stochastic-backward-kernel.md). Falls back to the
+    which is what made the eager path OOM-prone for a large grad_out batch. Falls back to the
     eager path (unchunked, matching quantize_nvfp4_activation's own Triton-unavailable fallback)
     when Triton is not importable.
     """
@@ -440,6 +466,15 @@ def quantize_nvfp4_weight_columnwise(
     Quantizes in ``chunk_rows``-sized row chunks of the transposed weight (see
     ``_quantize_nvfp4_2d_chunked``) to bound the transient GPU memory peak instead of
     materializing all of ``_f32_to_e2m1_unpacked``'s temporaries for the full weight at once.
+
+    The backward GEMM contracts over out_features, so this weight is quantized a second time
+    grouped along that axis. Forward and backward therefore see two slightly different
+    quantizations of the same weight -- the trade-off the paper calls "1x16 scales along
+    different dimensions" (arXiv:2509.25149 Fig. 14). That is acceptable here because the base
+    weights are frozen: only ``grad_x`` is affected, not any weight update.
+
+    Requires ``out_features % 32 == 0``: scaled_mm's packed contraction dimension must be
+    16-aligned.
     """
     n, k = orig_shape
     if n % NVFP4_BLOCK_SIZE != 0:
@@ -515,6 +550,7 @@ class NvFp4LinearFn(torch.autograd.Function):
         orig_out_features,
         orig_in_features,
     ):
+        bias_needs_grad = bias is not None and bias.requires_grad
         if torch.is_autocast_enabled(x.device.type):
             cast_dtype = torch.get_autocast_dtype(x.device.type)
             x = x.to(cast_dtype)
@@ -525,7 +561,10 @@ class NvFp4LinearFn(torch.autograd.Function):
         ctx.save_for_backward(weight_t_packed, block_scale_t, tensor_scale_t)
         ctx.in_features = x.shape[-1]
         ctx.orig_in_features = orig_in_features
-        ctx.bias_needs_grad = bias is not None and bias.requires_grad
+        # Read from the ORIGINAL bias (captured above), before the cast: casting a
+        # dtype-mismatched bias allocates a fresh leaf with requires_grad=False, which would
+        # silently drop grad_bias.
+        ctx.bias_needs_grad = bias_needs_grad
         return out.reshape(*x.shape[:-1], out.shape[-1])
 
     @staticmethod
@@ -775,14 +814,25 @@ def nvfp4_linear_forward_patch(self: nn.Linear, x: torch.Tensor) -> torch.Tensor
     pre_quant_scale = getattr(self, "pre_quant_scale", None)
     if pre_quant_scale is not None:
         x = x * pre_quant_scale
+    # F.linear casts its inputs to the autocast dtype under autocast; the fused kernel bypasses
+    # F.linear, so replicate that here -- mirrors ConvRotInt8LinearFn.forward. In K2 the fp32
+    # modulation adds promote activations to fp32, and scaled_mm rejects a Float32 output when
+    # a bias is present; without this cast the inference path can also run fp32 (defeating W4A4)
+    # and diverge from the trainer's in-training sampler, whose autograd patch does cast.
+    bias = self.bias
+    if torch.is_autocast_enabled(x.device.type):
+        cast_dtype = torch.get_autocast_dtype(x.device.type)
+        x = x.to(cast_dtype)
+        if bias is not None:
+            bias = bias.to(cast_dtype)
     if self._nvfp4_use_scaled_mm:
         x_2d = x.reshape(-1, x.shape[-1])
         out = nvfp4_scaled_mm_linear(
-            x_2d, self.weight, self.nvfp4_block_scale, self.nvfp4_scale, self.bias, self._nvfp4_orig_shape[0]
+            x_2d, self.weight, self.nvfp4_block_scale, self.nvfp4_scale, bias, self._nvfp4_orig_shape[0]
         )
         return out.reshape(*x.shape[:-1], out.shape[-1])
     weight = dequantize_nvfp4(self.weight, self.nvfp4_block_scale, self.nvfp4_scale, self._nvfp4_orig_shape, x.dtype)
-    return F.linear(x, weight, self.bias)
+    return F.linear(x, weight, bias)
 
 
 def nvfp4_linear_forward_patch_autograd(self: nn.Linear, x: torch.Tensor) -> torch.Tensor:
@@ -868,6 +918,19 @@ def apply_nvfp4_monkey_patch(
         module = modules_by_name.get(name)
         if not isinstance(module, nn.Linear):
             raise ValueError(f"NVFP4 state dict declares {name}, which is not an nn.Linear in the model")
+        if use_scaled_mm and in_features % NVFP4_SCALED_MM_ALIGN != 0:
+            raise ValueError(
+                f"NVFP4 scaled_mm requires in_features to be a multiple of {NVFP4_SCALED_MM_ALIGN}"
+                f" (the FP4 packed contraction dimension must be 16-aligned), but {name} has"
+                f" in_features={in_features}. Load this checkpoint with the dequantize fallback"
+                f" (omit the scaled_mm option) instead."
+            )
+        if use_scaled_mm and training and out_features % NVFP4_SCALED_MM_ALIGN != 0:
+            raise ValueError(
+                f"NVFP4 training requires out_features to be a multiple of {NVFP4_SCALED_MM_ALIGN}"
+                f" (the columnwise backward weight packs out_features/2 and must be 16-aligned),"
+                f" but {name} has out_features={out_features}."
+            )
         weight_key = name + ".weight"
         module.weight = nn.Parameter(torch.empty_like(optimized_state_dict[weight_key], device="meta"), requires_grad=False)
         module.register_buffer(

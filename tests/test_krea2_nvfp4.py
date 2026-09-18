@@ -235,3 +235,21 @@ def test_handle_model_specific_args_rejects_nvfp4_without_scaled_mm_support(monk
     args = _base_args(nvfp4=True)
     with pytest.raises(ValueError, match="PyTorch 2.10"):
         trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_rejects_nvfp4_with_base_weights(monkeypatch):
+    """--base_weights LoRAs are merged into the base weights at load time; the packed NVFP4
+    [N, K/2] weight has no room for a full-precision delta, so the combination must be
+    rejected up front rather than failing with an opaque shape error mid-merge."""
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, base_weights=["some_lora.safetensors"])
+    with pytest.raises(ValueError, match="base_weights"):
+        trainer.handle_model_specific_args(args)
+
+
+def test_handle_model_specific_args_allows_nvfp4_without_base_weights(monkeypatch):
+    monkeypatch.setattr(krea2_train_network, "nvfp4_scaled_mm_available", lambda: True)
+    trainer = Krea2NetworkTrainer()
+    args = _base_args(nvfp4=True, base_weights=None)
+    trainer.handle_model_specific_args(args)  # must not raise

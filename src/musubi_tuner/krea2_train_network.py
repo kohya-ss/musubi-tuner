@@ -76,6 +76,15 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # whole DiT (incl. norms) to fp8, which breaks. Require --fp8_scaled with --fp8_base.
         if args.fp8_base and not args.fp8_scaled:
             raise ValueError("Krea 2 fp8 supports only scaled fp8: pass --fp8_scaled together with --fp8_base.")
+        # A pre-quantized NVFP4 base cannot absorb --base_weights LoRA deltas: the packed
+        # [N, K/2] weight has no full-precision counterpart to merge into, so reject the
+        # combination here instead of failing with an opaque shape error mid-merge.
+        if args.nvfp4 and getattr(args, "base_weights", None):
+            raise ValueError(
+                "--nvfp4 cannot be combined with --base_weights: the pre-quantized NVFP4 base weights"
+                " cannot be merged with LoRA deltas at load time. Train against the original BF16 base"
+                " weights instead, or drop --base_weights."
+            )
         # ConvRot int8 is an alternative base-weight quantization; one quantization at a time.
         device_capability = torch.cuda.get_device_capability() if torch.cuda.is_available() else None
         krea2_utils.validate_krea2_quantization_args(

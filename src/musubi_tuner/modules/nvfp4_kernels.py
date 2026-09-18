@@ -12,15 +12,13 @@ INT8 quantize into one kernel. If Triton isn't importable (HAS_TRITON is False),
 back to nvfp4_utils._quantize_nvfp4_2d's original unfused implementation -- this module never
 changes quantize_nvfp4_activation's signature or return contract, only its internal dispatch.
 
-The E2M1 bit-conversion constants below are ported from nvfp4_utils._f32_to_e2m1_unpacked
-with ebits=2, mbits=1 fixed (E2M1 is the only format this kernel handles). Verified against
-that reference by tests/test_nvfp4_kernels.py: bit-exact for small/edge-case inputs, and at
-real Krea2 tensor sizes matching to within a documented, bounded rounding-tie tolerance (an
-input value a few ULPs from an exact rounding boundary can land on opposite sides of it
-between Triton's in-kernel fp32 arithmetic and PyTorch/ATen's eager ops -- an unavoidable
-floating-point divergence between two independently-ordered implementations, not a logic
-bug; see the test file's _compare helper for the adjacency check that distinguishes this
-from an actual decoding error).
+The E2M1 bit-conversion constants below are ported from
+nvfp4_utils._f32_to_e2m1_unpacked (ebits=2, mbits=1). tests/test_nvfp4_kernels.py compares
+the two implementations: they are bit-exact for fp32 inputs. For bf16/fp16 they can differ at
+E2M1 rounding ties, because Triton's `/` is approximate (up to ~2 ULP) -- about 5e-4 of packed
+bytes at bf16, always an adjacent E2M1 code with identical block scales. That is a benign
+rounding difference, not a decoding error. (tl.extra.libdevice.div_rn gives bit-exact parity
+if ever needed, at a few percent more kernel time.)
 """
 
 import struct
@@ -178,8 +176,10 @@ if HAS_TRITON:
         block_amax = tl.max(tl.maximum(tl.abs(x_high), tl.abs(x_low)), axis=1)  # [BLOCK_GROUPS]
         block_scale = block_amax / 6.0  # F4_E2M1_MAX
 
-        denom = tl.maximum(per_tensor_scale, 1.1754943508222875e-38)
-        scaled = tl.minimum(block_scale / denom, 448.0)  # F8_E4M3_MAX
+        per_tensor_is_zero = per_tensor_scale == 0.0
+        denom = tl.where(per_tensor_is_zero, 1.0, per_tensor_scale)
+        scaled = tl.where(per_tensor_is_zero, 0.0, block_scale / denom)
+        scaled = tl.minimum(scaled, 448.0)  # F8_E4M3_MAX
         scaled_f8 = scaled.to(tl.float8e4nv)
         scaled_f8_f32 = scaled_f8.to(tl.float32)
 
@@ -255,8 +255,10 @@ if HAS_TRITON:
         block_amax = tl.max(tl.maximum(tl.abs(x_high), tl.abs(x_low)), axis=1)  # [BLOCK_GROUPS]
         block_scale = block_amax / 6.0  # F4_E2M1_MAX
 
-        denom = tl.maximum(per_tensor_scale, 1.1754943508222875e-38)
-        scaled = tl.minimum(block_scale / denom, 448.0)  # F8_E4M3_MAX
+        per_tensor_is_zero = per_tensor_scale == 0.0
+        denom = tl.where(per_tensor_is_zero, 1.0, per_tensor_scale)
+        scaled = tl.where(per_tensor_is_zero, 0.0, block_scale / denom)
+        scaled = tl.minimum(scaled, 448.0)  # F8_E4M3_MAX
         scaled_f8 = scaled.to(tl.float8e4nv)
         scaled_f8_f32 = scaled_f8.to(tl.float32)
 
@@ -309,13 +311,20 @@ def triton_quantize_nvfp4(x: torch.Tensor, per_tensor_scale: torch.Tensor):
     test_nvfp4_kernels.py.
 
     Args:
-        x: fp32 [rows, K]. rows must already be a multiple of 16 and K a multiple of 16
-            (both invariants are enforced by the caller, quantize_nvfp4_activation).
+        x: [rows, K] tensor in the activation dtype (bf16/fp16/fp32). rows must already be a
+            multiple of 16 and K a multiple of 16 (both invariants are enforced by the caller,
+            quantize_nvfp4_activation). bf16/fp16 inputs are upcast to fp32 for the
+            normalize/clamp and bit-conversion steps; non-contiguous inputs are copied first
+            (the row kernel indexes x_ptr + row * K + col).
         per_tensor_scale: 0-dim fp32 tensor (already computed via torch.amax upstream).
 
     Returns:
         (packed uint8 [rows, K/2], swizzled block scale float8_e4m3fn).
     """
+    # The row kernel indexes x_ptr + row * K + col, which assumes row-major layout. A
+    # non-contiguous input (last-dim stride 1, row stride > K) would otherwise be silently
+    # quantized as a different tensor -- same guard as triton_quantize_nvfp4_stochastic.
+    x = x.contiguous()
     rows, k = x.shape
     n_groups = k // NVFP4_BLOCK_SIZE
     n_col_blocks = -(-n_groups // 4)
@@ -351,8 +360,9 @@ def triton_quantize_nvfp4_stochastic(x: torch.Tensor, per_tensor_scale: torch.Te
     draw independent randomness) -- see test_nvfp4_kernels.py.
 
     Args:
-        x: fp32 [rows, K]. rows must already be a multiple of 16 and K a multiple of 16
-            (both invariants are enforced by the caller, quantize_nvfp4_activation_stochastic).
+        x: [rows, K] tensor in the activation dtype (bf16/fp16/fp32). rows must already be a
+            multiple of 16 and K a multiple of 16 (both invariants are enforced by the caller,
+            quantize_nvfp4_activation_stochastic); non-contiguous inputs are copied first.
         per_tensor_scale: 0-dim fp32 tensor (already computed via torch.amax upstream).
         seed: int, varies per call so consecutive quantizations (e.g. consecutive backward
             steps) don't reuse the same random draws.

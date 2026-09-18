@@ -142,6 +142,30 @@ def test_fused_kernel_matches_eager_reference_zero_block():
 
 
 @requires_triton_cuda
+def test_fused_kernel_matches_eager_reference_non_contiguous():
+    """A non-contiguous 2D input (last-dim stride 1, row stride > K) must be quantized as the
+    same tensor. The row kernel indexes x_ptr + row * K + col, so triton_quantize_nvfp4 must
+    force contiguity the same way triton_quantize_nvfp4_stochastic does. Rows are a multiple of
+    16 so quantize_nvfp4_activation inserts no padding copy that would mask the bug."""
+    torch.manual_seed(4)
+    full = torch.randn(64, 512, device="cuda")
+    x = full[:, :256]  # view: shape (64, 256), stride (512, 1)
+    assert not x.is_contiguous()
+    assert x.stride() == (512, 1)
+    assert x.shape[0] % 16 == 0
+    _compare(x.float())
+
+
+@requires_triton_cuda
+def test_fused_kernel_matches_eager_reference_subnormal_per_tensor_scale():
+    """A tensor whose amax makes per_tensor_scale subnormal must round-trip identically to the
+    eager path: the kernel must normalize by the actual per-tensor scale, not floor the divisor."""
+    x = torch.zeros(16, 16, device="cuda", dtype=torch.float32)
+    x[0, 0] = 1e-35
+    _compare(x)
+
+
+@requires_triton_cuda
 def test_fused_kernel_matches_eager_reference_saturating_values():
     """Very large magnitudes force saturation to F4_E2M1_MAX (E2M1 code path) and
     F8_E4M3_MAX (block-scale cast path)."""

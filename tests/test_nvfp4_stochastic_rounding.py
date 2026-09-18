@@ -1,5 +1,4 @@
-"""Tests for NVFP4 stochastic-rounding E2M1 conversion (nvfp4_utils._e2m1_stochastic_code),
-per docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md.
+"""Tests for NVFP4 stochastic-rounding E2M1 conversion (nvfp4_utils._e2m1_stochastic_code).
 """
 
 import pytest
