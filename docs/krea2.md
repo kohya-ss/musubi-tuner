@@ -183,14 +183,14 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 
 - `--fp8_base` and `--fp8_scaled` reduce DiT memory usage. **Both must be specified together** (plain fp8 without scaled is rejected, because it would cast the norms to fp8 and break the model). fp8 is applied to the 28 main blocks only; the text-fusion transformer stays bf16.
 - `--blocks_to_swap N` offloads some of the main blocks to CPU. The maximum is **26** (28 blocks − 2).
-- `--gradient_checkpointing` is available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+- `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
 <summary>日本語</summary>
 
 - `--fp8_base`と`--fp8_scaled`でDiTのメモリ使用量を削減します。**両方を同時に指定する必要があります**（scaledなしのplain fp8は、normをfp8にキャストしてモデルを壊すため拒否されます）。fp8は28個のメインブロックのみに適用され、text-fusion transformerはbf16のまま保持されます。
 - `--blocks_to_swap N`で一部のメインブロックをCPUにオフロードします。最大値は **26**（28ブロック − 2）です。
-- メモリ節約のために`--gradient_checkpointing`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
+- メモリ節約のために`--gradient_checkpointing`と`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
 </details>
 
@@ -247,13 +247,16 @@ Requirements and constraints:
 - **Hardware:** a Blackwell GPU (compute capability 10.0+). Older GPUs get a clear error at startup instead of failing mid-training.
 - **PyTorch:** 2.10+.
 - **Mutually exclusive** with `--fp8_base`/`--fp8_scaled`/`--convrot_int8` (choose one quantization scheme) and with `--turbo_dit` (not yet supported together).
-- **No LoRA merge at load time** — pre-quantized NVFP4 weights can't be merged into. Attach LoRA as a separate trainable network via `--network_module` instead, same as the repo's normal LoRA training flow.
-- **Requires `--block_swap_h2d_only` when using `--blocks_to_swap`.** NVFP4 training keeps an extra backward-only copy of each frozen weight that the default block-swap offloader can't handle correctly; `--nvfp4 --blocks_to_swap N` without `--block_swap_h2d_only` is rejected at startup.
+- **No LoRA merge at load time** — pre-quantized NVFP4 weights can't be merged into, so `--base_weights` is rejected at startup. Attach LoRA as a separate trainable network via `--network_module` instead, same as the repo's normal LoRA training flow.
+- **Use `--mixed_precision bf16` or `fp16`.** `--mixed_precision no` (fp32) breaks the non-NVFP4 layers.
+- **Requires `--block_swap_h2d_only` when using `--blocks_to_swap`.** NVFP4 training keeps an extra backward-only copy of each frozen weight; the default offloader would keep that copy GPU-resident for every block, losing most of the memory saving. `--nvfp4 --blocks_to_swap N` without `--block_swap_h2d_only` is rejected at startup.
 - **`--nvfp4_columnwise_chunk_rows`** (default `1024`) bounds the memory used to build that extra copy at load time. Lower it (e.g. `256`-`512`) if loading OOMs on an unusually large model.
 
 **Standalone inference is supported.** `krea2_generate_image.py` accepts `--nvfp4` (and `--convrot_int8`) to load a pre-quantized checkpoint directly for sampling, without going through the trainer's sample-image loop. See the `--nvfp4` / `--convrot_int8` flags documented in the [Inference](#inference--推論) section below.
 
-**Performance note:** NVFP4's activation quantizer now dispatches to a fused Triton kernel (`modules/nvfp4_kernels.py`, falling back to a slower pure-PyTorch path when Triton/CUDA isn't available), which closed an earlier gap where NVFP4 measured slower than `--convrot_int8` despite its half bit-width. On real Krea2 Linear shapes, NVFP4 now beats `--convrot_int8` on both per-call time and peak memory.
+**Performance note:** NVFP4's activation quantizer dispatches to a fused Triton kernel (`modules/nvfp4_kernels.py`, falling back to a slower pure-PyTorch path without Triton/CUDA), which closed an earlier gap where NVFP4 measured slower than `--convrot_int8` despite its half bit-width. On real Krea2 Linear shapes, NVFP4 now beats `--convrot_int8` on both per-call time and peak memory.
+
+**Paper alignment (arXiv:2509.25149).** The two-level scaling and stochastic rounding follow the paper: FP32 per-tensor + E4M3 per-16-block scales, nearest rounding for weights and activations, stochastic rounding for the backward gradient input. Two techniques from the paper do not apply here. Random Hadamard transforms target the weight-gradient GEMM, which does not exist because the base is frozen. And the paper's 16x16 2D weight scaling would require re-quantizing the published checkpoint, so the backward instead uses a second 1x16 quantization grouped along the other axis; because nothing updates the frozen weights, that approximation affects only `grad_x`.
 
 <details>
 <summary>日本語</summary>
@@ -264,13 +267,16 @@ Requirements and constraints:
 - **ハードウェア:** Blackwell GPU（compute capability 10.0以上）が必要です。古いGPUでは、学習途中で失敗する代わりに起動時に明確なエラーが表示されます。
 - **PyTorch:** 2.10以降が必要です。
 - `--fp8_base`/`--fp8_scaled`/`--convrot_int8`とは**併用できません**（量子化方式は一つだけ選択してください）。`--turbo_dit`とも現時点では併用できません。
-- **ロード時のLoRAマージはできません**——事前量子化されたNVFP4の重みにはマージできないため、`--network_module`で別の学習可能ネットワークとしてLoRAをアタッチしてください（通常のLoRA学習フローと同様）。
-- **`--blocks_to_swap`使用時は`--block_swap_h2d_only`が必要です。** NVFP4学習では各frozen重みのbackward専用コピーを追加で保持しており、デフォルトのblock-swapオフローダーはこれを正しく扱えません。`--block_swap_h2d_only`を指定しない`--nvfp4 --blocks_to_swap N`は起動時に拒否されます。
+- **ロード時のLoRAマージはできません**——事前量子化されたNVFP4の重みにはマージできないため、`--base_weights`は起動時に拒否されます。`--network_module`で別の学習可能ネットワークとしてLoRAをアタッチしてください（通常のLoRA学習フローと同様）。
+- **`--mixed_precision`は`bf16`または`fp16`を使用してください。** `no`（fp32）はNVFP4以外のレイヤーで失敗します。
+- **`--blocks_to_swap`使用時は`--block_swap_h2d_only`が必要です。** NVFP4学習では各frozen重みのbackward専用コピーを追加で保持しており、デフォルトのオフローダーではこのコピーが全ブロックでGPUに常駐し、メモリ削減効果の大半が失われます。`--block_swap_h2d_only`を指定しない`--nvfp4 --blocks_to_swap N`は起動時に拒否されます。
 - **`--nvfp4_columnwise_chunk_rows`**（デフォルト`1024`）は、ロード時にこの追加コピーを構築する際のメモリ使用量を制限します。異常に大きなモデルでロードがOOMする場合は値を下げてください（例：`256`〜`512`）。
 
 **単体推論に対応しています。** `krea2_generate_image.py`は`--nvfp4`（および`--convrot_int8`）を受け付け、学習中のサンプル画像生成ループを経由せずに、事前量子化されたチェックポイントを直接読み込んでサンプリングできます。詳細は下記の[推論](#inference--推論)セクションの`--nvfp4` / `--convrot_int8`フラグの説明を参照してください。
 
 **パフォーマンスに関する注記:** NVFP4のactivation量子化処理は現在、融合Tritonカーネル（`modules/nvfp4_kernels.py`）にディスパッチされます（Triton/CUDAが利用できない環境では、より低速な純粋PyTorch経路にフォールバックします）。これにより、以前はビット幅が半分にもかかわらず`--convrot_int8`より遅かったギャップが解消されました。実際のKrea2 Linear形状では、NVFP4は1回あたりの処理時間・ピークメモリの両方で`--convrot_int8`を上回ります。
+
+**論文との対応（arXiv:2509.25149）。** 2段階スケーリングとstochastic roundingは論文に従っています（FP32 per-tensor + E4M3 per-16-blockスケール、重み・活性化は最近接丸め、逆伝播の勾配入力のみstochastic rounding）。論文の手法のうち2つはここでは適用外です。Random Hadamard変換は重み勾配GEMMが対象ですが、ベースがfrozenのため重み勾配GEMMが存在しません。また16x16の2D重みスケーリングは公開済みチェックポイントの再量子化が必要になるため、backwardは代わりに別軸で1x16量子化した重みを使います。ベースは更新されないため、この近似が影響するのは`grad_x`のみです。
 
 </details>
 
@@ -327,6 +333,16 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 
 > **`--turbo_dit` cannot be combined with `--blocks_to_swap`.** Turbo sampling swaps the base weights in place, which is only safe without the block-swap offloader. If you use block swap, omit `--turbo_dit` and sample on the RAW model instead.
 
+**Alternative: `--turbo_lora`.** Pass `--turbo_lora path/to/turbo_lora.safetensors` instead of
+`--turbo_dit` to compose a Turbo LoRA live on top of RAW (`base + trainee_delta + turbo_delta`)
+rather than swapping in a full Turbo checkpoint. `--turbo_lora_multiplier` (default `1.0`)
+scales its delta. Built once at startup; toggled on/off around each sample pass. Mutually
+exclusive with `--turbo_dit`. Cannot be combined with `--turbo_dit_cache` (that flag requires `--turbo_dit`).
+
+This LoRA is a rank-extracted delta between the released raw and turbo checkpoints, not an
+official Krea artifact — it approximates the turbo weights, which is why the Turbo schedule
+(fixed `mu = 1.15`, CFG off, low step count) still applies.
+
 <details>
 <summary>日本語</summary>
 
@@ -342,6 +358,16 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 - **`--turbo_dit_cache`（常駐）**: Turboの重みを起動時に一度量子化してCPU RAMに常駐させ、サンプルごとにスワップインします。**高速**ですが、実行中ずっと **DiTサイズの約1倍** のCPU RAMを追加で使用します。
 
 > **`--turbo_dit`は`--blocks_to_swap`と併用できません。** Turboサンプリングはベースの重みをその場で入れ替えるため、block swapのオフローダーがない場合にのみ安全です。block swapを使う場合は`--turbo_dit`を省略し、RAWモデルでサンプリングしてください。
+
+**代替手段: `--turbo_lora`。** `--turbo_dit`の代わりに`--turbo_lora path/to/turbo_lora.safetensors`
+を指定すると、フルのTurboチェックポイントを入れ替える代わりに、RAWの上でTurbo LoRAをライブ合成します
+（`base + trainee_delta + turbo_delta`）。`--turbo_lora_multiplier`（デフォルト`1.0`）でdeltaの強さを
+調整できます。起動時に一度だけ構築され、各サンプルパスの前後で有効/無効を切り替えます。`--turbo_dit`
+とは併用できません。`--turbo_dit_cache`（`--turbo_dit`が必須のオプション）との併用もできません。
+
+このLoRAは公開されているraw/turboチェックポイント間から抽出したランク近似deltaであり、Krea公式のLoRA
+ではありません——turboの重みを近似しているため、Turboのスケジュール（固定`mu = 1.15`、CFGオフ、少ない
+ステップ数）がそのまま適用されます。
 
 </details>
 

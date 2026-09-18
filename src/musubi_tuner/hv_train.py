@@ -730,6 +730,12 @@ class FineTuningTrainer:
         return noisy_model_input, timesteps
 
     def train(self, args):
+        # check required arguments
+        if args.output_dir is None:
+            raise ValueError("output_dir is required / output_dirが必要です")
+        if args.output_name is None:
+            raise ValueError("output_name is required / output_nameが必要です")
+
         if args.seed is None:
             args.seed = random.randint(0, 2**32)
         set_seed(args.seed)

@@ -60,6 +60,11 @@ def _make_quantizer() -> ConvRotInt8Quantizer:
 def _save_tiny_bf16_checkpoint(path, config: MiniMaxH3Config, seed: int = 0) -> dict:
     torch.manual_seed(seed)
     model = MiniMaxH3Model(config, dtype=torch.bfloat16)
+    with torch.no_grad():
+        # rope.inv_freq is a torch.empty buffer that only the checkpoint fills; give the
+        # synthetic checkpoint the published geometric bands so the forward is deterministic
+        bands = torch.arange(config.rope_inv_freq_len, dtype=torch.float32)
+        model.rope.inv_freq.copy_(10000.0 ** (-bands / config.rope_inv_freq_len))
     state = {key: value.contiguous() for key, value in model.state_dict().items()}
     save_file(state, str(path))
     return state
@@ -97,7 +102,7 @@ def _load_tiny_convrot(files, config: MiniMaxH3Config) -> MiniMaxH3Model:
         bwd_mode="bf16",
         attn_mode="torch",
         split_attn=False,
-        disable_mmap=False,
+        disable_numpy_memmap=False,
     )
 
 

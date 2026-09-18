@@ -1,6 +1,6 @@
 [project]
 name = "musubi-tuner"
-version = "0.3.4"
+version = "0.3.5"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
@@ -66,6 +66,8 @@ dev = [
   "matplotlib==3.10.0",
   "tensorboard",
   "prompt-toolkit==3.0.51",
+  # ruff 0.16.0 enabled many new lint rules by default, producing ~2000 new findings;
+  # pinned below 0.16 until those are triaged and resolved
   "ruff>=0.12.10,<0.16",
 ]
 
@@ -106,6 +108,14 @@ explicit = true
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
+
+[tool.pyright]
+# Type-check against the project's supported Python (matches requires-python) and
+# resolve third-party imports from the uv-managed virtualenv instead of whatever
+# system interpreter happens to be on PATH.
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff]
 line-length = 132

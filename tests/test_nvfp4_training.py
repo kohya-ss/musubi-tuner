@@ -95,6 +95,55 @@ def test_quantize_nvfp4_weight_columnwise_roundtrip_matches_rowwise_across_shape
     assert rel_err_between < 0.3
 
 
+@requires_nvfp4_scaled_mm
+def test_inference_forward_patch_casts_activations_under_autocast():
+    """The training=False forward patch must replicate F.linear's autocast behavior, like the
+    ConvRot INT8 and NVFP4 autograd paths do. In Krea2 the fp32 modulation params promote
+    activations to fp32; without the cast the layer runs fp32 and a quantized Linear with a
+    bias raises inside scaled_mm (out_dtype=Float32 + bias is unsupported)."""
+    n, k = 64, 32
+    torch.manual_seed(7)
+    w = torch.randn(n, k) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(w)
+
+    lin = nn.Linear(k, n, bias=True).cuda()
+    lin.weight = nn.Parameter(packed.cuda(), requires_grad=False)
+    lin.register_buffer("nvfp4_block_scale", block_scale.cuda())
+    lin.register_buffer("nvfp4_scale", tensor_scale.cuda())
+    lin._nvfp4_orig_shape = (n, k)
+    lin._nvfp4_use_scaled_mm = True
+    lin.forward = nvfp4_linear_forward_patch.__get__(lin, type(lin))
+
+    x = torch.randn(4, k, device="cuda", dtype=torch.float32)  # promoted activation (K2 fp32 mods)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out = lin(x)
+
+    assert out.dtype is torch.bfloat16
+
+
+@requires_nvfp4_scaled_mm
+@torch.amp.autocast("cuda", dtype=torch.bfloat16)
+def test_nvfp4_linear_fn_keeps_bias_gradient_when_casting_bias():
+    """NvFp4LinearFn.forward must decide `bias_needs_grad` from the *original* bias, before any
+    autocast cast. Casting a dtype-mismatched bias creates a fresh leaf with requires_grad=False,
+    so reading the cast tensor silently drops the bias gradient."""
+    n, k = 64, 32
+    torch.manual_seed(8)
+    w = torch.randn(n, k, device="cuda") * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(w)
+    packed_t, block_scale_t, tensor_scale_t = quantize_nvfp4_weight_columnwise(
+        packed, block_scale, tensor_scale, (n, k)
+    )
+
+    x = torch.randn(8, k, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32, requires_grad=True)
+    out = NvFp4LinearFn.apply(x, packed, block_scale, tensor_scale, packed_t, block_scale_t, tensor_scale_t, bias, n, k)
+    out.sum().backward()
+
+    assert bias.grad is not None, "bias gradient was dropped because ctx.bias_needs_grad read the cast bias"
+    assert torch.isfinite(bias.grad).all()
+
+
 def test_quantize_nvfp4_weight_columnwise_rejects_non_multiple_of_block_size():
     bad_n, k = 50, 32  # bad_n=50 is NOT a multiple of 16 -- this is what triggers the check
     _w, packed, block_scale, tensor_scale = _make_quantized_weight(64, k)
@@ -122,6 +171,31 @@ def test_quantize_nvfp4_2d_chunked_rejects_non_positive_chunk_rows():
         _quantize_nvfp4_2d_chunked(x, chunk_rows=0)
     with pytest.raises(ValueError, match="positive multiple of 128"):
         _quantize_nvfp4_2d_chunked(x, chunk_rows=-128)
+
+
+def test_quantize_nvfp4_2d_roundtrips_subnormal_per_tensor_scale():
+    """A tensor whose amax is small enough that per_tensor_scale is subnormal must still
+    round-trip. The block scale has to be normalized by the *actual* per-tensor decode scale,
+    the same value stored and later multiplied back in by scaled_mm -- an artificial floor on
+    the divisor (but not on `total`) made encode and decode disagree."""
+    x = torch.zeros(16, 16)
+    x[0, 0] = 1e-35  # per_tensor_scale = 1e-35/2688 ~= 3.7e-39, subnormal in fp32
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(x)
+    decoded = dequantize_nvfp4(packed, block_scale, tensor_scale, (16, 16), torch.float32)
+    assert tensor_scale.item() > 0
+    # Compare a ratio, not the raw value: pytest.approx's default abs tolerance (1e-12)
+    # would make an assertion on values around 1e-35 pass regardless of the result.
+    assert decoded[0, 0].item() / 1e-35 == pytest.approx(1.0, rel=0.02)
+
+
+def test_quantize_nvfp4_2d_all_zero_tensor_has_zero_scale_no_nan():
+    """The zero-tensor guard must still hold after removing the divisor floor."""
+    x = torch.zeros(16, 16)
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(x)
+    decoded = dequantize_nvfp4(packed, block_scale, tensor_scale, (16, 16), torch.float32)
+    assert tensor_scale.item() == 0.0
+    assert torch.equal(decoded, torch.zeros_like(decoded))
+    assert not torch.isnan(block_scale.float()).any()
 
 
 def _make_linear_fixture(n, k, m, device, bias=False, seed=0):
@@ -208,6 +282,70 @@ def _build_training_patched_model(tmp_path, n=64, k=32):
     model.requires_grad_(False)
     model.load_state_dict(state_dict, strict=True, assign=True)
     return model, weight
+
+
+def _build_patched_model_with_shape(tmp_path, n, k, training):
+    """Patch a single-Linear model whose real (out_features, in_features) is (n, k) -- lets a
+    test exercise shapes the fixed _TinyDiTBlock cannot."""
+    from safetensors.torch import save_file
+
+    torch.manual_seed(0)
+    weight = torch.randn(n, k) * 0.02
+    packed, block_scale, tensor_scale, _ = _quantize_nvfp4_2d(weight)
+    payload = torch.tensor(list(b'{"format":"nvfp4"}'), dtype=torch.uint8)
+    path = tmp_path / "artifact.safetensors"
+    save_file(
+        {
+            "proj.weight": packed,
+            "proj.weight_scale": block_scale,
+            "proj.weight_scale_2": tensor_scale,
+            "proj.comfy_quant": payload,
+        },
+        str(path),
+    )
+    quantizer = NvFp4Quantizer()
+    state_dict = quantizer.load_and_quantize([str(path)], None)
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(k, n, bias=False)
+
+        def forward(self, x):
+            return self.proj(x)
+
+    model = _Model()
+    apply_nvfp4_monkey_patch(
+        model,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=True,
+        training=training,
+    )
+    return model
+
+
+def test_apply_nvfp4_monkey_patch_rejects_in_features_not_multiple_of_32(tmp_path):
+    """scaled_mm's NVFP4 recipe requires the packed forward contraction dim (K/2) to be a
+    multiple of 16, i.e. K % 32 == 0. The loader only enforces the format's K % 16 == 0, so the
+    scaled_mm path must reject K % 32 != 0 up front instead of failing deep inside cublas."""
+    with pytest.raises(ValueError, match=".*32.*"):
+        _build_patched_model_with_shape(tmp_path, n=64, k=48, training=False)
+
+
+def test_apply_nvfp4_monkey_patch_rejects_out_features_not_multiple_of_32_when_training(tmp_path):
+    """The backward GEMM contracts over N (the columnwise-quantized weight's packed dim is
+    N/2), so training additionally requires out_features % 32 == 0."""
+    with pytest.raises(ValueError, match=".*32.*"):
+        _build_patched_model_with_shape(tmp_path, n=48, k=32, training=True)
+
+
+def test_apply_nvfp4_monkey_patch_allows_inference_with_out_features_not_multiple_of_32(tmp_path):
+    """Inference (training=False) only runs the forward GEMM, which needs K % 32 and N % 16 --
+    N % 32 must not be required there."""
+    model = _build_patched_model_with_shape(tmp_path, n=48, k=32, training=False)
+    assert model.proj._nvfp4_use_scaled_mm is True
 
 
 def test_training_patch_registers_columnwise_buffers():
@@ -518,8 +656,7 @@ def test_quantize_nvfp4_activation_stochastic_dispatches_to_triton_when_availabl
 @requires_nvfp4_scaled_mm
 def test_nvfp4_linear_fn_backward_uses_stochastic_rounding_for_grad_out(monkeypatch):
     """NvFp4LinearFn.backward must quantize grad_out via quantize_nvfp4_activation_stochastic,
-    not the deterministic quantize_nvfp4_activation -- per
-    docs/superpowers/specs/2026-09-01-nvfp4-dgrad-stochastic-rounding-design.md."""
+    not the deterministic quantize_nvfp4_activation."""
     from musubi_tuner.modules import nvfp4_utils
 
     torch.manual_seed(0)

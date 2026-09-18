@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -37,6 +38,17 @@ FRAME_RESCALE = 5.0 / 3.0
 
 H3ReferenceKind = Literal["image", "audio", "video"]
 H3SegmentKind = Literal["text", "visual_condition", "audio_condition", "target_audio", "target_video"]
+H3ConditionFamily = Literal["fl", "one_frame", "reference"]
+
+# Condition role vocabulary. A role names one condition block of a layout and, prefixed with
+# `latents_`, the cache/batch entry that carries its latent (see dataset/cache_io.py):
+# - the released video FL2VA anchors `first` / `last` (the name selects the anchor time)
+# - the ordered one-frame FL2VA slots `cond_{i:03d}` (times come from the control indices)
+# - the numbered Ref2VA reference rows `ref_{i:03d}_{image|video|audio}`
+FL_CONDITION_ROLES: tuple[str, ...] = ("first", "last")
+REFERENCE_KINDS: tuple[H3ReferenceKind, ...] = ("image", "video", "audio")
+_ONE_FRAME_CONDITION_ROLE = re.compile(r"^cond_(\d{3})$")
+_REFERENCE_CONDITION_ROLE = re.compile(r"^ref_(\d{3})_(image|video|audio)$")
 
 
 @dataclass(frozen=True)
@@ -85,6 +97,65 @@ class H3ReferenceGeometry:
                 expected = _expected_audio_frames(self.video.frames)
                 if self.audio_frames != expected:
                     raise ValueError(f"MiniMax-H3 reference video audio has {self.audio_frames} frames, expected {expected}")
+
+
+def one_frame_condition_role(index: int) -> str:
+    """Role of the index-th one-frame FL2VA visual condition (``cond_000``, ``cond_001``, ...).
+
+    One-frame conditions are placed by explicit time overrides, so unlike the released video
+    FL2VA roles (``first``/``last``, whose names select the anchor time) they are plain ordered
+    slots, any number of them; the text presentation numbers ``<Picture i>`` in the same order.
+    """
+    if index < 0:
+        raise ValueError(f"MiniMax-H3 one-frame condition index must be nonnegative, got {index}")
+    return f"cond_{index:03d}"
+
+
+def one_frame_condition_roles(count: int) -> tuple[str, ...]:
+    return tuple(one_frame_condition_role(index) for index in range(count))
+
+
+def reference_condition_role(index: int, kind: H3ReferenceKind) -> str:
+    """Role of the index-th Ref2VA reference's ``kind`` rows (``ref_000_image``, ``ref_001_audio``, ...).
+
+    A video reference with audio owns two roles (``_video`` and ``_audio``) under one index.
+    """
+    if index < 0:
+        raise ValueError(f"MiniMax-H3 reference index must be nonnegative, got {index}")
+    if kind not in REFERENCE_KINDS:
+        raise ValueError(f"Unsupported MiniMax-H3 reference kind: {kind}")
+    return f"ref_{index:03d}_{kind}"
+
+
+@dataclass(frozen=True)
+class H3ConditionRole:
+    """A parsed condition role name (see the vocabulary above).
+
+    ``index`` is the one-frame slot or reference number (None for the ``first``/``last``
+    anchors); ``reference_kind`` is the reference row type (None outside the reference family).
+    """
+
+    name: str
+    family: H3ConditionFamily
+    index: int | None = None
+    reference_kind: H3ReferenceKind | None = None
+
+    @property
+    def is_audio(self) -> bool:
+        return self.reference_kind == "audio"
+
+
+def parse_condition_role(role: str) -> H3ConditionRole:
+    """Parses a condition role name; raises ValueError for anything outside the vocabulary."""
+    if role in FL_CONDITION_ROLES:
+        return H3ConditionRole(role, "fl")
+    match = _ONE_FRAME_CONDITION_ROLE.fullmatch(role)
+    if match is not None:
+        return H3ConditionRole(role, "one_frame", index=int(match.group(1)))
+    match = _REFERENCE_CONDITION_ROLE.fullmatch(role)
+    if match is not None:
+        return H3ConditionRole(role, "reference", index=int(match.group(1)), reference_kind=match.group(2))
+    raise ValueError(f"Unsupported MiniMax-H3 condition role: {role}")
 
 
 @dataclass(frozen=True)
@@ -310,13 +381,20 @@ def build_h3_layout(
         if references:
             raise ValueError("MiniMax-H3 FL2VA layout requires exactly first and last visual conditions")
         if one_frame:
-            if not 1 <= len(visual_conditions) <= 2:
-                raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one or two visual conditions")
+            # ordered cond_{i} slots, any count, each placed by its own time override
+            if not visual_conditions:
+                raise ValueError("MiniMax-H3 one-frame FL2VA layout requires at least one visual condition")
             if time_overrides is None or len(time_overrides.condition_times) != len(visual_conditions):
                 raise ValueError("MiniMax-H3 one-frame FL2VA layout requires one condition time override per condition")
-        elif not 1 <= len(visual_conditions) <= 2:
-            raise ValueError("MiniMax-H3 FL2VA layout requires one or two visual conditions (first and/or last)")
-        roles = _fl_condition_roles(condition_roles, len(visual_conditions))
+            roles = one_frame_condition_roles(len(visual_conditions))
+            if condition_roles is not None and tuple(condition_roles) != roles:
+                raise ValueError(
+                    f"MiniMax-H3 one-frame FL2VA condition roles are the ordered {roles}, got {tuple(condition_roles)}"
+                )
+        else:
+            if not 1 <= len(visual_conditions) <= 2:
+                raise ValueError("MiniMax-H3 FL2VA layout requires one or two visual conditions (first and/or last)")
+            roles = _fl_condition_roles(condition_roles, len(visual_conditions))
         for role, condition in zip(roles, visual_conditions):
             if condition != H3VideoGeometry(1, target_video.height, target_video.width):
                 raise ValueError(f"MiniMax-H3 FL2VA {role} condition must be one target-sized latent frame, got {condition}")
@@ -345,15 +423,14 @@ def build_h3_layout(
             append(role, "visual_condition", condition.row_count)
     elif task == "ref2va":
         for index, reference in enumerate(references):
-            prefix = f"ref_{index:03d}"
             if reference.kind == "image":
-                append(f"{prefix}_image", "visual_condition", reference.video.row_count)
+                append(reference_condition_role(index, "image"), "visual_condition", reference.video.row_count)
             elif reference.kind == "audio":
-                append(f"{prefix}_audio", "audio_condition", reference.audio_frames * STEREO_CHANNELS)
+                append(reference_condition_role(index, "audio"), "audio_condition", reference.audio_frames * STEREO_CHANNELS)
             else:
                 if reference.audio_frames:
-                    append(f"{prefix}_audio", "audio_condition", reference.audio_frames * STEREO_CHANNELS)
-                append(f"{prefix}_video", "visual_condition", reference.video.row_count)
+                    append(reference_condition_role(index, "audio"), "audio_condition", reference.audio_frames * STEREO_CHANNELS)
+                append(reference_condition_role(index, "video"), "visual_condition", reference.video.row_count)
     append("target_audio", "target_audio", target_audio_frames * STEREO_CHANNELS)
     append("target_video", "target_video", target_video.row_count)
 
@@ -376,9 +453,9 @@ def _fl_condition_roles(condition_roles: Sequence[str] | None, condition_count: 
     if condition_roles is None:
         if condition_count != 2:
             raise ValueError("MiniMax-H3 FL2VA layout with a single condition requires explicit condition roles")
-        return ("first", "last")
+        return FL_CONDITION_ROLES
     roles = tuple(condition_roles)
-    if roles not in {("first",), ("last",), ("first", "last")}:
+    if roles not in {("first",), ("last",), FL_CONDITION_ROLES}:
         raise ValueError(f"MiniMax-H3 FL2VA condition roles must be first, last, or first+last in order, got {roles}")
     if len(roles) != condition_count:
         raise ValueError(f"MiniMax-H3 FL2VA layout has {condition_count} conditions for {len(roles)} roles")
@@ -446,28 +523,27 @@ def build_position_grid(layout: H3PackedLayout, *, device: torch.device | str | 
             positions[segment.row_slice, 1:] = target_frame
     elif layout.task == "ref2va":
         for index, reference in enumerate(layout.references):
-            prefix = f"ref_{index:03d}"
             if reference.kind == "image":
-                segment = layout.segment(f"{prefix}_image")
+                segment = layout.segment(reference_condition_role(index, "image"))
                 frame, _ = _frame_grid(reference.video)
                 positions[segment.row_slice, 0] = cursor
                 positions[segment.row_slice, 1:] = frame
                 cursor += 1.0
             elif reference.kind == "audio":
-                segment = layout.segment(f"{prefix}_audio")
+                segment = layout.segment(reference_condition_role(index, "audio"))
                 positions[segment.row_slice] = _audio_grid(cursor, reference.audio_frames, *target_width_endpoints)
                 cursor += float(reference.audio_frames)
             else:
                 frame, width = _frame_grid(reference.video)
                 if reference.audio_frames:
-                    audio = layout.segment(f"{prefix}_audio")
+                    audio = layout.segment(reference_condition_role(index, "audio"))
                     positions[audio.row_slice] = _audio_grid(
                         cursor,
                         reference.audio_frames,
                         float(width[0]),
                         float(width[-1]),
                     )
-                video = layout.segment(f"{prefix}_video")
+                video = layout.segment(reference_condition_role(index, "video"))
                 positions[video.row_slice] = _video_grid(reference.video, cursor)
                 cursor += max(float(reference.audio_frames), sum(_video_t_spans(reference.video.frames)))
 
@@ -495,7 +571,9 @@ def _single_model_time(value: float | torch.Tensor, label: str) -> float:
     return scalar
 
 
-def _validate_clean_coefficient(value: float, label: str) -> float:
+def validate_clean_coefficient(value: float, label: str) -> float:
+    """The condition-augmentation clean coefficient (clean*x + (1-clean)*eps) must lie in [0,1];
+    the timestep rows, the samplers and the CLIs all validate through here."""
     value = float(value)
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValueError(f"MiniMax-H3 {label} must be finite and in [0,1], got {value}")
@@ -525,8 +603,8 @@ def build_timestep_rows(
 ) -> H3TimestepRows:
     video_time = _single_model_time(model_t_video, "video model time")
     audio_time = _single_model_time(model_t_audio, "audio model time")
-    visual_clean = _validate_clean_coefficient(visual_condition_clean, "visual condition clean coefficient")
-    audio_clean = _validate_clean_coefficient(audio_condition_clean, "audio condition clean coefficient")
+    visual_clean = validate_clean_coefficient(visual_condition_clean, "visual condition clean coefficient")
+    audio_clean = validate_clean_coefficient(audio_condition_clean, "audio condition clean coefficient")
 
     text_token_tags = torch.as_tensor(text_token_tags)
     if text_token_tags.dtype != torch.int64 or text_token_tags.shape != (1, layout.text_length):

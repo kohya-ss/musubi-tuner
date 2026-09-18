@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from tqdm import tqdm
@@ -79,9 +79,13 @@ def process_text_encoder_batches(
     all_cache_paths_for_dataset: list[set],
     encode: callable,
     requires_content: Optional[bool] = False,
+    cache_is_current: Optional[Callable[[ItemInfo], bool]] = None,
 ):
     """
     Architecture independent processing of text encoder batches.
+
+    With skip_existing, an item whose cache file already exists is skipped; an architecture can
+    replace that test with `cache_is_current(item)` (e.g. to also compare cache metadata).
     """
 
     num_workers = num_workers if num_workers is not None else max(1, os.cpu_count() - 1)
@@ -103,9 +107,12 @@ def process_text_encoder_batches(
 
             # skip existing cache files
             if skip_existing:
-                filtered_batch = [
-                    item for item in batch if os.path.normpath(item.text_encoder_output_cache_path) not in all_cache_files
-                ]
+                if cache_is_current is None:
+                    filtered_batch = [
+                        item for item in batch if os.path.normpath(item.text_encoder_output_cache_path) not in all_cache_files
+                    ]
+                else:
+                    filtered_batch = [item for item in batch if not cache_is_current(item)]
                 # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
                 if len(filtered_batch) == 0:
                     continue

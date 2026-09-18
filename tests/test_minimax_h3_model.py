@@ -710,7 +710,7 @@ def test_bf16_loader_requires_exact_published_dtypes(tmp_path: Path):
             device="cpu",
             attn_mode="torch",
             split_attn=False,
-            disable_mmap=False,
+            disable_numpy_memmap=False,
         )
 
 
@@ -727,7 +727,7 @@ def test_bf16_loader_rejects_missing_rope_inv_freq(tmp_path: Path):
             device="cpu",
             attn_mode="torch",
             split_attn=False,
-            disable_mmap=False,
+            disable_numpy_memmap=False,
         )
 
 
@@ -746,7 +746,7 @@ def test_bf16_loader_rejects_stray_quantization_tensors(tmp_path: Path):
             device="cpu",
             attn_mode="torch",
             split_attn=False,
-            disable_mmap=False,
+            disable_numpy_memmap=False,
         )
 
 

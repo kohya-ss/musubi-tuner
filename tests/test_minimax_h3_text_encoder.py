@@ -1,3 +1,4 @@
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -25,12 +26,20 @@ from musubi_tuner.minimax_h3.text_encoder import (
     normalize_teacher_conditions,
     validate_text_rows,
     wrap_ref_teacher_caption,
+    wrap_subject_reference_caption,
 )
 
 try:
-    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import _ref_teacher_presentation, _text_cache_metadata
+    from musubi_tuner.minimax_h3_cache_text_encoder_outputs import (
+        _ref_teacher_presentation,
+        _reference_visuals,
+        _subject_ref_teacher_presentation,
+        _text_cache_metadata,
+    )
 except ImportError as error:
     _ref_teacher_presentation = None
+    _reference_visuals = None
+    _subject_ref_teacher_presentation = None
     _text_cache_metadata = None
     _text_cache_import_error = str(error)
 else:
@@ -42,7 +51,7 @@ def _record(tmp_path: Path, references=()) -> H3Record:
         video_path=tmp_path / "target.mp4",
         caption="A bright scene with clear sound.",
         references=tuple(references),
-        jsonl_line=1,
+        label="items.jsonl line 1",
     )
 
 
@@ -77,8 +86,22 @@ def test_fl2va_presentation_numbers_a_lone_picture_one_for_either_role(tmp_path:
         assert presentation.text == f"<Picture 1>: {IMAGE_PLACEHOLDER}{record.caption}"
         assert len(presentation.images) == 1
 
-    with pytest.raises(ValueError, match="at least one of the first and last"):
+    with pytest.raises(ValueError, match=r"first/last visuals \(video targets\) or the cond_\{i\}"):
         build_presentation(record, "fl2va", {})
+
+
+def test_one_frame_fl2va_presentation_numbers_the_cond_slots_in_order(tmp_path: Path):
+    record = _record(tmp_path)
+
+    # the same <Picture i> numbering as the released first/last builder, over the ordered cond_ slots
+    presentation = build_presentation(record, "fl2va", {"cond_002": _visual(1), "cond_000": _visual(1), "cond_001": _visual(1)})
+    assert presentation.text == "".join(f"<Picture {index}>: {IMAGE_PLACEHOLDER}" for index in (1, 2, 3)) + record.caption
+    assert len(presentation.images) == 3
+
+    with pytest.raises(ValueError, match="contiguous"):
+        build_presentation(record, "fl2va", {"cond_001": _visual(1)})
+    with pytest.raises(ValueError, match="cannot mix"):
+        build_presentation(record, "fl2va", {"first": _visual(1), "cond_000": _visual(1)})
 
 
 def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path: Path):
@@ -127,12 +150,95 @@ def test_ref2va_presentation_preserves_jsonl_order_and_timestamp_format(tmp_path
     ]
 
 
-def test_normalize_teacher_conditions_accepts_both_kinds_and_rejects_everything_else():
+def test_normalize_teacher_conditions_accepts_the_three_kinds_and_rejects_everything_else():
     assert normalize_teacher_conditions(" first , last ") == "first,last"
     assert normalize_teacher_conditions(" ref ") == "ref"
-    for invalid in ("first", "last,first", "ref,first", "reference", ""):
+    assert normalize_teacher_conditions(" subject_ref ") == "subject_ref"
+    for invalid in ("first", "last,first", "ref,first", "reference", "references", "subject_ref,ref", ""):
         with pytest.raises(ValueError, match="teacher conditions"):
             normalize_teacher_conditions(invalid)
+
+
+def test_wrap_subject_reference_caption_declares_one_subject_per_picture():
+    caption = "A waist-up still frame of the girl in a red kimono."
+
+    single = wrap_subject_reference_caption(caption, 1, still_image=True)
+    double = wrap_subject_reference_caption(caption, 2, still_image=False)
+
+    assert single.startswith("subject_definitions:\n<Subject 1> is the subject whose appearance comes from <Picture 1>")
+    assert "[reference generation] The target is a single still image with no motion, a static shot of <Subject 1>" in single
+    assert "<Subject 1> (appears in [Shot 1]): attribute_transfer" in single
+    assert "pose, framing, outfit and setting follow the description" in single
+    assert single.endswith(f"detailed_description:\n{caption}")
+    assert "<Subject 2> is the subject whose appearance comes from <Picture 2>" in double
+    assert "The target video shows <Subject 1> and <Subject 2> as described below." in double
+    assert "<Subject 2> (appears in [Shot 1]): attribute_transfer" in double
+    with pytest.raises(ValueError, match="at least one picture"):
+        wrap_subject_reference_caption(caption, 0, still_image=True)
+
+
+class _FakeReferenceDecoder:
+    def __init__(self):
+        self.calls = []
+
+    def decode_reference_visual(self, reference, *, target_frame_count, target_size):
+        self.calls.append((reference.path, target_frame_count, target_size))
+        return torch.zeros(1, 32, 32, 3)
+
+
+@pytest.mark.skipif(_subject_ref_teacher_presentation is None, reason="cache script import failed")
+def test_subject_ref_teacher_presentation_wraps_or_uses_the_teacher_caption(tmp_path: Path):
+    face = tmp_path / "face.png"
+    record = _record(tmp_path, (H3Reference(type="image", path=face),))
+    decoder = _FakeReferenceDecoder()
+
+    wrapped = _subject_ref_teacher_presentation(
+        record, reference_frame_cap=360, target_size=(64, 96), still_image=True, decoder=decoder, decoded_reference_cache={}
+    )
+    explicit = _subject_ref_teacher_presentation(
+        replace(
+            record,
+            teacher_caption="subject_definitions:\n<Subject 1> is the girl in <Picture 1>.\n\ndetailed_description:\nA still.",
+        ),
+        reference_frame_cap=360,
+        target_size=(64, 96),
+        still_image=True,
+        decoder=decoder,
+        decoded_reference_cache={},
+    )
+
+    expected_wrap = wrap_subject_reference_caption(record.caption, 1, still_image=True)
+    assert wrapped.text == f"<Picture 1>: {IMAGE_PLACEHOLDER}{expected_wrap}"
+    assert len(wrapped.images) == 1 and wrapped.videos == ()
+    assert (
+        explicit.text
+        == f"<Picture 1>: {IMAGE_PLACEHOLDER}subject_definitions:\n<Subject 1> is the girl in <Picture 1>.\n\ndetailed_description:\nA still."
+    )
+    assert decoder.calls == [(face, 360, (64, 96))] * 2
+    # the student presentation of the same record minus references is the plain caption
+    assert build_presentation(replace(record, references=()), "t2va").text == record.caption
+
+
+@pytest.mark.skipif(_subject_ref_teacher_presentation is None, reason="cache script import failed")
+@pytest.mark.parametrize(
+    ("references", "message"),
+    [
+        ((), "at least one image reference"),
+        ((H3Reference(type="video", path=Path("motion.mp4"), audio=None, duration_seconds=2.0),), "image references only"),
+    ],
+)
+def test_subject_ref_teacher_presentation_rejects_unsupported_references(tmp_path: Path, references, message):
+    record = _record(tmp_path, references)
+
+    with pytest.raises(ValueError, match=message):
+        _subject_ref_teacher_presentation(
+            record,
+            reference_frame_cap=360,
+            target_size=(64, 96),
+            still_image=True,
+            decoder=_FakeReferenceDecoder(),
+            decoded_reference_cache={},
+        )
 
 
 def test_wrap_ref_teacher_caption_prepends_the_copy_declaration_boilerplate():
@@ -175,6 +281,46 @@ def test_ref_teacher_presentation_wraps_the_caption_and_samples_the_target_crop(
     assert presentation.processor_text == f"<Audio 1>: <Video 1>: {VIDEO_PLACEHOLDER}{wrapped}"
     assert presentation.images == ()
     assert [tuple(video_block.shape) for video_block in presentation.videos] == [(3, 32, 32, 3)]
+
+
+@pytest.mark.skipif(_reference_visuals is None, reason="cache script import failed")
+def test_reference_visuals_follow_the_one_frame_reference_policy(tmp_path: Path):
+    # one-frame Ref2VA text caches decode references with the generation policy: images as a
+    # single frame capped to the target area, videos capped to the released span and sampled
+    # at 2 fps, both through the shared decoder cache keyed by that policy
+    image = tmp_path / "face.png"
+    video = tmp_path / "motion.mp4"
+    record = _record(
+        tmp_path,
+        (
+            H3Reference(type="image", path=image),
+            H3Reference(type="video", path=video, audio=None, duration_seconds=2.0),
+        ),
+    )
+
+    class FakeDecoder:
+        def __init__(self):
+            self.calls = []
+
+        def decode_reference_visual(self, reference, *, target_frame_count, target_size):
+            self.calls.append((reference.path, target_frame_count, target_size))
+            frames = 1 if reference.type == "image" else 29
+            return torch.zeros(frames, 32, 32, 3)
+
+    decoder = FakeDecoder()
+    cache = {}
+
+    visuals = _reference_visuals(record, 360, (64, 96), decoder, cache)
+    presentation = build_presentation(record, "ref2va", visuals)
+
+    assert decoder.calls == [(image, 360, (64, 96)), (video, 360, (64, 96))]
+    assert visuals[image].frames.shape == (1, 32, 32, 3)
+    assert visuals[video].frames.shape == (3, 32, 32, 3)
+    assert visuals[video].timestamps == (0.0, 0.5, 1.0)
+    assert presentation.text.startswith(f"<Picture 1>: {IMAGE_PLACEHOLDER}<Video 1>: <0.2 seconds>")
+    # a second item sharing the references reuses the decoded frames
+    _reference_visuals(record, 360, (64, 96), decoder, cache)
+    assert len(decoder.calls) == 2
 
 
 def test_token_tags_cover_expanded_vision_rows_and_both_flanking_tokens():

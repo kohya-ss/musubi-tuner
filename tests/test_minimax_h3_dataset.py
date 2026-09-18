@@ -1,6 +1,7 @@
 import inspect
 from pathlib import Path
 import pickle
+import re
 import sys
 from types import SimpleNamespace
 
@@ -34,7 +35,8 @@ def test_h3_documentation_does_not_ask_users_to_set_source_fps():
     documentation = (ROOT / "docs" / "minimax_h3.md").read_text(encoding="utf-8")
 
     assert "source_fps = " not in documentation
-    assert "`source_fps` is not needed" in documentation
+    # the guide states that the option is ignored (the exact wording may change)
+    assert re.search(r"`source_fps`[^.\n]*ignored", documentation)
 
 
 @pytest.mark.parametrize(
@@ -166,12 +168,11 @@ def _h3_image_dataset(tmp_path: Path, **overrides):
         ({"no_resize_control": True}, "no_resize_control"),
         ({"control_resolution": (512, 512)}, "control_resolution"),
         ({"fp_1f_target_index": -1}, "nonnegative"),
-        # time-annotated control validation: indices and controls must arrive together, with an
-        # explicit target index and 1..2 nonnegative entries
-        ({"control_directory": "controls"}, "require fp_1f_clean_indices"),
+        # time-annotated control validation: indices need controls, an explicit target index and
+        # 1..2 nonnegative entries (controls without indices are untimed references, accepted)
         ({"fp_1f_clean_indices": [0]}, "explicit fp_1f_target_index"),
         ({"fp_1f_clean_indices": [0], "fp_1f_target_index": 24}, "requires control images"),
-        ({"fp_1f_clean_indices": [0, 1, 2], "fp_1f_target_index": 24}, "1 or 2 entries"),
+        ({"fp_1f_clean_indices": [], "fp_1f_target_index": 24}, "at least one entry"),
         ({"fp_1f_clean_indices": [-1], "fp_1f_target_index": 24}, "nonnegative"),
     ],
 )
@@ -180,12 +181,27 @@ def test_h3_image_dataset_rejects_unsupported_one_frame_features(tmp_path: Path,
         _h3_image_dataset(tmp_path, **overrides)
 
 
-def test_h3_image_dataset_jsonl_control_paths_require_indices(tmp_path: Path):
+def test_h3_image_dataset_controls_without_indices_are_untimed_references_of_any_count(tmp_path: Path):
     jsonl = tmp_path / "items.jsonl"
-    jsonl.write_text('{"image_path": "target.png", "caption": "c", "control_path": "source.png"}\n', encoding="utf-8")
+    jsonl.write_text(
+        '{"image_path": "target.png", "caption": "c", "control_path_0": "char.png", "control_path_1": "pose.png", "control_path_2": "bg.png"}\n',
+        encoding="utf-8",
+    )
 
-    with pytest.raises(ValueError, match="require fp_1f_clean_indices"):
-        _h3_image_dataset(tmp_path, image_directory=None, image_jsonl_file=str(jsonl))
+    dataset = _h3_image_dataset(tmp_path, image_directory=None, image_jsonl_file=str(jsonl))
+
+    assert dataset.has_control
+    assert dataset.fp_1f_clean_indices is None
+    assert dataset.datasource.control_count_per_image is None
+    assert dataset.datasource.get_control_paths() == {"target.png": ["char.png", "pose.png", "bg.png"]}
+
+    # with indices the count is pinned to the indices (time-annotated FL2VA controls)
+    one = jsonl.with_name("one.jsonl")
+    one.write_text('{"image_path": "target.png", "caption": "c", "control_path": "char.png"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="do not have control paths"):
+        _h3_image_dataset(
+            tmp_path, image_directory=None, image_jsonl_file=str(one), fp_1f_clean_indices=[0, 48], fp_1f_target_index=24
+        )
 
 
 def test_h3_jsonl_datasource_exposes_control_paths_for_fingerprinting(tmp_path: Path):
@@ -354,3 +370,52 @@ def test_h3_training_sample_preserves_valid_frame_count(tmp_path: Path, monkeypa
     )
 
     assert captured["frame_count"] == 56
+
+
+def test_video_latent_cache_honours_enable_bucket(tmp_path: Path):
+    """A video dataset with bucketing off must cache at its single configured bucket.
+
+    ImageDataset.retrieve_latent_cache_batches and both prepare_for_training pass
+    enable_bucket / bucket_no_upscale to BucketSelector; the video caching path used
+    to build its selector with the defaults instead. A block asking for one bucket
+    therefore had its latents cached at an area-derived one, while get_metadata()
+    recorded enable_bucket: false either way.
+    """
+    dataset = VideoDataset(
+        resolution=(1792, 768),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=False,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    assert list(dataset.retrieve_latent_cache_batches(1)) == []
+
+    selector = dataset.datasource.bucket_selector
+    assert selector.bucket_resolutions == [(1792, 768)]
+    assert selector.get_bucket_resolution((3840, 1080)) == (1792, 768)
+
+
+def test_video_latent_cache_still_buckets_when_asked_to(tmp_path: Path):
+    """The other half of the contract: enable_bucket=True keeps the area search."""
+    dataset = VideoDataset(
+        resolution=(1792, 768),
+        caption_extension=".txt",
+        batch_size=1,
+        num_repeats=1,
+        enable_bucket=True,
+        bucket_no_upscale=False,
+        target_frames=[5],
+        video_directory=str(tmp_path),
+        cache_directory=str(tmp_path),
+        architecture=ARCHITECTURE_MINIMAX_H3,
+    )
+
+    assert list(dataset.retrieve_latent_cache_batches(1)) == []
+
+    assert len(dataset.datasource.bucket_selector.bucket_resolutions) > 1

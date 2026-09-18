@@ -32,7 +32,8 @@ import torch
 import torch.nn as nn
 
 from musubi_tuner.minimax_h3.checkpoint import resolve_safetensors_files
-from musubi_tuner.minimax_h3.media import H3Record, H3Task
+from musubi_tuner.minimax_h3.media import TEXT_VISUAL_FPS, H3Record, H3Task
+from musubi_tuner.minimax_h3.packing import FL_CONDITION_ROLES, one_frame_condition_roles, parse_condition_role
 from musubi_tuner.modules.nvfp4_utils import NVFP4_STREAM_QUANT_BUFFER_NAMES as _TE_STREAM_QUANT_BUFFER_NAMES
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,33 @@ def _require_visual(visuals: Mapping[object, H3TextVisual], key: object, label: 
         raise ValueError(f"MiniMax-H3 presentation is missing {label} visual data") from error
 
 
+def _fl_visual_keys(visuals: Mapping[object, H3TextVisual]) -> list[str]:
+    """The FL2VA visual keys present, in <Picture i> order: the released first/last anchors or
+    the contiguous one-frame cond_{i} slots (the same role vocabulary as the latent cache)."""
+    present_keys = [key for key in FL_CONDITION_ROLES if key in visuals]
+    cond_keys = sorted(key for key in visuals if isinstance(key, str) and _is_one_frame_condition_role(key))
+    if present_keys and cond_keys:
+        raise ValueError("MiniMax-H3 FL2VA presentation cannot mix first/last visuals with one-frame cond_ visuals")
+    if cond_keys:
+        expected = list(one_frame_condition_roles(len(cond_keys)))
+        if cond_keys != expected:
+            raise ValueError(f"MiniMax-H3 one-frame FL2VA visuals must be the contiguous {expected}, got {cond_keys}")
+        present_keys = cond_keys
+    if not present_keys:
+        raise ValueError(
+            "MiniMax-H3 FL2VA presentation requires the first/last visuals (video targets)"
+            " or the cond_{i} control visuals (one-frame targets)"
+        )
+    return present_keys
+
+
+def _is_one_frame_condition_role(key: str) -> bool:
+    try:
+        return parse_condition_role(key).family == "one_frame"
+    except ValueError:
+        return False
+
+
 def build_presentation(
     record: H3Record,
     task: H3Task,
@@ -104,11 +132,9 @@ def build_presentation(
     if task == "fl2va":
         # the released builder numbers <Picture i> over the pictures that are present,
         # in packed (first, last) order: a lone last frame is still <Picture 1>, and the
-        # first/last distinction is carried only by the rotary anchor times
-        present_keys = [key for key in ("first", "last") if key in visuals]
-        if not present_keys:
-            raise ValueError("MiniMax-H3 FL2VA presentation requires at least one of the first and last visuals")
-        for index, key in enumerate(present_keys, start=1):
+        # first/last distinction is carried only by the rotary anchor times. One-frame
+        # layouts use the ordered cond_{i} slots instead, numbered in slot order.
+        for index, key in enumerate(_fl_visual_keys(visuals), start=1):
             visual = visuals[key]
             if visual.frames.shape[0] != 1:
                 raise ValueError(f"MiniMax-H3 FL2VA {key} visual must contain exactly one frame")
@@ -159,7 +185,9 @@ def build_presentation(
 
         visual = _require_visual(visuals, reference.path, f"reference video {reference.path}")
         frames = visual.frames
-        timestamps = list(visual.timestamps) if visual.timestamps is not None else [index / 2.0 for index in range(len(frames))]
+        timestamps = (
+            list(visual.timestamps) if visual.timestamps is not None else [index / TEXT_VISUAL_FPS for index in range(len(frames))]
+        )
         if len(frames) % 2:
             frames = torch.cat((frames, frames[-1:]), dim=0)
             timestamps.append(timestamps[-1])
@@ -257,7 +285,7 @@ def load_h3_text_encoder(
     *,
     device: str | torch.device,
     dtype: torch.dtype = torch.bfloat16,
-    disable_mmap: bool = False,
+    disable_numpy_memmap: bool = False,
     nvfp4_scaled_mm: bool = False,
     blocks_to_swap: int = 0,
     attn_mode: str | None = None,
@@ -314,13 +342,13 @@ def load_h3_text_encoder(
             fp8_optimization=False,
             calc_device=device,
             move_to_device=not streaming,
-            disable_numpy_memmap=disable_mmap,
+            disable_numpy_memmap=disable_numpy_memmap,
             quantizer=quantizer,
         )
         return {normalize_h3_text_encoder_key(key): value for key, value in sd.items()}
 
     files = resolve_safetensors_files(checkpoint_path)
-    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_mmap)
+    formats = detect_comfy_quant_formats(files, disable_numpy_memmap=disable_numpy_memmap)
     if formats == {FORMAT_CONVROT_INT8}:
         # pre-quantized ConvRot INT8 artifact; an empty target list disables dynamic quantization
         quantizer = ConvRotInt8Quantizer(target_layer_keys=[])
@@ -350,7 +378,7 @@ def load_h3_text_encoder(
     else:
         sd = {}
         for file in files:
-            shard = load_safetensors(str(file), device=load_device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+            shard = load_safetensors(str(file), device=load_device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap)
             sd.update({normalize_h3_text_encoder_key(key): value for key, value in shard.items()})
 
     # quantization scale tensors keep their own dtypes (fp32 row scales, fp8 block scales)
@@ -443,8 +471,8 @@ def encode_h3_presentation(processor, model, presentation: H3Presentation) -> tu
         processor_args["video_metadata"] = [
             {
                 "total_num_frames": int(video.shape[0]),
-                "fps": 2.0,
-                "duration": float(video.shape[0]) / 2.0,
+                "fps": float(TEXT_VISUAL_FPS),
+                "duration": float(video.shape[0]) / TEXT_VISUAL_FPS,
                 "frames_indices": list(range(video.shape[0])),
                 "height": int(video.shape[1]),
                 "width": int(video.shape[2]),
@@ -567,6 +595,17 @@ TEXT_CACHE_FORMAT = "minimax-h3-text-v2"
 # interfaces.
 TEACHER_CONDITIONS_FIRST_LAST = "first,last"
 TEACHER_CONDITIONS_REF = "ref"
+TEACHER_CONDITIONS_SUBJECT_REF = "subject_ref"
+
+# key stem of the teacher text rows a text cache may carry next to the student rows, per teacher
+# kind: each kind uses distinct keys so the trainer hard-fails on a cache/flag mode mismatch
+# instead of silently misreading the rows (the cache writer appends `_hidden_states_<dtype>` /
+# `_token_tags_int64`; the training collator drops the `varlen_` marker and the dtype suffix)
+TEACHER_TEXT_CACHE_PREFIXES = {
+    TEACHER_CONDITIONS_FIRST_LAST: "varlen_mmh3_teacher",
+    TEACHER_CONDITIONS_REF: "varlen_mmh3_teacher_ref",
+    TEACHER_CONDITIONS_SUBJECT_REF: "varlen_mmh3_teacher_subject_ref",
+}
 
 
 def normalize_teacher_conditions(value: str) -> str:
@@ -575,9 +614,49 @@ def normalize_teacher_conditions(value: str) -> str:
         return TEACHER_CONDITIONS_FIRST_LAST
     if parts == [TEACHER_CONDITIONS_REF]:
         return TEACHER_CONDITIONS_REF
+    if parts == [TEACHER_CONDITIONS_SUBJECT_REF]:
+        return TEACHER_CONDITIONS_SUBJECT_REF
     raise ValueError(
         f"MiniMax-H3 teacher matching supports only teacher conditions "
-        f"'{TEACHER_CONDITIONS_FIRST_LAST}' or '{TEACHER_CONDITIONS_REF}', got {value!r}"
+        f"'{TEACHER_CONDITIONS_FIRST_LAST}', '{TEACHER_CONDITIONS_REF}' or '{TEACHER_CONDITIONS_SUBJECT_REF}', got {value!r}"
+    )
+
+
+# The subject-reference teacher caption wrap: the official full-reference declaration blocks
+# that make the base read each picture as a *subject* (identity/appearance) reference rather
+# than a frame of the target. Modeled on the presentation that extracted a character's
+# identity on the released FL2VA weights (probe A, 2026-09-02) with the appearance clauses
+# removed, so it is content-independent boilerplate around the user caption like the
+# ref-teacher wrap; `attribute_transfer` is the empirically validated marker and the
+# "pose, framing, outfit and setting follow the description" clause is what keeps the
+# picture from acting as a copy source.
+SUBJECT_REF_SUMMARY_IMAGE = "The target is a single still image with no motion, a static shot of {subjects} as described below."
+SUBJECT_REF_SUMMARY_VIDEO = "The target video shows {subjects} as described below."
+
+
+def wrap_subject_reference_caption(caption: str, image_count: int, *, still_image: bool) -> str:
+    if image_count < 1:
+        raise ValueError("MiniMax-H3 subject-reference caption requires at least one picture")
+    labels = [f"<Subject {index}>" for index in range(1, image_count + 1)]
+    if len(labels) == 1:
+        subjects = labels[0]
+    else:
+        subjects = ", ".join(labels[:-1]) + f" and {labels[-1]}"
+    definitions = "\n".join(
+        f"<Subject {index}> is the subject whose appearance comes from <Picture {index}> (face and hair style)."
+        for index in range(1, image_count + 1)
+    )
+    summary = (SUBJECT_REF_SUMMARY_IMAGE if still_image else SUBJECT_REF_SUMMARY_VIDEO).format(subjects=subjects)
+    retention = "\n".join(
+        f"<Subject {index}> (appears in [Shot 1]): attribute_transfer - the appearance of <Subject {index}> in"
+        f" <Picture {index}> is referenced; pose, framing, outfit and setting follow the description."
+        for index in range(1, image_count + 1)
+    )
+    return (
+        f"subject_definitions:\n{definitions}\n\n"
+        f"summary:\n[reference generation] {summary}\n\n"
+        f"retention_analysis:\n{retention}\n\n"
+        f"detailed_description:\n{caption}"
     )
 
 
