@@ -314,9 +314,10 @@ def parse_args_setup(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         "--convrot_int8",
         action="store_true",
         help="use ConvRot int8 for the DiT base weights (alternative to fp8; cannot be combined with "
-        "--fp8_scaled/--nvfp4). Quantizes per-block Linears at load time with Hadamard rotation + int8; "
+        "--fp8_scaled). Quantizes per-block Linears at load time with Hadamard rotation + int8; "
         "forward runs fused Triton int8 GEMM (requires triton, falls back to slower dequantized bf16 "
-        "matmul without it).",
+        "matmul without it). Combine with --nvfp4 to load a checkpoint whose Linears mix both formats "
+        "(each module's format is declared in the checkpoint).",
     )
     parser.add_argument(
         "--convrot_int8_bwd",
@@ -331,8 +332,9 @@ def parse_args_setup(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
         action="store_true",
         help="load a ComfyUI pre-quantized NVFP4 DiT checkpoint and run inference against it with true "
         "FP4x4 tensor-core forward (requires PyTorch 2.10+ scaled_mm and a Blackwell GPU). Cannot be "
-        "combined with --fp8_scaled/--convrot_int8, or with --lora_weight (pre-quantized NVFP4 cannot be "
-        "merged at load time).",
+        "combined with --fp8_scaled, or with --lora_weight (pre-quantized NVFP4 cannot be merged at load "
+        "time). Combine with --convrot_int8 to load a checkpoint whose Linears mix both formats (each "
+        "module's format is declared in the checkpoint).",
     )
     parser.add_argument(
         "--nvfp4_columnwise_chunk_rows",

@@ -36,20 +36,19 @@ def test_parser_has_nvfp4_and_convrot_int8_flags():
     assert args.nvfp4_columnwise_chunk_rows == 1024
 
 
-def test_validate_rejects_nvfp4_and_convrot_together():
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        krea2_utils.validate_krea2_quantization_args(
-            fp8_scaled=False,
-            convrot_int8=True,
-            convrot_int8_bwd="bf16",
-            nvfp4=True,
-            nvfp4_columnwise_chunk_rows=1024,
-            turbo_dit=None,
-            scaled_mm_available=True,
-            cuda_available=False,
-            device_capability=None,
-            require_block_swap_h2d_only_with_nvfp4=False,
-        )
+def test_validate_allows_nvfp4_and_convrot_together():
+    krea2_utils.validate_krea2_quantization_args(
+        fp8_scaled=False,
+        convrot_int8=True,
+        convrot_int8_bwd="bf16",
+        nvfp4=True,
+        nvfp4_columnwise_chunk_rows=1024,
+        turbo_dit=None,
+        scaled_mm_available=True,
+        cuda_available=False,
+        device_capability=None,
+        require_block_swap_h2d_only_with_nvfp4=False,
+    )  # must not raise: this is the mixed-format loading combination
 
 
 def test_validate_allows_nvfp4_with_block_swap_and_no_h2d_only_at_inference():

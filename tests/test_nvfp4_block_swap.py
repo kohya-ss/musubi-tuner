@@ -58,7 +58,12 @@ def _build_patched_blocks(tmp_path: Path, num_blocks=4, n=64, k=64):
     state_dict = quantizer.load_and_quantize([str(path)], None)  # stays on CPU
     blocks = nn.ModuleList([_TinyBlock(n, k) for _ in range(num_blocks)])
     apply_nvfp4_monkey_patch(
-        blocks, state_dict, quantizer.nvfp4_module_shapes, [], use_scaled_mm=True, training=True,
+        blocks,
+        state_dict,
+        quantizer.nvfp4_module_shapes,
+        [],
+        use_scaled_mm=True,
+        training=True,
     )
     blocks.requires_grad_(False)
     blocks.load_state_dict(state_dict, strict=True, assign=True)
@@ -78,7 +83,11 @@ def test_default_selector_leaves_nvfp4_weight_t_gpu_resident_for_every_block(tmp
     blocks = _build_patched_blocks(tmp_path, num_blocks=4)
     device = torch.device("cuda")
     config = BlockSwapConfig(
-        device=device, supports_backward=True, use_pinned_memory=True, h2d_only=True, ring_size=1,
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=1,
     )  # swap_tensor_selector left at its default (None) -- reproduces the bug
     offloader = create_offloader("test", list(blocks), 4, 2, config)
     offloader.prepare_block_devices_before_forward(list(blocks))
@@ -136,3 +145,73 @@ def test_model_offloader_ignores_swap_tensor_selector_h2d_only_false(tmp_path):
         " started honoring swap_tensor_selector and this test (and its docstring) should be updated"
         " to assert the fixed behavior instead."
     )
+
+
+def _build_mixed_blocks(tmp_path: Path, num_plain=2, num_quantized=4, n=64, k=64):
+    """num_plain leading blocks are plain bf16 nn.Linear; the rest are NVFP4-quantized --
+    mirrors a partially pre-quantized checkpoint (e.g. Krea 2's unquantized leading blocks)."""
+    quantized_blocks = _build_patched_blocks(tmp_path, num_blocks=num_quantized, n=n, k=k)
+    plain_blocks = nn.ModuleList([_TinyBlock(n, k) for _ in range(num_plain)])
+    return list(plain_blocks) + list(quantized_blocks)
+
+
+@requires_cuda
+def test_lora_stream_offloader_excludes_structurally_different_leading_blocks(tmp_path):
+    """The bug: 2 plain bf16 blocks + 4 NVFP4-quantized blocks, blocks_to_swap=5 (more than the
+    4 homogeneous quantized blocks) used to spread stream_idx across all 6 indices via the naive
+    midpoint formula, picking up a plain block alongside quantized ones and crashing on the
+    ring's shared-layout assertion the first time prepare_block_devices_before_forward runs.
+    The fix: construction itself must reject this (clear error), not crash deep in prepare()."""
+    blocks = _build_mixed_blocks(tmp_path, num_plain=2, num_quantized=4)
+    device = torch.device("cuda")
+    config = BlockSwapConfig(
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=2,
+        swap_tensor_selector=nvfp4_swap_tensor_selector,
+    )
+    with pytest.raises(ValueError, match="eligible") as exc_info:
+        create_offloader("test", blocks, 6, 5, config)
+    message = str(exc_info.value)
+    assert "Eligible (majority layout): blocks 2-5" in message
+    assert "Ineligible (different layout, always GPU-resident): blocks 0-1" in message
+
+
+def test_format_block_ranges_handles_interleaved_indices():
+    """Covers the user-raised concern: eligibility isn't always a clean leading/trailing split --
+    if quantized/unquantized blocks alternate, the error message must still be legible rather than
+    implying a simple prefix/suffix pattern."""
+    from musubi_tuner.modules.custom_offloading_utils import _format_block_ranges
+
+    assert _format_block_ranges([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]) == "2-25"
+    assert _format_block_ranges([0, 1, 26, 27]) == "0-1, 26-27"
+    assert _format_block_ranges([0, 2, 4, 6]) == "0, 2, 4, 6"  # fully interleaved: no ranges to collapse
+    assert _format_block_ranges([]) == "(none)"
+    assert _format_block_ranges([5]) == "5"
+
+
+@requires_cuda
+def test_lora_stream_offloader_streams_only_eligible_blocks_when_request_fits(tmp_path):
+    """With blocks_to_swap<=4 (the homogeneous quantized count), construction succeeds and
+    stream_idx only ever contains indices from the quantized block range [2, 3, 4, 5] --
+    the plain blocks 0/1 are never selected, and prepare_block_devices_before_forward runs
+    without the shape/dtype assertion firing."""
+    blocks = _build_mixed_blocks(tmp_path, num_plain=2, num_quantized=4)
+    device = torch.device("cuda")
+    config = BlockSwapConfig(
+        device=device,
+        supports_backward=True,
+        use_pinned_memory=True,
+        h2d_only=True,
+        ring_size=2,
+        swap_tensor_selector=nvfp4_swap_tensor_selector,
+    )
+    offloader = create_offloader("test", blocks, 6, 4, config)
+    assert all(idx >= 2 for idx in offloader.stream_idx), (
+        f"expected only quantized blocks (index >= 2) to be swap-eligible, got {offloader.stream_idx}"
+    )
+    offloader.prepare_block_devices_before_forward(blocks)  # must not raise
+    assert blocks[0].proj.weight.device.type == "cuda"  # plain block: always resident
+    assert blocks[1].proj.weight.device.type == "cuda"  # plain block: always resident

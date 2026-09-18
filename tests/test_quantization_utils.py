@@ -22,11 +22,15 @@ def test_validate_quantization_scheme_allows_exactly_one(fp8_scaled, convrot_int
 
 @pytest.mark.parametrize(
     "fp8_scaled,convrot_int8,nvfp4",
-    [(True, True, False), (True, False, True), (False, True, True), (True, True, True)],
+    [(True, True, False), (True, False, True), (True, True, True)],
 )
-def test_validate_quantization_scheme_rejects_two_or_more(fp8_scaled, convrot_int8, nvfp4):
-    with pytest.raises(ValueError, match="mutually exclusive"):
+def test_validate_quantization_scheme_rejects_fp8_scaled_combined_with_anything(fp8_scaled, convrot_int8, nvfp4):
+    with pytest.raises(ValueError, match="exclusive"):
         validate_quantization_scheme(fp8_scaled, convrot_int8, nvfp4)
+
+
+def test_validate_quantization_scheme_allows_convrot_and_nvfp4_together():
+    validate_quantization_scheme(False, True, True)  # must not raise: this is mixed-format mode
 
 
 def test_validate_quantization_scheme_message_names_all_three_flags():
