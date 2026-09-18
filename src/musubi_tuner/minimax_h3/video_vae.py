@@ -677,7 +677,7 @@ def load_video_vae(
     path,
     device: str | torch.device = "cpu",
     dtype: torch.dtype = VIDEO_VAE_DECODE_DTYPE,
-    disable_mmap: bool = False,
+    disable_numpy_memmap: bool = False,
 ) -> MiniMaxH3VideoVAE:
     from accelerate import init_empty_weights
 
@@ -688,7 +688,7 @@ def load_video_vae(
         vae = MiniMaxH3VideoVAE()
     # loading straight to the target device avoids a resident full-model CPU copy
     device = torch.device(device)
-    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap)
+    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap)
     sd = strip_key_prefixes(sd, ("first_stage_model.", "video_vae.", "vae."))
     for key in sd.keys():
         if sd[key].is_floating_point():

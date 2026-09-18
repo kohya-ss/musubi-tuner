@@ -9,19 +9,85 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from musubi_tuner.minimax_h3.packing import (
+    FL_CONDITION_ROLES,
     FRAME_RESCALE,
     ONE_FRAME_AUDIO_LATENT_FRAMES,
     ONE_FRAME_VIDEO_LATENT_FRAMES,
+    H3ConditionRole,
     H3ReferenceGeometry,
     H3TimeOverrides,
     H3VideoGeometry,
     build_h3_layout,
     build_position_grid,
     build_timestep_rows,
+    one_frame_condition_role,
     pack_audio_rows,
     pack_video_rows,
+    parse_condition_role,
+    reference_condition_role,
     unpack_targets,
 )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        ("first", H3ConditionRole("first", "fl")),
+        ("last", H3ConditionRole("last", "fl")),
+        ("cond_000", H3ConditionRole("cond_000", "one_frame", index=0)),
+        ("cond_012", H3ConditionRole("cond_012", "one_frame", index=12)),
+        ("ref_000_image", H3ConditionRole("ref_000_image", "reference", index=0, reference_kind="image")),
+        ("ref_003_video", H3ConditionRole("ref_003_video", "reference", index=3, reference_kind="video")),
+        ("ref_003_audio", H3ConditionRole("ref_003_audio", "reference", index=3, reference_kind="audio")),
+    ],
+)
+def test_condition_roles_parse_the_cache_vocabulary(role: str, expected: H3ConditionRole):
+    parsed = parse_condition_role(role)
+
+    assert parsed == expected
+    assert parsed.is_audio == (role == "ref_003_audio")
+
+
+@pytest.mark.parametrize("role", ["", "audio", "cond_0", "cond_0000", "ref_000", "ref_000_text", "ref_00_image", "First"])
+def test_condition_roles_reject_names_outside_the_vocabulary(role: str):
+    with pytest.raises(ValueError, match="Unsupported MiniMax-H3 condition role"):
+        parse_condition_role(role)
+
+
+def test_condition_role_builders_round_trip_through_the_parser():
+    assert FL_CONDITION_ROLES == ("first", "last")
+    assert one_frame_condition_role(7) == "cond_007"
+    assert reference_condition_role(2, "audio") == "ref_002_audio"
+    for role in (*FL_CONDITION_ROLES, one_frame_condition_role(7), reference_condition_role(2, "audio")):
+        assert parse_condition_role(role).name == role
+    with pytest.raises(ValueError, match="nonnegative"):
+        reference_condition_role(-1, "image")
+    with pytest.raises(ValueError, match="reference kind"):
+        reference_condition_role(0, "text")
+
+
+def test_layout_segments_use_the_reference_condition_roles():
+    layout = build_h3_layout(
+        task="ref2va",
+        text_length=3,
+        target_video=TARGET_VIDEO,
+        target_audio_frames=8,
+        references=(
+            H3ReferenceGeometry("image", video=H3VideoGeometry(1, 2, 2)),
+            H3ReferenceGeometry("video", video=H3VideoGeometry(2, 2, 2), audio_frames=8),
+            H3ReferenceGeometry("audio", audio_frames=4),
+        ),
+    )
+
+    assert [segment.role for segment in layout.segments] == [
+        "text",
+        reference_condition_role(0, "image"),
+        reference_condition_role(1, "audio"),
+        reference_condition_role(1, "video"),
+        reference_condition_role(2, "audio"),
+        "target_audio",
+        "target_video",
+    ]
 
 
 TARGET_VIDEO = H3VideoGeometry(frames=2, height=4, width=4)
@@ -369,27 +435,27 @@ def test_one_frame_layout_validation_rules():
         H3TimeOverrides(condition_times=(-1.0,), target_time=0.0)
 
 
-def test_one_frame_fl2va_layout_supports_one_or_two_roled_conditions():
+def test_one_frame_fl2va_layout_takes_any_number_of_ordered_cond_slots():
     condition = H3VideoGeometry(1, 4, 4)
     overrides = H3TimeOverrides(condition_times=(0.0,), target_time=FRAME_RESCALE * 24)
 
-    for role in ("first", "last"):
-        layout = _one_frame_layout("fl2va", conditions=(condition,), roles=(role,), overrides=overrides)
-        assert [segment.role for segment in layout.segments] == ["text", role, "target_audio", "target_video"]
-
-    both = H3TimeOverrides(condition_times=(0.0, FRAME_RESCALE * 240), target_time=FRAME_RESCALE * 24)
-    layout = _one_frame_layout("fl2va", conditions=(condition, condition), overrides=both)
-    assert [segment.role for segment in layout.segments] == ["text", "first", "last", "target_audio", "target_video"]
+    # one-frame conditions are ordered cond_{i} slots placed by their time overrides; the video
+    # first/last role names (which select anchor times) do not apply
+    for count in (1, 2, 3, 5):
+        times = H3TimeOverrides(condition_times=tuple(float(index) for index in range(count)), target_time=FRAME_RESCALE * 24)
+        layout = _one_frame_layout("fl2va", conditions=(condition,) * count, overrides=times)
+        expected_roles = [f"cond_{index:03d}" for index in range(count)]
+        assert [segment.role for segment in layout.segments] == ["text", *expected_roles, "target_audio", "target_video"]
+        # explicit roles are accepted when they are exactly the derived ones (the uncond rebuild passes them back)
+        assert _one_frame_layout("fl2va", conditions=(condition,) * count, roles=tuple(expected_roles), overrides=times) == layout
 
     with pytest.raises(ValueError, match="one condition time override per condition"):
-        _one_frame_layout("fl2va", conditions=(condition,), roles=("first",))
+        _one_frame_layout("fl2va", conditions=(condition,))
     with pytest.raises(ValueError, match="one condition time override per condition"):
         _one_frame_layout("fl2va", conditions=(condition, condition), overrides=overrides)
-    with pytest.raises(ValueError, match="explicit condition roles"):
-        _one_frame_layout("fl2va", conditions=(condition,), overrides=overrides)
-    with pytest.raises(ValueError, match="first, last, or first\\+last"):
-        _one_frame_layout("fl2va", conditions=(condition, condition), roles=("last", "first"), overrides=both)
-    with pytest.raises(ValueError, match="one or two visual conditions"):
+    with pytest.raises(ValueError, match="ordered"):
+        _one_frame_layout("fl2va", conditions=(condition,), roles=("first",), overrides=overrides)
+    with pytest.raises(ValueError, match="at least one visual condition"):
         _one_frame_layout("fl2va", overrides=H3TimeOverrides(condition_times=(), target_time=0.0))
 
 

@@ -104,6 +104,20 @@ DIRECT_TIMESTEP_SAMPLING_METHODS = frozenset(
 )
 
 
+def wandb_tracker_and_module(accelerator):
+    """``(tracker, wandb)`` when a wandb tracker is active and wandb is importable, else ``(None, None)``."""
+    try:
+        tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
+    except (AttributeError, ValueError):
+        return None, None
+    try:
+        import wandb
+    except ImportError:
+        logger.warning("wandb tracker is active but wandb is not installed / wandb がインストールされていないようです")
+        return None, None
+    return tracker, wandb
+
+
 @dataclass
 class DiTOutput:
     """Return type for ``NetworkTrainer.call_dit``.
@@ -953,7 +967,7 @@ class NetworkTrainer:
         width = (width // 8) * 8
         height = (height // 8) * 8
 
-        frame_count = round_down_frame_count(frame_count, self.architecture, self.vae_frame_stride)
+        frame_count = self.round_sample_frame_count(frame_count)
 
         if self.i2v_training:
             image_path = sample_parameter.get("image_path", None)
@@ -1049,31 +1063,37 @@ class NetworkTrainer:
             f"{'' if args.output_name is None else args.output_name + '_'}{num_suffix}_{prompt_idx:02d}_{ts_str}{seed_suffix}"
         )
 
-        wandb_tracker = None
-        try:
-            wandb_tracker = accelerator.get_tracker("wandb")  # raises ValueError if wandb is not initialized
-            try:
-                import wandb
-            except ImportError:
-                raise ImportError("No wandb / wandb がインストールされていないようです")
-        except:  # wandb 無効時
-            wandb = None
-
-        if video.shape[2] == 1:
-            # In Qwen-Image-Layered, video is (N, C, 1, H, W) where N=Layers, otherwise (1, C, 1, H, W)
-            image_paths = save_images_grid(video, save_dir, save_path, n_rows=video.shape[0], create_subdir=False)
-            if wandb_tracker is not None and wandb is not None:
-                for image_path in image_paths:
-                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
-        else:
-            video_path = os.path.join(save_dir, save_path) + ".mp4"
-            save_videos_grid(video, video_path)
-            if wandb_tracker is not None and wandb is not None:
-                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
+        self.save_sample(accelerator, args, sample_parameter, video, save_dir, save_path, steps)
 
         # Move models back to initial state
         vae.to("cpu")
         clean_memory_on_device(device)
+
+    def round_sample_frame_count(self, frame_count: int) -> int:
+        """Snaps a sample prompt's frame count (``--f``) onto the architecture's frame grid."""
+        return round_down_frame_count(frame_count, self.architecture, self.vae_frame_stride)
+
+    def save_sample(self, accelerator, args, sample_parameter, sample, save_dir: str, save_path: str, steps: int) -> None:
+        """Writes the value ``do_inference`` returned under ``save_dir/save_path`` (a stem without
+        extension) and logs it to wandb when a tracker is active.
+
+        Default: ``sample`` is a ``(N, C, F, H, W)`` video tensor in [0, 1], saved as an image grid
+        for single-frame outputs and as an mp4 otherwise. Architectures whose samples are not a
+        plain video tensor (e.g. joint audio/video) override this.
+        """
+        prompt_idx = sample_parameter.get("enum", 0)
+        wandb_tracker, wandb = wandb_tracker_and_module(accelerator)
+        if sample.shape[2] == 1:
+            # In Qwen-Image-Layered, video is (N, C, 1, H, W) where N=Layers, otherwise (1, C, 1, H, W)
+            image_paths = save_images_grid(sample, save_dir, save_path, n_rows=sample.shape[0], create_subdir=False)
+            if wandb_tracker is not None:
+                for image_path in image_paths:
+                    wandb_tracker.log({f"sample_{prompt_idx}": wandb.Image(image_path)}, step=steps)
+        else:
+            video_path = os.path.join(save_dir, save_path) + ".mp4"
+            save_videos_grid(sample, video_path)
+            if wandb_tracker is not None:
+                wandb_tracker.log({f"sample_{prompt_idx}": wandb.Video(video_path)}, step=steps)
 
     # region model specific (abstract hooks — implemented by architecture-specific subclasses)
 
@@ -1101,6 +1121,27 @@ class NetworkTrainer:
     def convert_weight_keys(self, weights_sd: dict[str, torch.Tensor], network_module: lora_module):
         # Default: assume the saved LoRA is already in this project's native format.
         return weights_sd
+
+    def merge_base_weights(self, args, accelerator: Accelerator, transformer, network_module: lora_module, weight_dtype):
+        """Merge every --base_weights LoRA into the loaded transformer before the network is built.
+
+        Called only when --base_weights is set. Architectures whose loader already merged the
+        weights during loading (e.g. before an on-the-fly quantization) override this to skip.
+        """
+        for i, weight_path in enumerate(args.base_weights):
+            if args.base_weights_multiplier is None or len(args.base_weights_multiplier) <= i:
+                multiplier = 1.0
+            else:
+                multiplier = args.base_weights_multiplier[i]
+
+            accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
+
+            weights_sd = load_file(weight_path)
+            weights_sd = self.convert_weight_keys(weights_sd, network_module)
+            module = network_module.create_arch_network_from_weights(multiplier, weights_sd, unet=transformer, for_inference=True)
+            module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
+
+        accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
 
     def process_sample_prompts(
         self,
@@ -1506,6 +1547,10 @@ class NetworkTrainer:
             raise ValueError("dataset_config is required / dataset_configが必要です")
         if args.dit is None:
             raise ValueError("path to DiT model is required / DiTモデルのパスが必要です")
+        if args.output_dir is None:
+            raise ValueError("output_dir is required / output_dirが必要です")
+        if args.output_name is None:
+            raise ValueError("output_name is required / output_nameが必要です")
         assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
 
         if args.sage_attn:
@@ -1640,23 +1685,7 @@ class NetworkTrainer:
         network_module: lora_module = importlib.import_module(args.network_module)  # actual module may be different
 
         if args.base_weights is not None:
-            # if base_weights is specified, merge the weights to DiT model
-            for i, weight_path in enumerate(args.base_weights):
-                if args.base_weights_multiplier is None or len(args.base_weights_multiplier) <= i:
-                    multiplier = 1.0
-                else:
-                    multiplier = args.base_weights_multiplier[i]
-
-                accelerator.print(f"merging module: {weight_path} with multiplier {multiplier}")
-
-                weights_sd = load_file(weight_path)
-                weights_sd = self.convert_weight_keys(weights_sd, network_module)
-                module = network_module.create_arch_network_from_weights(
-                    multiplier, weights_sd, unet=transformer, for_inference=True
-                )
-                module.merge_to(None, transformer, weights_sd, weight_dtype, "cpu")
-
-            accelerator.print(f"all weights merged: {', '.join(args.base_weights)}")
+            self.merge_base_weights(args, accelerator, transformer, network_module, weight_dtype)
 
         # prepare network
         net_kwargs = {}

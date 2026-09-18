@@ -183,14 +183,14 @@ Because the default already targets everything, both `exclude_patterns` and `inc
 
 - `--fp8_base` and `--fp8_scaled` reduce DiT memory usage. **Both must be specified together** (plain fp8 without scaled is rejected, because it would cast the norms to fp8 and break the model). fp8 is applied to the 28 main blocks only; the text-fusion transformer stays bf16.
 - `--blocks_to_swap N` offloads some of the main blocks to CPU. The maximum is **26** (28 blocks − 2).
-- `--gradient_checkpointing` is available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
+- `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
 <summary>日本語</summary>
 
 - `--fp8_base`と`--fp8_scaled`でDiTのメモリ使用量を削減します。**両方を同時に指定する必要があります**（scaledなしのplain fp8は、normをfp8にキャストしてモデルを壊すため拒否されます）。fp8は28個のメインブロックのみに適用され、text-fusion transformerはbf16のまま保持されます。
 - `--blocks_to_swap N`で一部のメインブロックをCPUにオフロードします。最大値は **26**（28ブロック − 2）です。
-- メモリ節約のために`--gradient_checkpointing`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
+- メモリ節約のために`--gradient_checkpointing`と`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
 </details>
 
@@ -327,6 +327,16 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 
 > **`--turbo_dit` cannot be combined with `--blocks_to_swap`.** Turbo sampling swaps the base weights in place, which is only safe without the block-swap offloader. If you use block swap, omit `--turbo_dit` and sample on the RAW model instead.
 
+**Alternative: `--turbo_lora`.** Pass `--turbo_lora path/to/turbo_lora.safetensors` instead of
+`--turbo_dit` to compose a Turbo LoRA live on top of RAW (`base + trainee_delta + turbo_delta`)
+rather than swapping in a full Turbo checkpoint. `--turbo_lora_multiplier` (default `1.0`)
+scales its delta. Built once at startup; toggled on/off around each sample pass. Mutually
+exclusive with `--turbo_dit`. Cannot be combined with `--turbo_dit_cache` (that flag requires `--turbo_dit`).
+
+This LoRA is a rank-extracted delta between the released raw and turbo checkpoints, not an
+official Krea artifact — it approximates the turbo weights, which is why the Turbo schedule
+(fixed `mu = 1.15`, CFG off, low step count) still applies.
+
 <details>
 <summary>日本語</summary>
 
@@ -342,6 +352,16 @@ A fox in the snow.  --w 1024 --h 1024 --s 8 --l 1 --d 0
 - **`--turbo_dit_cache`（常駐）**: Turboの重みを起動時に一度量子化してCPU RAMに常駐させ、サンプルごとにスワップインします。**高速**ですが、実行中ずっと **DiTサイズの約1倍** のCPU RAMを追加で使用します。
 
 > **`--turbo_dit`は`--blocks_to_swap`と併用できません。** Turboサンプリングはベースの重みをその場で入れ替えるため、block swapのオフローダーがない場合にのみ安全です。block swapを使う場合は`--turbo_dit`を省略し、RAWモデルでサンプリングしてください。
+
+**代替手段: `--turbo_lora`。** `--turbo_dit`の代わりに`--turbo_lora path/to/turbo_lora.safetensors`
+を指定すると、フルのTurboチェックポイントを入れ替える代わりに、RAWの上でTurbo LoRAをライブ合成します
+（`base + trainee_delta + turbo_delta`）。`--turbo_lora_multiplier`（デフォルト`1.0`）でdeltaの強さを
+調整できます。起動時に一度だけ構築され、各サンプルパスの前後で有効/無効を切り替えます。`--turbo_dit`
+とは併用できません。`--turbo_dit_cache`（`--turbo_dit`が必須のオプション）との併用もできません。
+
+このLoRAは公開されているraw/turboチェックポイント間から抽出したランク近似deltaであり、Krea公式のLoRA
+ではありません——turboの重みを近似しているため、Turboのスケジュール（固定`mu = 1.15`、CFGオフ、少ない
+ステップ数）がそのまま適用されます。
 
 </details>
 

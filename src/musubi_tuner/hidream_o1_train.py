@@ -48,6 +48,10 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
             raise ValueError("dataset_config is required")
         if args.dit is None:
             raise ValueError("path to DiT model is required")
+        if args.output_dir is None:
+            raise ValueError("output_dir is required")
+        if args.output_name is None:
+            raise ValueError("output_name is required")
 
         if args.fp8_base or args.fp8_scaled:
             raise ValueError("HiDream-O1 full finetuning does not support --fp8_base / --fp8_scaled.")

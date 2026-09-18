@@ -38,7 +38,7 @@
 
 ## はじめに
 
-このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-ImageのLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
+このリポジトリは、HunyuanVideo、Wan2.1/2.2、FramePack、FLUX.1 Kontext、FLUX.2 dev/klein、Qwen-Image、Z-Image、MiniMax-H3のLoRA学習用のコマンドラインツールです。このリポジトリは非公式であり、それらの公式リポジトリとは関係ありません。
 
 *リポジトリは開発中です。*
 
@@ -58,51 +58,25 @@
 
 GitHub Discussionsを有効にしました。コミュニティのQ&A、知識共有、技術情報の交換などにご利用ください。バグ報告や機能リクエストにはIssuesを、質問や経験の共有にはDiscussionsをご利用ください。[Discussionはこちら](https://github.com/kohya-ss/musubi-tuner/discussions)
 
-- 2026/08/14
-    - MiniMax-H3の教師マッチング学習（`--h3_teacher_matching`）を実験的に追加しました。T2VA LoRAは、特権的条件付け――クリップの最初/最後のフレーム、またはコピーソース参照としての学習クリップ自体（`--h3_teacher_conditions ref`）――の下で凍結されたベースモデルの予測に対して学習され、単純なフローターゲットの脱蒸留ドリフトを構造的に回避します。ベースシグマ保持アンカー、分解されたアンチウォッシュアウト損失、タイムステップフォーカス（`--h3_timestep_focus_*`、任意のH3学習で使用可能）、および `--lora_runtime_attach` / `--trajectory_dir` 生成オプションが含まれます。[PR #1047](https://github.com/kohya-ss/musubi-tuner/pull/1047) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
-
-- 2026/08/08
-    - MiniMax-H3 ConvRot INT8のLoRA学習と生成への対応を追加しました。BF16チェックポイントは、`--convrot_int8`でロード時に量子化され、リリースされた完全およびプルーニング済みのConvRot INT8トランスフォーマーとConvRot INT8 Qwen3-VL-32Bテキストエンコーダーが自動的に検出されます。生成では、LoRAが事前量子化されたベースにランタイムブランチとしてアタッチされます。sdbds氏に感謝します。[PR #1024](https://github.com/kohya-ss/musubi-tuner/pull/1024) 詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。
-
-- 2026/08/03
-    - 実験的なMiniMax-H3のR1対応を追加しました。T2VA、FL2VA、Ref2VAのLoRA学習に加え、独立したトレーニング時のビデオ/オーディオの共同生成とスケジュールされた生成をサポートします。R1は、公開されたBF16トランスフォーマー、デュアルVAE、Qwen3-VL-32B条件付け、およびブロックスワップをサポートします。詳細は[MiniMax-H3のドキュメント](./docs/minimax_h3.md)を参照してください。[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) sdbds氏に感謝します。
+- 2026/09/16
+    - MiniMax-H3に実験的に対応しました（LoRA学習、映像と音声の同時生成）。最初の[PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018)とその後のフォローアップを含め、sdbds氏に感謝します。
+        - 詳細は[ドキュメント](./docs/minimax_h3.md)および[one-frame（画像）学習のドキュメント](./docs/minimax_h3_1f.md)を参照してください。マージ済みの機能と今後の作業は[MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029)で管理しています。
+    - Krea 2のLoRA学習で、凍結されたDiTのbase重みをConvRot int8で量子化するオプション（`--convrot_int8`）を追加しました。`--fp8_base --fp8_scaled`の代替となります。[PR #1008](https://github.com/kohya-ss/musubi-tuner/pull/1008)
+        - fp8と同様に重みのVRAMが半減します。主な利点はfp8非対応GPU（RTX 30シリーズ以前）での速度向上です。融合カーネルには`triton`が必要です。詳細は[Krea 2のドキュメント](./docs/krea2.md#convrot-int8--convrot-int8)を参照してください。
+    - metadata JSONLファイルによるデータセット設定を拡張しました。詳細は[データセット設定のドキュメント](./docs/dataset_config.md)を参照してください。
+        - JSONL内の相対パスは、作業ディレクトリ基準で見つからない場合、JSONLファイルのあるディレクトリ基準でも解決されるようになりました。[PR #1023](https://github.com/kohya-ss/musubi-tuner/pull/1023)
+        - audio対応アーキテクチャ（現時点ではMiniMax-H3）向けに、動画レコードに任意の`audio_path`フィールドを指定できます。省略時は同名の音声サイドカーファイル、または動画内の音声トラックが使用されます。[PR #1020](https://github.com/kohya-ss/musubi-tuner/pull/1020)、[PR #1021](https://github.com/kohya-ss/musubi-tuner/pull/1021)
+        - 共通スキーマ以外のキーは、項目ごとの追加フィールドとしてアーキテクチャ固有のキャッシュスクリプトに渡されます。[PR #1094](https://github.com/kohya-ss/musubi-tuner/pull/1094)
+    - 共通のattention backendで`--attn_mode sdpa`がエラーになる問題を修正しました。`torch`のエイリアスとして動作します。rossnot氏に感謝します。[PR #1092](https://github.com/kohya-ss/musubi-tuner/pull/1092)
+    - 動画データセットのlatentキャッシュ時に`enable_bucket`と`bucket_no_upscale`が無視され、設定に関わらず常にbucketingされていた問題を修正しました。christopher5106氏に感謝します。[PR #1100](https://github.com/kohya-ss/musubi-tuner/pull/1100)
+        - **挙動の変更:** `enable_bucket = true`を指定していない動画データセットは、画像データセットと同様に、設定した`resolution`の単一解像度（リサイズ後に中央をクロップ）でキャッシュされるようになります。設定なしでbucketingに依存していた場合は、データセットに`enable_bucket = true`を追加してください。そうでない場合は、キャッシュが設定した解像度と一致するように、latentキャッシュを再作成してください（MiniMax-H3の`fl2va` / `ref2va`はリサイズ後の制御画像をテキストエンコーダー出力のキャッシュに含むため、そちらも再作成が必要です）。
+    - `--output_dir`または`--output_name`が指定されていない場合、最初の保存時にエラーになるのではなく、学習開始時に停止するようになりました。rossnot氏に感謝します。[PR #1070](https://github.com/kohya-ss/musubi-tuner/pull/1070)
+    - Krea 2: `--gradient_checkpointing_cpu_offload`（gradient checkpointing時のactivationのCPUオフロード）が有効になりました。rockerBOO氏に感謝します。[PR #1101](https://github.com/kohya-ss/musubi-tuner/pull/1101)
+    - Krea 2: 学習中のサンプル画像生成で、`--turbo_dit`の代わりにRAWモデルの上にTurbo LoRAを合成する`--turbo_lora`オプションを追加しました。block swap、fp8、ConvRot int8と併用できます。詳細は[Krea 2のドキュメント](./docs/krea2.md#sample-image-generation-during-training--学習中のサンプル画像生成)を参照してください。rockerBOO氏に感謝します。[PR #1103](https://github.com/kohya-ss/musubi-tuner/pull/1103)
 
 - 2026/07/14
     - 勾配ノルムの診断メトリクス（`grad/norm`, `grad/mean_norm`, `grad/max`、勾配クリッピング前の値）をトラッカーに出力する `--log_grad_metrics` オプションを追加しました。[PR #988](https://github.com/kohya-ss/musubi-tuner/pull/988) rockerBOO氏に感謝します。
         - 勾配の爆発・消失の診断や、適切な `--max_grad_norm` の値を決める際に役立ちます。デフォルトでは無効です。詳細は[高度な設定のドキュメント](./docs/advanced_config.md#log-gradient-metrics--勾配メトリクスのログ出力)を参照してください。
-
-- 2026/06/24
-    - Krea 2に実験的に対応しました（LoRA学習、推論）。[PR #980](https://github.com/kohya-ss/musubi-tuner/pull/980)
-        - 詳細は[ドキュメント](./docs/krea2.md)を参照してください。
-
-- 2026/06/19
-    - Ideogram4に実験的に対応しました（LoRA学習、推論）。[PR #966](https://github.com/kohya-ss/musubi-tuner/pull/966) について、sdbds氏に深く感謝します。フォローアップは [PR #975](https://github.com/kohya-ss/musubi-tuner/pull/975) および [PR #977](https://github.com/kohya-ss/musubi-tuner/pull/977) で行われました。変更内容の詳細を確認されたい場合はPRをご覧ください。
-        - 詳細は[ドキュメント](./docs/ideogram4.md)を参照してください。
-        - JSON形式のプロンプトが推奨されますが、自然言語での学習も可能なようです。
-        - 学習設定の詳細は不明なためコミュニティからの情報共有を歓迎します。
-
-- 2026/06/16
-    - LoRA（LoHa/LoKr）学習向けに最適化したブロックスワップモード「H2D-only block swap」を追加しました。全アーキテクチャで利用できます。`--block_swap_h2d_only` で有効化します。[PR #972](https://github.com/kohya-ss/musubi-tuner/pull/972)
-        - ベース凍結の学習ではCPUとGPU上のベース重みが同一のため、従来のブロックスワップにおけるdevice→host（D2H）コピーは完全に無駄になります。H2DのみのモードはCPUに恒久的なマスターコピーを保持し、常にhost→deviceのみを転送することで、D2H転送を完全に排除します。これにより学習スループットが向上することがあり、`--fp8_base` / `--fp8_scaled` 使用時に効果が最も大きくなります。
-        - `--gradient_checkpointing` が必須です。ストリーミングに使うGPUリングバッファの数は `--block_swap_ring_size` で調整できます（デフォルト `2`、`1` でVRAM最小）。
-        - ブロックスワップの全オプションをまとめた[ブロックスワップのドキュメント](./docs/block_swap.md)も新設しました。
-
-- 2026/06/13
-    - ネットワーク重みの保存精度を指定する `--save_precision` オプションを追加し、デフォルトの保存精度をfp32に変更しました。[PR #967](https://github.com/kohya-ss/musubi-tuner/pull/967) rockerBOO氏に感謝します。
-        - **破壊的変更**：LoRAファイルの保存精度のデフォルトがfp32に変更されました。
-        - 学習中のLoRA重みの精度を保って保存するための変更です。post-hoc EMA、マージ、抽出、重み解析などの後処理で有用です。
-        - `--mixed_precision bf16`(`fp16`) で学習している場合、LoRAファイルのサイズが従来のおよそ2倍になることがあります。従来と同じ挙動にしたい場合は `--save_precision bf16` （あるいは`fp16`）を指定してください。
-        - 詳細は[HunyuanVideoのドキュメント](./docs/hunyuan_video.md#training--学習)を参照してください。
-
-- 2026/06/08
-    - HiDream-O1-Imageに実験的に対応しました（LoRA学習、fine-tuning、推論）。[PR #964](https://github.com/kohya-ss/musubi-tuner/pull/964)
-        - 詳細は[ドキュメント](./docs/hidream_o1.md)を参照してください。
-        - オプションでDINOv3による補助的な知覚損失（perceptual loss）も利用できます。[advanced configのドキュメント](./docs/advanced_config.md)を参照してください。
-        - この対応のベースとなった[PR #947](https://github.com/kohya-ss/musubi-tuner/pull/947)（および続く[PR #955](https://github.com/kohya-ss/musubi-tuner/pull/955)）について、sdbds氏に深く感謝します。変更内容の詳細を確認されたい場合はPRをご覧ください。
-
-- 2026/05/22
-    - コードベースの大規模な内部リファクタリングを行い、コードベースの品質と保守性を向上させました。[PR #950](https://github.com/kohya-ss/musubi-tuner/pull/950)
-        - ユーザーの方には直接の影響がないよう配慮しました。詳細について、および不具合報告などは[こちらのdiscussion](https://github.com/kohya-ss/musubi-tuner/discussions/949)までお願いします。
 
 ### リリースについて
 
@@ -168,6 +142,8 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
 - [FLUX.2](./docs/flux_2.md)
+- [MiniMax-H3](./docs/minimax_h3.md)
+- [MiniMax-H3 (1フレーム学習)](./docs/minimax_h3_1f.md)
 
 **共通設定・その他:**
 - [データセット設定](./docs/dataset_config.md)

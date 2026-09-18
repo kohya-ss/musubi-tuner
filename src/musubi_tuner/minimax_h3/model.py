@@ -394,6 +394,19 @@ def _apply_rope_split_half(hidden_states: torch.Tensor, rotation_table: torch.Te
     return torch.cat((rotary, hidden_states[..., 2 * pairs :]), dim=-1)
 
 
+def _element_extent(tensor: torch.Tensor) -> int:
+    """Highest storage element index addressable through the view, plus one."""
+    return tensor.storage_offset() + sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())) + 1
+
+
+# torch SDPA's memory-efficient backend computes block base addresses in int32, so a view
+# whose element offsets pass 2^31 silently reads wrapped memory (verified: with the fused-qkv
+# value view, every row from the first 128-aligned block past the line is corrupt, turning
+# the whole sample into noise). The released 15 s maximum at 1344x768 packs ~109k rows and
+# crosses the line at row 99,968.
+_INT32_SAFE_EXTENT = 2**31
+
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -411,7 +424,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.inner_dim = num_heads * head_dim
-        self.attn_mode = "torch" if attn_mode == "sdpa" else attn_mode
+        self.attn_mode = attn_mode
         self.split_attn = split_attn
         self.qkv_proj = nn.Linear(hidden_size, self.inner_dim * 3, bias=False, dtype=dtype, device=device)
         self.q_norm = nn.RMSNorm(head_dim, eps=qk_norm_eps, dtype=dtype, device=device)
@@ -424,27 +437,19 @@ class Attention(nn.Module):
         query = self.q_norm(query.reshape(batch_size, sequence_length, self.num_heads, self.head_dim))
         key = self.k_norm(key.reshape(batch_size, sequence_length, self.num_heads, self.head_dim))
         value = value.reshape(batch_size, sequence_length, self.num_heads, self.head_dim)
+        # query/key leave the RMSNorms as fresh contiguous tensors, but value is still a view
+        # into the fused qkv buffer (sequence stride 3 * inner_dim): materialize it before its
+        # offsets outgrow int32 address math in the SDPA backends
+        if _element_extent(value) > _INT32_SAFE_EXTENT:
+            value = value.contiguous()
         if rotation_table is not None:
             query = _apply_rope_split_half(query, rotation_table)
             key = _apply_rope_split_half(key, rotation_table)
         query = query.to(value)
         key = key.to(value)
 
-        if self.attn_mode == "flash3":
-            try:
-                from musubi_tuner.wan.modules.attention import flash_attention as wan_flash_attention
-            except ImportError as error:
-                raise RuntimeError("FlashAttention 3 was selected but its runtime is unavailable") from error
-            output = wan_flash_attention(
-                [query, key, value],
-                attn_mode="flash3",
-                split_attn=False,
-                dtype=hidden_states.dtype if hidden_states.dtype in {torch.float16, torch.bfloat16} else torch.bfloat16,
-            )
-            output = output.reshape(batch_size, sequence_length, self.inner_dim)
-        else:
-            params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)
-            output = attention([query, key, value], attn_params=params)
+        params = AttentionParams.create_attention_params(self.attn_mode, self.split_attn)
+        output = attention([query, key, value], attn_params=params)
         return self.out_proj(output)
 
 
@@ -1099,7 +1104,7 @@ def _load_h3_transformer_convrot_int8(
     bwd_mode: str,
     attn_mode: str,
     split_attn: bool,
-    disable_mmap: bool,
+    disable_numpy_memmap: bool,
     lora_weights: list[dict] | None = None,
     lora_multipliers: list[float] | None = None,
     prune_hooks: WeightTransformHooks | None = None,
@@ -1134,7 +1139,7 @@ def _load_h3_transformer_convrot_int8(
         calc_device=quant_device,
         move_to_device=(device == quant_device),
         dit_weight_dtype=None,
-        disable_numpy_memmap=disable_mmap,
+        disable_numpy_memmap=disable_numpy_memmap,
         weight_transform_hooks=prune_hooks,
         quantizer=quantizer,
     )
@@ -1164,7 +1169,7 @@ def _load_h3_transformer_bf16(
     device: torch.device | str,
     attn_mode: str,
     split_attn: bool,
-    disable_mmap: bool,
+    disable_numpy_memmap: bool,
     prune_hooks: WeightTransformHooks | None = None,
     prune_state: dict[str, torch.Tensor] | None = None,
 ) -> MiniMaxH3Model:
@@ -1191,12 +1196,12 @@ def _load_h3_transformer_bf16(
             device,
             move_to_device=True,
             weight_transform_hooks=prune_hooks,
-            disable_numpy_memmap=disable_mmap,
+            disable_numpy_memmap=disable_numpy_memmap,
         )
         sd.update(prune_state or {})
     else:
         for file in files:
-            sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_mmap))
+            sd.update(load_safetensors(str(file), device=device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap))
     # pruned artifacts publish the AdaLN projections in F16; convert them to the BF16
     # compute dtype (the same treatment as the ConvRot INT8 loader)
     if config.is_pruned:
@@ -1226,7 +1231,7 @@ def load_h3_transformer(
     dtype: torch.dtype = torch.bfloat16,
     attn_mode: str = "torch",
     split_attn: bool = False,
-    disable_mmap: bool = False,
+    disable_numpy_memmap: bool = False,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
     quant_device: torch.device | str | None = None,
@@ -1241,7 +1246,7 @@ def load_h3_transformer(
     # detected from their tensor structure; --convrot_int8 additionally quantizes BF16
     # checkpoints (full or pruned) on the fly — pruned AdaLN projections are 8-wide and
     # fall outside every ConvRot group size, so the quantizer skips them automatically.
-    prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_mmap)
+    prequantized = has_comfy_quant_tensors(files, disable_numpy_memmap=disable_numpy_memmap)
     use_convrot_int8 = convrot_int8 or prequantized
     config = classify_h3_transformer(files, allow_convrot_int8=use_convrot_int8)
     prune_hooks: WeightTransformHooks | None = None
@@ -1273,7 +1278,7 @@ def load_h3_transformer(
             bwd_mode=convrot_int8_bwd,
             attn_mode=attn_mode,
             split_attn=split_attn,
-            disable_mmap=disable_mmap,
+            disable_numpy_memmap=disable_numpy_memmap,
             lora_weights=lora_weights,
             lora_multipliers=lora_multipliers,
             prune_hooks=prune_hooks,
@@ -1287,7 +1292,7 @@ def load_h3_transformer(
         device=device,
         attn_mode=attn_mode,
         split_attn=split_attn,
-        disable_mmap=disable_mmap,
+        disable_numpy_memmap=disable_numpy_memmap,
         prune_hooks=prune_hooks,
         prune_state=prune_state,
     )
