@@ -16,6 +16,13 @@ requires_triton_cuda = pytest.mark.skipif(
 # E2M1 code -> magnitude, in code order (codes 0-7 positive, 8-15 = sign bit | positive code).
 _E2M1_MAGNITUDES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
+# Per-launch element count for the hand-written stochastic-code test kernels. tl.rand needs a
+# unique offset per element, so these kernels derive the global offset from program_id(0);
+# keeping BLOCK small bounds per-thread register/local-memory pressure so the launch cannot OOM
+# when the GPU is otherwise occupied. The means are unchanged: element i is still paired with
+# rand offset i, exactly as in the previous single-program tl.arange(0, n) formulation.
+_STOCHASTIC_CODE_TEST_BLOCK = 16384
+
 
 def _adjacent_codes(a: int, b: int) -> bool:
     """True if E2M1 codes a and b decode to the same sign and adjacent magnitudes (one
@@ -177,7 +184,7 @@ def test_e2m1_stochastic_code_exact_values_are_deterministic():
 
     @triton.jit
     def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
-        offs = tl.arange(0, BLOCK)
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < n
         x = tl.load(x_ptr + offs, mask=mask, other=0.0)
         r = tl.rand(seed, offs)
@@ -189,7 +196,7 @@ def test_e2m1_stochastic_code_exact_values_are_deterministic():
     x = exact_values.repeat(1000).cuda()
     n = x.numel()
     y = torch.empty(n, device="cuda", dtype=torch.uint8)
-    _kernel[(1,)](x, y, 12345, n, BLOCK=triton.next_power_of_2(n))
+    _kernel[(triton.cdiv(n, _STOCHASTIC_CODE_TEST_BLOCK),)](x, y, 12345, n, BLOCK=_STOCHASTIC_CODE_TEST_BLOCK)
 
     assert torch.equal(y.cpu(), expected_codes.repeat(1000))
 
@@ -206,7 +213,7 @@ def test_e2m1_stochastic_code_unbiased_in_expectation_midpoint():
 
     @triton.jit
     def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
-        offs = tl.arange(0, BLOCK)
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < n
         x = tl.load(x_ptr + offs, mask=mask, other=0.0)
         r = tl.rand(seed, offs)
@@ -216,7 +223,7 @@ def test_e2m1_stochastic_code_unbiased_in_expectation_midpoint():
     n = 100000
     x = torch.full((n,), 3.5, device="cuda")
     y = torch.empty(n, device="cuda", dtype=torch.uint8)
-    _kernel[(1,)](x, y, 777, n, BLOCK=triton.next_power_of_2(n))
+    _kernel[(triton.cdiv(n, _STOCHASTIC_CODE_TEST_BLOCK),)](x, y, 777, n, BLOCK=_STOCHASTIC_CODE_TEST_BLOCK)
 
     magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
     decoded = magnitude_table[(y & 7).long()]
@@ -235,7 +242,7 @@ def test_e2m1_stochastic_code_unbiased_in_expectation_near_zero_end():
 
     @triton.jit
     def _kernel(x_ptr, y_ptr, seed, n, BLOCK: tl.constexpr):
-        offs = tl.arange(0, BLOCK)
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         mask = offs < n
         x = tl.load(x_ptr + offs, mask=mask, other=0.0)
         r = tl.rand(seed, offs)
@@ -245,7 +252,7 @@ def test_e2m1_stochastic_code_unbiased_in_expectation_near_zero_end():
     n = 100000
     x = torch.full((n,), 0.1, device="cuda")
     y = torch.empty(n, device="cuda", dtype=torch.uint8)
-    _kernel[(1,)](x, y, 42, n, BLOCK=triton.next_power_of_2(n))
+    _kernel[(triton.cdiv(n, _STOCHASTIC_CODE_TEST_BLOCK),)](x, y, 42, n, BLOCK=_STOCHASTIC_CODE_TEST_BLOCK)
 
     magnitude_table = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda")
     decoded = magnitude_table[(y & 7).long()]
