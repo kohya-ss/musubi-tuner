@@ -89,7 +89,7 @@ class LoHaModule(torch.nn.Module):
         torch.nn.init.normal_(self.hada_w2_b, std=1.0)
 
         if type(alpha) == torch.Tensor:
-            alpha = alpha.detach().float().numpy()
+            alpha = alpha.detach().float().cpu().item()
         alpha = lora_dim if alpha is None or alpha == 0 else alpha
         self.scale = alpha / self.lora_dim
         self.register_buffer("alpha", torch.tensor(alpha))
