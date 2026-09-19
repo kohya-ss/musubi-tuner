@@ -329,6 +329,26 @@ def _add_optimizer_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_loss_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--loss_fn",
+        type=str,
+        default="mse",
+        help="Loss function to use: mse (default), or a dotted import path to a class or function"
+        " invoked with a single LossContext, like 'wavelet_loss.musubi.WaveletPlusMSE'"
+        " / 損失関数: mse（デフォルト）、または LossContext を受け取るクラス/関数へのドットパス",
+    )
+    parser.add_argument(
+        "--loss_fn_args",
+        type=str,
+        default=None,
+        nargs="*",
+        help="additional key=value arguments for the loss function; values must be Python literals,"
+        ' strings need quotes (like "alpha=0.1" "transform=\'swt\'" "band_weights={\'ll0\': 1.0}")'
+        ' / 損失関数の追加引数（値はPythonリテラル。文字列は引用符が必要。例："alpha=0.1" "transform=\'swt\'"）',
+    )
+
+
 def _add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--lr_scheduler",
@@ -773,6 +793,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     _add_ddp_args(parser)
     _add_sampling_args(parser)
     _add_optimizer_args(parser)
+    _add_loss_args(parser)
     _add_lr_scheduler_args(parser)
     _add_memory_args(parser)
     _add_timestep_args(parser)
