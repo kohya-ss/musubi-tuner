@@ -193,11 +193,20 @@ def _load_video_timestamp_resampled(
         if not container.streams.video:
             raise ValueError(f"Video source has no video stream: {video_path}")
         stream = container.streams.video[0]
+
+        # Prevent internal thread-pool contention/deadlock when multiple workers decode simultaneously
+        try:
+            stream.codec_context.thread_count = 1
+        except Exception:
+            pass
+
         average_rate = float(stream.average_rate) if stream.average_rate is not None else target_fps
         source_frame_duration = 1.0 / average_rate if average_rate > 0 else 1.0 / target_fps
         frames = []
         timestamps = []
-        for index, frame in enumerate(container.decode(stream)):
+
+        # Drain video stream directly to avoid demuxer buffering deadlocks on multiplexed streams
+        for index, frame in enumerate(container.decode(video=0)):
             if frame.pts is not None and frame.time_base is not None:
                 timestamp = float(frame.pts * frame.time_base)
             else:
@@ -248,6 +257,11 @@ def load_video(
     if source_fps is None or target_fps is None:
         if os.path.isfile(video_path):
             container = av.open(video_path)
+            if container.streams.video:
+                try:
+                    container.streams.video[0].codec_context.thread_count = 1
+                except Exception:
+                    pass
             video = []
             for i, frame in enumerate(container.decode(video=0)):
                 if start_frame is not None and i < start_frame:
@@ -292,6 +306,11 @@ def load_video(
         frame_index_delta = target_fps / source_fps  # example: 16 / 30 = 0.5333
         if os.path.isfile(video_path):
             container = av.open(video_path)
+            if container.streams.video:
+                try:
+                    container.streams.video[0].codec_context.thread_count = 1
+                except Exception:
+                    pass
             video = []
             frame_index_with_fraction = 0.0
             previous_frame_index = -1
