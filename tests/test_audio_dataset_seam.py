@@ -519,6 +519,12 @@ def test_resample_frame_indices_nearest_frame_selection():
     assert indices == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
 
 
+def test_resample_frame_indices_names_the_file_and_frame_of_a_backwards_timestamp():
+    timestamps = [0.0, 1 / 30, 2 / 30, 4 / 30, 3 / 30]
+    with pytest.raises(ValueError, match=r"nondecreasing: frame 4 at 0\.100s follows frame 3 at 0\.133s: clip\.mp4"):
+        resample_frame_indices(timestamps, source_frame_duration=1.0 / 30, target_fps=24, context="clip.mp4")
+
+
 def test_load_video_timestamps_mode_resamples_to_target_fps(tmp_path: Path):
     video_path = tmp_path / "clip30.mp4"
     _write_video(video_path, fps=30, frames=21, size=64)

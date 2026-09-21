@@ -144,18 +144,26 @@ def resample_frame_indices(
     *,
     source_frame_duration: float,
     target_fps: float,
+    context: str = "",
 ) -> list[int]:
     """Maps decoded frame timestamps to nearest-frame indices on a fixed target-fps grid.
 
     Used by fps_resample_mode="timestamps" to normalize videos of any (possibly variable)
     frame rate to exactly target_fps, so that audio/video alignment is deterministic.
+    `context` (the video path) only makes the error for a broken timeline readable.
     """
     if not timestamps:
         return []
     if source_frame_duration <= 0 or target_fps <= 0:
         raise ValueError("Video frame durations and target FPS must be positive")
-    if any(right < left for left, right in zip(timestamps, timestamps[1:])):
-        raise ValueError("Video timestamps must be nondecreasing")
+    for index, (left, right) in enumerate(zip(timestamps, timestamps[1:]), start=1):
+        if right < left:
+            suffix = f": {context}" if context else ""
+            raise ValueError(
+                f"Video timestamps must be nondecreasing: frame {index} at {right:.3f}s follows frame {index - 1}"
+                f" at {left:.3f}s{suffix}. Re-mux or re-encode the video so its frame timestamps are monotonic"
+                " (e.g. ffmpeg -i in.mp4 -fps_mode cfr -c:a copy out.mp4)."
+            )
 
     origin = timestamps[0]
     normalized = [timestamp - origin for timestamp in timestamps]
@@ -222,7 +230,9 @@ def _load_video_timestamp_resampled(
     if not frames:
         raise ValueError(f"Video source decoded no frames: {video_path}")
 
-    indices = resample_frame_indices(timestamps, source_frame_duration=source_frame_duration, target_fps=target_fps)
+    indices = resample_frame_indices(
+        timestamps, source_frame_duration=source_frame_duration, target_fps=target_fps, context=video_path
+    )
     indices = indices[slice(start_frame, end_frame)]
 
     video = []
