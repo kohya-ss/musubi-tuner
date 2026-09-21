@@ -39,7 +39,7 @@ from musubi_tuner.dataset.architectures import (  # explicit imports for local u
     ARCHITECTURE_WAN,
     round_down_frame_count,
 )
-from musubi_tuner.dataset.audio_utils import AudioSpec, audio_window_start, slice_audio_window
+from musubi_tuner.dataset.audio_utils import AudioSpec, audio_window_start, slice_audio_window, window_repair_limit
 from musubi_tuner.dataset.media_utils import *  # noqa: F401,F403
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket  # explicit import for local use
 
@@ -806,7 +806,7 @@ class VideoDataset(BaseDataset):
                         break  # submit batch if possible
 
                 for future in completed_futures:
-                    original_frame_size, video_key, video, caption, control, waveform, datasource_index = future.result()
+                    original_frame_size, video_key, video, caption, control, decoded_audio, datasource_index = future.result()
 
                     frame_count = len(video)
                     video = np.stack(video, axis=0)
@@ -886,17 +886,19 @@ class VideoDataset(BaseDataset):
 
                         if self.audio_spec is not None:
                             sample_count = self.audio_spec.samples_per_crop(target_frame)
-                            if waveform is None:
+                            if decoded_audio is None:
                                 item_info.audio_content = torch.zeros(self.audio_spec.channels, sample_count, dtype=torch.float32)
                                 item_info.audio_present = False
                             else:
                                 start_sample = audio_window_start(crop_pos, self.audio_fps, self.audio_spec.sample_rate)
                                 item_info.audio_content = slice_audio_window(
-                                    waveform,
+                                    decoded_audio.waveform,
                                     start_sample=start_sample,
                                     sample_count=sample_count,
                                     pad_tolerance=self.audio_spec.codec_pad_tolerance,
                                     context=video_key,
+                                    repairs=decoded_audio.repairs,
+                                    max_repair_samples=window_repair_limit(self.audio_spec.sample_rate),
                                 )
                                 item_info.audio_present = True
 
@@ -922,14 +924,14 @@ class VideoDataset(BaseDataset):
             def fetch_and_resize(op: callable) -> tuple:
                 result = op()
 
-                waveform = None
+                decoded_audio = None
                 if len(result) == 3:  # for backward compatibility TODO remove this in the future
                     video_key, video, caption = result
                     control = None
                 elif len(result) == 4:
                     video_key, video, caption, control = result
                 else:  # audio-enabled datasource
-                    video_key, video, caption, control, waveform = result
+                    video_key, video, caption, control, decoded_audio = result
 
                 video: list[np.ndarray]
                 frame_size = (video[0].shape[1], video[0].shape[0])
@@ -942,7 +944,7 @@ class VideoDataset(BaseDataset):
                 if control is not None:
                     control = [resize_image_to_bucket(frame, bucket_reso) for frame in control]
 
-                return frame_size, video_key, video, caption, control, waveform, getattr(op, "datasource_index", None)
+                return frame_size, video_key, video, caption, control, decoded_audio, getattr(op, "datasource_index", None)
 
             future = executor.submit(fetch_and_resize, operator)
             futures.append(future)

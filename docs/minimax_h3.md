@@ -85,6 +85,7 @@ Qwen3-VL の processor と config は、Transformers が公式の [MiniMaxAI/Min
 - Width and height must be positive multiples of 32.
 - Frame count must be `17*n+5`. The released duration range is 5 to 15 seconds: at 24 fps, frame counts from 124 through 345 in steps of 17. `--allow_experimental_duration` bypasses only this duration check.
 - Target audio is optional. When present it is decoded as stereo 32000 Hz audio; when absent, the cache stores a silence placeholder that is never used as a supervision target (see [Audio policy](#audio-policy)).
+- Audio timestamps are honored so that sound stays aligned to the picture. Timestamps that merely wobble in both directions within 25 ms (screen and USB captures stamping pts from a 10 ms timer) are ignored and the samples are concatenated as decoded. A one-way jump (a cut at a non-frame boundary, a capture stall, a drifting audio clock) is repaired in place: a gap of up to 50 ms is filled with silence at its position and an overlap of up to 25 ms is trimmed, and the cache script logs one warning per repaired file. Larger jumps fail with `Audio stream is discontinuous`, and a training window containing more than 200 ms of repairs fails as well. Re-encode such files so their timestamps are contiguous (for example `ffmpeg -i in.mp4 -c:v copy -af aresample=async=1:min_hard_comp=0.001 -c:a aac out.mp4`) or cache them without audio.
 - Ref2VA references are ordered per record: from the JSONL `references` list for video datasets (the shared control-video fields are not used), and for image datasets also from control images (`control_directory` / `control_path`, one image reference per control). At most 12 references per record, of which at most 9 images, 3 videos, and 3 audio-bearing; at least one image or video; reference videos 2 to 15 seconds.
 - Expanded Qwen conditioning is limited to 32768 rows. A BF16 text cache at the limit is approximately 320 MiB for one sample.
 
@@ -95,6 +96,7 @@ Qwen3-VL の processor と config は、Transformers が公式の [MiniMaxAI/Min
 - 幅と高さは 32 の正の倍数である必要があります。
 - フレーム数は `17*n+5` である必要があります。公開されている長さの範囲は 5〜15 秒で、24 fps では 124 から 345 まで 17 刻みです。`--allow_experimental_duration` はこの長さのチェックのみを外します。
 - 対象音声は任意です。ある場合はステレオ 32000 Hz にデコードされ、ない場合はキャッシュに無音のプレースホルダが保存されます。プレースホルダは学習の教師には使われません（[Audio policy](#audio-policy) を参照）。
+- 音声のタイムスタンプは、音と映像の同期を保つために尊重されます。25 ms 以内で両方向に揺れるだけのタイムスタンプ（10 ms タイマーで pts を打つ画面キャプチャや USB キャプチャ）は無視され、デコード順にサンプルを連結します。一方向の跳び（フレーム境界以外でのカット、キャプチャの停滞、音声クロックのドリフト）はその場で修復されます。50 ms までのギャップはその位置に無音を埋め、25 ms までの重なりは切り詰め、修復したファイルごとにキャッシュスクリプトが警告を 1 行出します。それより大きい跳びは `Audio stream is discontinuous` で失敗し、学習ウィンドウ内の修復が合計 200 ms を超えた場合も失敗します。そのようなファイルはタイムスタンプが連続するように再エンコードする（例: `ffmpeg -i in.mp4 -c:v copy -af aresample=async=1:min_hard_comp=0.001 -c:a aac out.mp4`）か、音声なしでキャッシュしてください。
 - Ref2VA の参照は各レコードで順序付きで定義されます（記述順に意味があります）。動画データセットでは JSONL の `references` リストから取ります（共通の control 動画フィールドは使いません）。画像データセットではこれに加えて control 画像（`control_directory` / `control_path`、control 1 枚が画像参照 1 つ）からも取れます。レコードあたり最大 12 参照、うち画像は最大 9、動画は最大 3、音声付きは最大 3。画像または動画が最低 1 つ必要で、参照動画は 2〜15 秒です。
 - 展開後の Qwen 条件付けは 32768 行までです。上限での BF16 テキストキャッシュは 1 サンプルあたり約 320 MiB です。
 
