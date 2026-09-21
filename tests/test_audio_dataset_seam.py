@@ -86,6 +86,8 @@ def _write_video_with_embedded_audio(
     size: int = 64,
     pts_jitter: tuple[int, ...] = (),
     pts_shift: Optional[tuple[int, int]] = None,
+    video_start_frames: int = 0,
+    audio_start_samples: int = 0,
 ) -> None:
     # audio is interleaved in per-frame chunks like real muxers produce; in containers with a
     # coarse timestamp grid (Matroska: 1 ms) this quantizes chunk timestamps, which decode_audio
@@ -93,6 +95,9 @@ def _write_video_with_embedded_audio(
     # per chunk, in samples) the way wall-clock muxers do, without touching the samples.
     # pts_shift=(chunk_index, samples) shifts every chunk from chunk_index on, the permanent
     # timestamp step a stream-copied cut or a capture stall leaves behind.
+    # video_start_frames / audio_start_samples start one stream later than the other on the
+    # shared container clock, as capture muxers do (the video encoder starting seconds after
+    # the audio on USB captures, the audio a fraction of a second late on screen recordings).
     samples = (_sine_stereo(SAMPLE_RATE) * 32767.0).astype(np.int16)
     with av.open(str(path), mode="w") as container:
         video_stream = container.add_stream("mpeg4", rate=fps)
@@ -111,7 +116,7 @@ def _write_video_with_embedded_audio(
             interleaved[0, 1::2] = chunk[1]
             audio_frame = av.AudioFrame.from_ndarray(interleaved, format="s16", layout="stereo")
             audio_frame.sample_rate = SAMPLE_RATE
-            audio_frame.pts = start + jitter
+            audio_frame.pts = audio_start_samples + start + jitter
             for packet in audio_stream.encode(audio_frame):
                 container.mux(packet)
 
@@ -126,6 +131,7 @@ def _write_video_with_embedded_audio(
         for index in range(frames):
             image = np.full((size, size, 3), (index * 8) % 256, dtype=np.uint8)
             frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            frame.pts = video_start_frames + index
             for packet in video_stream.encode(frame):
                 container.mux(packet)
             mux_audio_chunk(audio_pos, samples_per_frame, chunk_offset(index))
@@ -241,6 +247,48 @@ def test_assemble_audio_chunks_treats_one_way_steps_as_drift_not_jitter():
     assert len(decoded.repairs) == 2
 
 
+def test_assemble_audio_chunks_places_the_waveform_at_the_origin():
+    first = torch.ones(2, 10)
+    second = torch.full((2, 10), 2.0)
+    chunks = [(100, first), (115, second)]  # a 5-sample gap at 110, repaired in place
+
+    # the origin defaults to the first chunk's start
+    anchored = assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5)
+    assert anchored.waveform.shape == (2, 25)
+    assert anchored.repairs == (AudioRepair(position=10, filled=5),)
+
+    # audio starting after the origin: silence in front, recorded as a repair at 0; the
+    # in-place repair moves with the waveform
+    late = assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5, origin_sample=93)
+    assert late.waveform.shape == (2, 32)
+    assert torch.all(late.waveform[:, :7] == 0)
+    assert torch.equal(late.waveform[:, 7:], anchored.waveform)
+    assert late.repairs == (AudioRepair(position=0, filled=7), AudioRepair(position=17, filled=5))
+    # within the timestamp tolerance: filled but not recorded, like a small gap
+    slight = assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5, origin_sample=98)
+    assert slight.waveform.shape == (2, 27)
+    assert slight.repairs == (AudioRepair(position=12, filled=5),)
+
+    # audio starting before the origin: the lead is dropped without a repair (nothing on the
+    # video's timeline is missing) and a repair before the origin disappears with it
+    early = assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5, origin_sample=104)
+    assert torch.equal(early.waveform, anchored.waveform[:, 4:])
+    assert early.repairs == (AudioRepair(position=6, filled=5),)
+    straddled = assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5, origin_sample=112)
+    assert straddled.repairs == (AudioRepair(position=0, filled=3),)
+    assert torch.equal(straddled.waveform, anchored.waveform[:, 12:])
+
+    # the jitter path (decode-order concatenation) is placed the same way
+    jittered = assemble_audio_chunks(
+        [(100, first), (113, second), (117, first)], channels=2, pts_jitter_range_samples=6, origin_sample=90
+    )
+    assert jittered.waveform.shape == (2, 40)
+    assert jittered.repairs == (AudioRepair(position=0, filled=10),)
+
+    with pytest.raises(ValueError, match="ends before the first video frame: clip.mp4"):
+        assemble_audio_chunks(chunks, channels=2, max_gap_fill_samples=5, origin_sample=200, context="clip.mp4")
+
+
 def test_slice_audio_window_pads_within_tolerance_and_errors_beyond():
     waveform = torch.ones(2, 1000)
 
@@ -272,6 +320,41 @@ def test_slice_audio_window_rejects_windows_with_too_many_repairs():
         slice_audio_window(waveform, start_sample=0, sample_count=1000, repairs=repairs, max_repair_samples=100, context="clip.mp4")
     # no limit given: repairs are ignored
     assert slice_audio_window(waveform, start_sample=0, sample_count=1000, repairs=repairs).shape == (2, 1000)
+
+
+def test_slice_audio_window_fills_a_tail_shortfall_within_the_repair_limit(caplog):
+    # the video runs past the end of the audio: the missing tail is silence, counted against
+    # the window's missing-audio budget together with the repairs inside it
+    waveform = torch.ones(2, 1000)
+    repairs = (AudioRepair(position=700, filled=100),)
+
+    with caplog.at_level(logging.WARNING, logger="musubi_tuner.dataset.audio_utils"):
+        padded = slice_audio_window(
+            waveform,
+            start_sample=500,
+            sample_count=800,
+            pad_tolerance=50,
+            repairs=repairs,
+            max_repair_samples=400,
+            context="clip.mp4",
+        )
+    assert padded.shape == (2, 800)
+    assert torch.all(padded[:, 500:] == 0)
+    assert any("Audio ends 300 samples before the window at sample 500" in record.message for record in caplog.records)
+
+    with pytest.raises(
+        ValueError,
+        match=r"materially short at sample 500: need 800, got 500 \(300 missing samples at the end plus 100 repaired, beyond the 350 allowed\): clip.mp4",
+    ):
+        slice_audio_window(
+            waveform,
+            start_sample=500,
+            sample_count=800,
+            pad_tolerance=50,
+            repairs=repairs,
+            max_repair_samples=350,
+            context="clip.mp4",
+        )
 
 
 def test_resolve_audio_source_prefers_sidecar_and_rejects_ambiguity(tmp_path: Path):
@@ -354,6 +437,60 @@ def test_decode_audio_zero_fills_a_permanent_pts_gap(tmp_path: Path, caplog):
     assert torch.allclose(decoded.waveform[:, :shift_at], samples[:, :shift_at], atol=1e-3)
     assert torch.allclose(decoded.waveform[:, shift_at + gap :], samples[:, shift_at:], atol=1e-3)
     assert any("gaps zero-filled" in record.message and str(path) in record.message for record in caplog.records)
+
+
+def test_decode_audio_drops_embedded_audio_recorded_before_the_first_video_frame(tmp_path: Path, caplog):
+    # a USB capture starts its video encoder after the audio: the audio track begins earlier
+    # on the container clock, and the waveform must start at the first video frame
+    lead_frames = 5  # 200 ms at 25 fps, on whole milliseconds for Matroska's 1 ms grid
+    path = tmp_path / "lead.mkv"
+    _write_video_with_embedded_audio(path, fps=25, frames=25, video_start_frames=lead_frames)
+
+    with caplog.at_level(logging.INFO, logger="musubi_tuner.dataset.audio_utils"):
+        decoded = decode_audio(AudioSource(path=path, embedded=True), sample_rate=SAMPLE_RATE, channels=2)
+
+    lead = lead_frames * (SAMPLE_RATE // 25)
+    samples = torch.from_numpy(_sine_stereo(SAMPLE_RATE))
+    assert decoded.repairs == ()
+    assert decoded.waveform.shape == (2, SAMPLE_RATE - lead)
+    assert torch.allclose(decoded.waveform, samples[:, lead:], atol=1e-3)
+    assert any(
+        "Audio starts 200.0 ms before the first video frame" in record.message and str(path) in record.message
+        for record in caplog.records
+    )
+
+
+def test_decode_audio_fills_silence_before_embedded_audio_that_starts_late(tmp_path: Path, caplog):
+    # a screen recording whose audio starts a fraction of a second after the video: the lead
+    # is silence on the video's timeline, recorded as a repair so the per-window limit sees it
+    lag = 3200  # 100 ms
+    path = tmp_path / "lag.mkv"
+    _write_video_with_embedded_audio(path, fps=25, frames=25, audio_start_samples=lag)
+
+    with caplog.at_level(logging.INFO, logger="musubi_tuner.dataset.audio_utils"):
+        decoded = decode_audio(AudioSource(path=path, embedded=True), sample_rate=SAMPLE_RATE, channels=2)
+
+    samples = torch.from_numpy(_sine_stereo(SAMPLE_RATE))
+    assert decoded.repairs == (AudioRepair(position=0, filled=lag),)
+    assert decoded.waveform.shape == (2, SAMPLE_RATE + lag)
+    assert torch.all(decoded.waveform[:, :lag] == 0)
+    assert torch.allclose(decoded.waveform[:, lag:], samples, atol=1e-3)
+    assert any("Audio starts 100.0 ms after the first video frame" in record.message for record in caplog.records)
+
+
+def test_decode_audio_keeps_a_sidecar_on_its_own_timeline(tmp_path: Path):
+    # a sidecar shares no clock with the video: its first sample is the first video frame,
+    # whatever the video's own start timestamp is
+    video_path = tmp_path / "clip.mkv"
+    _write_video_with_embedded_audio(video_path, fps=25, frames=25, video_start_frames=5)
+    samples = _sine_stereo(SAMPLE_RATE)
+    _write_wav(tmp_path / "clip.wav", samples)
+
+    source = resolve_audio_source(video_path)
+    assert source is not None and not source.embedded
+    waveform = decode_audio(source, sample_rate=SAMPLE_RATE, channels=2).waveform
+    assert waveform.shape == (2, SAMPLE_RATE)
+    assert torch.allclose(waveform, torch.from_numpy(samples), atol=1e-3)
 
 
 def test_decode_audio_roundtrips_wav(tmp_path: Path):
@@ -492,12 +629,35 @@ def test_video_dataset_uses_silence_placeholder_when_audio_is_missing(tmp_path: 
     assert torch.all(item.audio_content == 0)
 
 
-def test_video_dataset_errors_on_materially_short_audio(tmp_path: Path):
-    _write_video(tmp_path / "clip.mp4", fps=24, frames=48)
-    _write_wav(tmp_path / "clip.wav", _sine_stereo(1000))
+def test_video_dataset_aligns_embedded_audio_to_the_first_video_frame(tmp_path: Path):
+    # a 25 fps source (resampled to the dataset's 24 fps) whose video starts 5 frames = 200 ms
+    # after the audio on the container clock: the head crop's audio starts 200 ms in
+    lead = 5 * (SAMPLE_RATE // 25)
+    _write_video_with_embedded_audio(tmp_path / "clip.mkv", fps=25, frames=25, video_start_frames=5)
     (tmp_path / "clip.txt").write_text("caption", encoding="utf-8")
 
     dataset = _make_video_dataset(tmp_path, _spec())
+    batches = list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+    item = batches[0][1][0]
+    samples = torch.from_numpy(_sine_stereo(SAMPLE_RATE))
+    assert item.audio_present is True
+    assert item.audio_content.shape == (2, 5000)
+    assert torch.allclose(item.audio_content, samples[:, lead : lead + 5000], atol=1e-3)
+
+
+def test_video_dataset_fills_a_short_tail_within_the_limit_and_errors_beyond(tmp_path: Path):
+    # the window needs 5000 samples; audio ending 125 ms early (4000 samples at 32 kHz) is
+    # silence within the 200 ms limit, ending 281 ms early is an error
+    _write_video(tmp_path / "clip.mp4", fps=24, frames=48)
+    (tmp_path / "clip.txt").write_text("caption", encoding="utf-8")
+
+    _write_wav(tmp_path / "clip.wav", _sine_stereo(1000))
+    item = list(_make_video_dataset(tmp_path, _spec()).retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+    assert item.audio_content.shape == (2, 5000)
+    assert torch.all(item.audio_content[:, 1000:] == 0)
+
+    dataset = _make_video_dataset(tmp_path, _spec(samples_per_frame=2000))
     with pytest.raises(ValueError, match="materially short"):
         list(dataset.retrieve_latent_cache_batches(num_workers=1))
 

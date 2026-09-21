@@ -9,6 +9,8 @@ import av
 import numpy as np
 import torch
 
+from musubi_tuner.dataset.media_utils import video_origin_seconds
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -29,11 +31,12 @@ DEFAULT_PTS_JITTER_RANGE_SECONDS = 0.025
 # and an overlap up to this size is trimmed; anything larger is an error.
 DEFAULT_MAX_GAP_FILL_SECONDS = 0.05
 DEFAULT_MAX_OVERLAP_TRIM_SECONDS = 0.025
-# a training window whose in-place repairs add up to more than this is rejected: that much
-# missing audio inside one clip is not worth teaching
+# a training window whose missing audio (in-place repairs, silence before the audio starts or
+# after it ends) adds up to more than this is rejected: that much is not worth teaching
 DEFAULT_MAX_WINDOW_REPAIR_SECONDS = 0.2
 # tolerance for missing samples at the end of a stream (codec priming/padding); shortfalls
-# within this tolerance are zero-padded, larger shortfalls are an error
+# within this tolerance are zero-padded without being recorded, larger shortfalls count as
+# missing audio against the per-window limit
 DEFAULT_CODEC_PAD_TOLERANCE_SAMPLES = 800
 
 _CHANNEL_LAYOUTS = {1: "mono", 2: "stereo"}
@@ -145,7 +148,8 @@ class AudioRepair:
     """One in-place timeline repair made while assembling decoded chunks.
 
     `position` is the sample index in the assembled waveform where the repair sits; `filled`
-    zero samples were inserted for a pts gap, `trimmed` samples were dropped for a pts overlap.
+    zero samples were inserted for a pts gap (or, at position 0, for audio that starts after
+    the origin), `trimmed` samples were dropped for a pts overlap.
     """
 
     position: int
@@ -188,6 +192,36 @@ def _is_pts_jitter(deviations: Sequence[int], jitter_range: int, tolerance: int)
     return any(step > tolerance for step in steps) and any(step < -tolerance for step in steps)
 
 
+def _place_at_origin(decoded: DecodedAudio, offset_samples: int, tolerance: int, context_suffix: str) -> DecodedAudio:
+    """Moves the waveform's origin by `offset_samples`, the first chunk's start relative to the origin.
+
+    A positive offset means the audio starts after the origin: silence is inserted in front and,
+    beyond `tolerance`, recorded as a repair at position 0. A negative offset means it starts
+    before: those samples are dropped (nothing on the origin's timeline is lost, so this is not
+    a repair) and the recorded repairs move with the waveform.
+    """
+    if offset_samples == 0:
+        return decoded
+    waveform = decoded.waveform
+    if offset_samples > 0:
+        silence = torch.zeros(waveform.shape[0], offset_samples, dtype=waveform.dtype, device=waveform.device)
+        repairs = [AudioRepair(0, filled=offset_samples)] if offset_samples > tolerance else []
+        repairs.extend(AudioRepair(repair.position + offset_samples, repair.filled, repair.trimmed) for repair in decoded.repairs)
+        return DecodedAudio(torch.cat([silence, waveform], dim=1), tuple(repairs))
+
+    dropped = -offset_samples
+    if dropped >= waveform.shape[1]:
+        raise ValueError(f"Audio stream ends before the first video frame{context_suffix}")
+    repairs = []
+    for repair in decoded.repairs:
+        position = repair.position - dropped
+        if position >= 0:
+            repairs.append(AudioRepair(position, repair.filled, repair.trimmed))
+        elif repair.filled > -position:  # a gap straddling the origin: keep the part inside
+            repairs.append(AudioRepair(0, filled=repair.filled + position))
+    return DecodedAudio(waveform[:, dropped:], tuple(repairs))
+
+
 def assemble_audio_chunks(
     chunks: Sequence[tuple[int, torch.Tensor]],
     *,
@@ -196,6 +230,7 @@ def assemble_audio_chunks(
     pts_jitter_range_samples: int = 0,
     max_gap_fill_samples: int = 0,
     max_overlap_trim_samples: int = 0,
+    origin_sample: Optional[int] = None,
     sample_rate: Optional[int] = None,
     context: str = "",
 ) -> DecodedAudio:
@@ -209,8 +244,12 @@ def assemble_audio_chunks(
     Otherwise every chunk is placed at its pts position: a gap up to `max_gap_fill_samples` is
     zero-filled and an overlap up to `max_overlap_trim_samples` is trimmed, each recorded as an
     `AudioRepair` (gaps and overlaps within `timestamp_tolerance_samples` are handled the same
-    way but not recorded). A larger discontinuity is an error. `sample_rate` and `context` only
-    make the error message readable.
+    way but not recorded). A larger discontinuity is an error.
+
+    The waveform's sample 0 sits at `origin_sample` (the first chunk's start when None): audio
+    before the origin is dropped, audio starting after it is preceded by silence, recorded as a
+    repair at position 0 when it exceeds the timestamp tolerance (see `_place_at_origin`). `sample_rate` and `context` only make the
+    error messages readable.
     """
     if not chunks:
         raise ValueError("Audio chunk list is empty")
@@ -222,6 +261,9 @@ def assemble_audio_chunks(
         if chunk.ndim != 2 or chunk.shape[0] != channels:
             raise ValueError(f"Audio chunk must be [{channels},L], got {tuple(chunk.shape)}")
 
+    suffix = f": {context}" if context else ""
+    origin_offset = 0 if origin_sample is None else chunks[0][0] - origin_sample
+
     if pts_jitter_range_samples > 0:
         deviations = []
         nominal_start = chunks[0][0]
@@ -232,7 +274,9 @@ def assemble_audio_chunks(
             logger.debug(
                 f"Audio pts jitter spanning {max(deviations) - min(deviations)} samples; concatenating chunks in decode order"
             )
-            return DecodedAudio(torch.cat([chunk for _, chunk in chunks], dim=1))
+            return _place_at_origin(
+                DecodedAudio(torch.cat([chunk for _, chunk in chunks], dim=1)), origin_offset, timestamp_tolerance_samples, suffix
+            )
 
     def describe(samples: int, signed: bool = True) -> str:
         sign = "+" if signed else ""
@@ -240,7 +284,6 @@ def assemble_audio_chunks(
             return f"{samples:{sign}d} samples"
         return f"{samples * 1000 / sample_rate:{sign}.1f} ms ({samples:{sign}d} samples)"
 
-    suffix = f": {context}" if context else ""
     expected_start = chunks[0][0]
     assembled = []
     repairs = []
@@ -269,11 +312,20 @@ def assemble_audio_chunks(
             assembled.append(chunk)
             position += chunk.shape[1]
         expected_start = start_sample + chunk.shape[1] + max(0, -delta)
-    return DecodedAudio(torch.cat(assembled, dim=1), tuple(repairs))
+    return _place_at_origin(
+        DecodedAudio(torch.cat(assembled, dim=1), tuple(repairs)), origin_offset, timestamp_tolerance_samples, suffix
+    )
 
 
 def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> DecodedAudio:
     """Decodes the full audio stream to a [channels, samples] float32 waveform.
+
+    Embedded audio is placed on the video's timeline: sample 0 is the first video frame's
+    timestamp (the origin of the frame grid `load_video` builds in its timestamps mode), so
+    audio recorded before the first frame is dropped and audio that starts after it is preceded
+    by silence. Muxers routinely start the two streams at different times (seconds apart on USB
+    captures, 100-200 ms on screen recordings). A sidecar or explicit audio file has no shared
+    clock with the video and starts at its own first sample.
 
     Timeline defects are handled as `assemble_audio_chunks` describes; repairs beyond the
     timestamp tolerance are logged per file and returned for the per-window check in
@@ -311,19 +363,40 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> Dec
 
     if not chunks:
         raise ValueError(f"Audio source decoded no samples: {source.path}")
+
+    origin_sample = None
+    if source.embedded:
+        origin_seconds = video_origin_seconds(str(source.path))
+        if origin_seconds is not None:
+            origin_sample = round(origin_seconds * sample_rate)
+
+    jitter_range = round(sample_rate * DEFAULT_PTS_JITTER_RANGE_SECONDS)
     decoded = assemble_audio_chunks(
         chunks,
         channels=channels,
         timestamp_tolerance_samples=timestamp_tolerance,
-        pts_jitter_range_samples=round(sample_rate * DEFAULT_PTS_JITTER_RANGE_SECONDS),
+        pts_jitter_range_samples=jitter_range,
         max_gap_fill_samples=round(sample_rate * DEFAULT_MAX_GAP_FILL_SECONDS),
         max_overlap_trim_samples=round(sample_rate * DEFAULT_MAX_OVERLAP_TRIM_SECONDS),
+        origin_sample=origin_sample,
         sample_rate=sample_rate,
         context=str(source.path),
     )
-    if decoded.repairs:
-        gaps = [repair.filled for repair in decoded.repairs if repair.filled]
-        overlaps = [repair.trimmed for repair in decoded.repairs if repair.trimmed]
+    repairs = decoded.repairs
+    if origin_sample is not None:
+        offset = chunks[0][0] - origin_sample
+        if offset > timestamp_tolerance:
+            repairs = repairs[1:]  # the lead silence is reported here, not as a discontinuity
+        if abs(offset) > jitter_range:
+            relation = "after" if offset > 0 else "before"
+            remedy = "silence fills the lead" if offset > 0 else "the lead is dropped"
+            logger.info(
+                f"Audio starts {abs(offset) * 1000 / sample_rate:.1f} ms {relation} the first video frame in {source.path};"
+                f" {remedy} to keep it aligned"
+            )
+    if repairs:
+        gaps = [repair.filled for repair in repairs if repair.filled]
+        overlaps = [repair.trimmed for repair in repairs if repair.trimmed]
         to_ms = 1000 / sample_rate
         logger.warning(
             f"Audio pts discontinuities repaired in {source.path}: {len(gaps)} gaps zero-filled"
@@ -346,10 +419,12 @@ def slice_audio_window(
 ) -> torch.Tensor:
     """Extracts [C, sample_count] from a [C, L] waveform.
 
-    A terminal shortfall within pad_tolerance is zero-padded (codec priming/padding);
-    a larger shortfall is an error when require_exact is True. When the waveform's timeline
-    `repairs` are given with `max_repair_samples`, a window containing more repaired samples
-    than that is an error: the audio inside it is too broken to teach.
+    A terminal shortfall within pad_tolerance is zero-padded (codec priming/padding). When the
+    waveform's timeline `repairs` are given with `max_repair_samples`, the window's missing
+    audio (repaired samples inside it plus a larger terminal shortfall, i.e. video running past
+    the end of the audio) is padded with silence up to that budget and is an error beyond it:
+    the audio inside such a window is too broken or too absent to teach. Without a budget a
+    shortfall beyond pad_tolerance is an error when require_exact is True.
     """
     if waveform.ndim != 2:
         raise ValueError(f"Audio waveform must be [C, L], got {tuple(waveform.shape)}")
@@ -357,19 +432,24 @@ def slice_audio_window(
         raise ValueError("Audio window must have a nonnegative start and positive length")
 
     suffix = f": {context}" if context else ""
-    if repairs and max_repair_samples is not None:
-        repaired = repaired_samples_in_window(repairs, start_sample, sample_count)
-        if repaired > max_repair_samples:
-            raise ValueError(
-                f"Audio window at sample {start_sample} contains {repaired} repaired samples"
-                f" (zero-filled gaps and trimmed overlaps), beyond the {max_repair_samples} allowed{suffix}"
-            )
+    repaired = repaired_samples_in_window(repairs, start_sample, sample_count) if repairs else 0
+    if max_repair_samples is not None and repaired > max_repair_samples:
+        raise ValueError(
+            f"Audio window at sample {start_sample} contains {repaired} repaired samples"
+            f" (zero-filled gaps and trimmed overlaps), beyond the {max_repair_samples} allowed{suffix}"
+        )
     window = waveform[:, start_sample : start_sample + sample_count]
     if require_exact and window.shape[1] < sample_count:
         deficit = sample_count - window.shape[1]
         if deficit > pad_tolerance:
-            raise ValueError(
-                f"Audio source is materially short at sample {start_sample}: need {sample_count}, got {window.shape[1]}{suffix}"
+            if max_repair_samples is None or repaired + deficit > max_repair_samples:
+                budget = "" if max_repair_samples is None else f" plus {repaired} repaired, beyond the {max_repair_samples} allowed"
+                raise ValueError(
+                    f"Audio source is materially short at sample {start_sample}: need {sample_count}, got {window.shape[1]}"
+                    f" ({deficit} missing samples at the end{budget}){suffix}"
+                )
+            logger.warning(
+                f"Audio ends {deficit} samples before the window at sample {start_sample} does; the rest is silence{suffix}"
             )
         window = torch.nn.functional.pad(window, (0, deficit))
     if window.shape[1] == 0:

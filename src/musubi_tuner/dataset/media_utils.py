@@ -178,6 +178,21 @@ def resample_frame_indices(
     return indices
 
 
+def video_origin_seconds(video_path: str) -> Optional[float]:
+    """Timestamp of the first decoded video frame: the origin of the frame grid that
+    fps_resample_mode="timestamps" builds, so anything aligned to that grid (embedded audio)
+    is placed relative to it. None if the file has no video stream or decodes no frame; a
+    frame without a timestamp sits at 0, as in the loader."""
+    with av.open(video_path) as container:
+        if not container.streams.video:
+            return None
+        for frame in container.decode(container.streams.video[0]):
+            if frame.pts is None or frame.time_base is None:
+                return 0.0
+            return float(frame.pts * frame.time_base)
+    return None
+
+
 def _load_video_timestamp_resampled(
     video_path: str,
     target_fps: float,
