@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -19,21 +19,20 @@ AUDIO_SIDECAR_EXTENSIONS = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", "
 
 # tolerance for timestamp gaps/overlaps between decoded audio chunks (codec jitter)
 DEFAULT_TIMESTAMP_TOLERANCE_SAMPLES = 2
+# The largest pts discontinuity between decoded chunks that is handled rather than an error.
 # Chunk timestamps that wobble in both directions within this range around the decode-order
 # sample positions come from a muxer stamping pts with a jittery clock (screen and USB captures
-# on a 10 ms timer): the samples are contiguous and are concatenated in decode order. Below the
-# range a one-off pts step cannot be told from the wobble; concatenation absorbs it as a shift of
-# at most the range, too small to matter for audio-visual alignment.
-DEFAULT_PTS_JITTER_RANGE_SECONDS = 0.025
-# Larger or one-directional discontinuities (a cut at a non-frame boundary, capture stalls, an
-# audio clock drifting against the muxer clock) are repaired in place so that the audio stays
-# aligned to the video timestamps: a gap up to this size is zero-filled at its pts position
-# and an overlap up to this size is trimmed; anything larger is an error.
-DEFAULT_MAX_GAP_FILL_SECONDS = 0.05
-DEFAULT_MAX_OVERLAP_TRIM_SECONDS = 0.025
+# on a 10 ms timer, re-encodes of broadcast cuts with 30 ms swings): the samples are contiguous
+# and are concatenated in decode order. Larger or one-directional discontinuities (a cut at a
+# non-frame boundary, capture stalls, an audio clock drifting against the muxer clock) are
+# repaired in place so that the audio stays aligned to the video timestamps: a gap up to this
+# size is zero-filled at its pts position and an overlap up to this size is trimmed. Within a
+# wobble a one-off pts step cannot be told from the jitter; concatenation absorbs it as a shift
+# of at most the range, below the threshold at which audio-visual misalignment is perceived.
+DEFAULT_MAX_DISCONTINUITY_SECONDS = 0.05
 # a training window whose missing audio (in-place repairs, silence before the audio starts or
 # after it ends) adds up to more than this is rejected: that much is not worth teaching
-DEFAULT_MAX_WINDOW_REPAIR_SECONDS = 0.2
+DEFAULT_MAX_MISSING_SECONDS = 0.2
 # tolerance for missing samples at the end of a stream (codec priming/padding); shortfalls
 # within this tolerance are zero-padded without being recorded, larger shortfalls count as
 # missing audio against the per-window limit
@@ -60,12 +59,18 @@ class AudioSpec:
     `samples_per_crop` must be a picklable module-level function (not a lambda or
     closure): datasets carry the spec into DataLoader workers, which are spawned
     processes on Windows/macOS and pickle their arguments.
+
+    `max_discontinuity_seconds` and `max_missing_seconds` are the timeline tolerances of
+    `decode_audio` and `slice_audio_window`; cache scripts override them from the command
+    line (see `add_audio_tolerance_arguments`).
     """
 
     sample_rate: int
     channels: int
     samples_per_crop: Callable[[int], int]
     codec_pad_tolerance: int = DEFAULT_CODEC_PAD_TOLERANCE_SAMPLES
+    max_discontinuity_seconds: float = DEFAULT_MAX_DISCONTINUITY_SECONDS
+    max_missing_seconds: float = DEFAULT_MAX_MISSING_SECONDS
 
     def __post_init__(self):
         if self.sample_rate <= 0:
@@ -74,6 +79,36 @@ class AudioSpec:
             raise ValueError(f"Audio channels must be one of {sorted(_CHANNEL_LAYOUTS)}, got {self.channels}")
         if self.codec_pad_tolerance < 0:
             raise ValueError(f"Audio codec pad tolerance must be nonnegative, got {self.codec_pad_tolerance}")
+        if self.max_discontinuity_seconds < 0 or self.max_missing_seconds < 0:
+            raise ValueError("Audio timeline tolerances must be nonnegative")
+
+    @property
+    def max_missing_samples(self) -> int:
+        """The per-window cap on missing audio, in samples."""
+        return round(self.sample_rate * self.max_missing_seconds)
+
+
+def add_audio_tolerance_arguments(parser) -> None:
+    """Adds the audio timeline tolerance options to a cache script's argument parser."""
+    parser.add_argument(
+        "--audio_max_discontinuity",
+        type=float,
+        default=DEFAULT_MAX_DISCONTINUITY_SECONDS,
+        help="largest audio pts jump (seconds) handled by concatenation, silence fill or trimming; larger jumps fail."
+        f" Raise to force through badly muxed files at the cost of audio-visual alignment. Default {DEFAULT_MAX_DISCONTINUITY_SECONDS}",
+    )
+    parser.add_argument(
+        "--audio_max_missing",
+        type=float,
+        default=DEFAULT_MAX_MISSING_SECONDS,
+        help="most missing audio (seconds of silence fill, trimmed overlaps, audio starting late or ending early) allowed in"
+        f" one training window; windows with more fail. Default {DEFAULT_MAX_MISSING_SECONDS}",
+    )
+
+
+def apply_audio_tolerance_arguments(spec: AudioSpec, args) -> AudioSpec:
+    """Returns `spec` with the tolerances from `add_audio_tolerance_arguments` applied."""
+    return replace(spec, max_discontinuity_seconds=args.audio_max_discontinuity, max_missing_seconds=args.audio_max_missing)
 
 
 def probe_audio(path: str | Path) -> bool:
@@ -174,9 +209,9 @@ def repaired_samples_in_window(repairs: Sequence[AudioRepair], start_sample: int
     return sum(repair.filled + repair.trimmed for repair in repairs if start_sample <= repair.position < end)
 
 
-def window_repair_limit(sample_rate: int) -> int:
-    """The default per-window cap on repaired samples for a stream at `sample_rate`."""
-    return round(sample_rate * DEFAULT_MAX_WINDOW_REPAIR_SECONDS)
+def max_missing_samples(sample_rate: int, max_missing_seconds: float = DEFAULT_MAX_MISSING_SECONDS) -> int:
+    """The per-window cap on missing audio for a stream at `sample_rate`, in samples."""
+    return round(sample_rate * max_missing_seconds)
 
 
 def _is_pts_jitter(deviations: Sequence[int], jitter_range: int, tolerance: int) -> bool:
@@ -317,7 +352,18 @@ def assemble_audio_chunks(
     )
 
 
-def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> DecodedAudio:
+def decode_audio(
+    source: AudioSource,
+    *,
+    sample_rate: int,
+    channels: int,
+    max_discontinuity_seconds: float = DEFAULT_MAX_DISCONTINUITY_SECONDS,
+) -> DecodedAudio:
+    """Decodes `source` to a [C, L] waveform at `sample_rate`, honoring the stream's timestamps.
+
+    `max_discontinuity_seconds` bounds the pts discontinuities that are handled (see
+    `DEFAULT_MAX_DISCONTINUITY_SECONDS`); a larger jump is an error naming the position.
+    """
     """Decodes the full audio stream to a [channels, samples] float32 waveform.
 
     Embedded audio is placed on the video's timeline: sample 0 is the first video frame's
@@ -370,14 +416,14 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> Dec
         if origin_seconds is not None:
             origin_sample = round(origin_seconds * sample_rate)
 
-    jitter_range = round(sample_rate * DEFAULT_PTS_JITTER_RANGE_SECONDS)
+    max_discontinuity = round(sample_rate * max_discontinuity_seconds)
     decoded = assemble_audio_chunks(
         chunks,
         channels=channels,
         timestamp_tolerance_samples=timestamp_tolerance,
-        pts_jitter_range_samples=jitter_range,
-        max_gap_fill_samples=round(sample_rate * DEFAULT_MAX_GAP_FILL_SECONDS),
-        max_overlap_trim_samples=round(sample_rate * DEFAULT_MAX_OVERLAP_TRIM_SECONDS),
+        pts_jitter_range_samples=max_discontinuity,
+        max_gap_fill_samples=max_discontinuity,
+        max_overlap_trim_samples=max_discontinuity,
         origin_sample=origin_sample,
         sample_rate=sample_rate,
         context=str(source.path),
@@ -387,7 +433,7 @@ def decode_audio(source: AudioSource, *, sample_rate: int, channels: int) -> Dec
         offset = chunks[0][0] - origin_sample
         if offset > timestamp_tolerance:
             repairs = repairs[1:]  # the lead silence is reported here, not as a discontinuity
-        if abs(offset) > jitter_range:
+        if abs(offset) > max_discontinuity:
             relation = "after" if offset > 0 else "before"
             remedy = "silence fills the lead" if offset > 0 else "the lead is dropped"
             logger.info(

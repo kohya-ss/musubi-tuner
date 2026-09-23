@@ -20,6 +20,8 @@ from musubi_tuner.dataset.audio_utils import (
     AudioSource,
     AudioRepair,
     AudioSpec,
+    add_audio_tolerance_arguments,
+    apply_audio_tolerance_arguments,
     assemble_audio_chunks,
     audio_window_start,
     decode_audio,
@@ -416,6 +418,22 @@ def test_decode_audio_recovers_wall_clock_pts_jitter(tmp_path: Path):
     assert torch.allclose(waveform[:, :length], torch.from_numpy(samples[:, :length]), atol=1e-3)
 
 
+def test_decode_audio_jitter_range_follows_max_discontinuity(tmp_path: Path):
+    # a 30 ms two-way wobble (re-encodes of broadcast cuts): jitter within the default 50 ms,
+    # a hard error when the tolerance is tightened below the swing
+    path = tmp_path / "wobble.mkv"
+    _write_video_with_embedded_audio(path, pts_jitter=(0, 960, 0, 960))
+    source = AudioSource(path=path, embedded=True)
+
+    decoded = decode_audio(source, sample_rate=SAMPLE_RATE, channels=2)
+    assert decoded.repairs == ()
+    length = min(decoded.waveform.shape[1], SAMPLE_RATE)
+    assert torch.allclose(decoded.waveform[:, :length], torch.from_numpy(_sine_stereo(SAMPLE_RATE))[:, :length], atol=1e-3)
+
+    with pytest.raises(ValueError, match="beyond the repairable 25.0 ms"):
+        decode_audio(source, sample_rate=SAMPLE_RATE, channels=2, max_discontinuity_seconds=0.025)
+
+
 def test_decode_audio_zero_fills_a_permanent_pts_gap(tmp_path: Path, caplog):
     # a cut at a non-frame boundary (or a capture stall) shifts every later timestamp by the
     # gap: the later samples are placed at their pts, the gap is filled with silence, and the
@@ -519,9 +537,28 @@ def test_resample_frame_indices_nearest_frame_selection():
     assert indices == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
 
 
+def test_resample_frame_indices_reorders_frames_decoded_out_of_timestamp_order(caplog):
+    # the decoder handed out frames 3 and 4 swapped (a B-frame group with a stray timestamp):
+    # presentation order is timestamp order, so frame 4 is placed before frame 3
+    timestamps = [0.0, 1 / 30, 2 / 30, 4 / 30, 3 / 30, 5 / 30]
+    with caplog.at_level(logging.WARNING):
+        indices = resample_frame_indices(timestamps, source_frame_duration=1.0 / 30, target_fps=30, context="clip.mp4")
+    assert indices == [0, 1, 2, 4, 3, 5]
+    assert "frame 4 at 0.100s was decoded after frame 3 at 0.133s (1 such steps)" in caplog.text
+    assert "clip.mp4" in caplog.text
+
+    # the last frame carrying an early timestamp would otherwise truncate the clip's duration
+    timestamps = [index / 30 for index in range(12)]
+    timestamps[-1] = 8 / 30 + 0.001
+    indices = resample_frame_indices(timestamps, source_frame_duration=1.0 / 30, target_fps=30)
+    assert len(indices) == 11
+    assert indices[8:] == [8, 9, 10]
+
+
 def test_resample_frame_indices_names_the_file_and_frame_of_a_backwards_timestamp():
-    timestamps = [0.0, 1 / 30, 2 / 30, 4 / 30, 3 / 30]
-    with pytest.raises(ValueError, match=r"nondecreasing: frame 4 at 0\.100s follows frame 3 at 0\.133s: clip\.mp4"):
+    # a timestamp stepping back by more than a few frames is a broken timeline, not reordering
+    timestamps = [0.0, 1 / 30, 2 / 30, 10 / 30, 3 / 30]
+    with pytest.raises(ValueError, match=r"nondecreasing: frame 4 at 0\.100s follows frame 3 at 0\.333s: clip\.mp4"):
         resample_frame_indices(timestamps, source_frame_duration=1.0 / 30, target_fps=24, context="clip.mp4")
 
 
@@ -666,6 +703,48 @@ def test_video_dataset_fills_a_short_tail_within_the_limit_and_errors_beyond(tmp
     dataset = _make_video_dataset(tmp_path, _spec(samples_per_frame=2000))
     with pytest.raises(ValueError, match="materially short"):
         list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+    # a wider per-window missing-audio budget lets the same window through, filled with silence
+    spec = AudioSpec(sample_rate=SAMPLE_RATE, channels=2, samples_per_crop=lambda frames: frames * 2000, max_missing_seconds=1.0)
+    item = list(_make_video_dataset(tmp_path, spec).retrieve_latent_cache_batches(num_workers=1))[0][1][0]
+    assert item.audio_content.shape == (2, 10000)
+    assert torch.all(item.audio_content[:, 1000:] == 0)
+
+
+def test_video_dataset_skips_broken_media_only_when_asked(tmp_path: Path, caplog):
+    _write_video(tmp_path / "clip.mp4", fps=24, frames=48)
+    (tmp_path / "clip.txt").write_text("caption", encoding="utf-8")
+    _write_wav(tmp_path / "clip.wav", _sine_stereo(1000))  # audio ends 281 ms before the window does
+    _write_video(tmp_path / "good.mp4", fps=24, frames=48)
+    (tmp_path / "good.txt").write_text("caption", encoding="utf-8")
+    dataset = _make_video_dataset(tmp_path, _spec(samples_per_frame=2000))
+
+    with pytest.raises(ValueError, match="materially short"):
+        list(dataset.retrieve_latent_cache_batches(num_workers=1))
+
+    with caplog.at_level(logging.WARNING):
+        batches = list(dataset.retrieve_latent_cache_batches(num_workers=1, skip_broken=True))
+    assert [Path(item.item_key).name for _, items in batches for item in items] == ["good_00000-005.mp4"]
+    assert "Skipping a video that failed to load: Audio source is materially short" in caplog.text
+    assert "clip.mp4" in caplog.text
+    assert "Skipped 1 items that failed to load" in caplog.text
+
+
+def test_audio_tolerance_arguments_override_the_spec():
+    parser = argparse.ArgumentParser()
+    add_audio_tolerance_arguments(parser)
+    spec = _spec()
+
+    default = apply_audio_tolerance_arguments(spec, parser.parse_args([]))
+    assert default == spec
+    assert default.max_missing_samples == SAMPLE_RATE // 5
+
+    relaxed = apply_audio_tolerance_arguments(
+        spec, parser.parse_args(["--audio_max_discontinuity", "0.25", "--audio_max_missing", "1"])
+    )
+    assert relaxed.max_discontinuity_seconds == 0.25
+    assert relaxed.max_missing_samples == SAMPLE_RATE
+    assert relaxed.samples_per_crop is spec.samples_per_crop
 
 
 def test_add_audio_train_args_defaults():

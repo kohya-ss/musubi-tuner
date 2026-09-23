@@ -302,7 +302,7 @@ def encode_datasets(
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
-        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers, skip_broken=args.skip_broken)):
             batch: list[ItemInfo] = batch
             if not supports_alpha:
                 # make sure content has 3 channels
@@ -402,6 +402,12 @@ def setup_parser_common(*, include_vae: bool = True) -> argparse.ArgumentParser:
     )
     parser.add_argument("--num_workers", type=int, default=None, help="number of workers for dataset. default is cpu count-1")
     parser.add_argument("--skip_existing", action="store_true", help="skip existing cache files")
+    parser.add_argument(
+        "--skip_broken",
+        action="store_true",
+        help="skip media files that fail to decode or validate (logged with the reason) instead of stopping the run;"
+        " no cache is written for them",
+    )
     parser.add_argument("--keep_cache", action="store_true", help="keep cache files not in dataset")
     parser.add_argument("--debug_mode", type=str, default=None, choices=["image", "console", "video"], help="debug mode")
     parser.add_argument("--console_width", type=int, default=80, help="debug mode: console width")

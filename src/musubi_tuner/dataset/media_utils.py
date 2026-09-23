@@ -139,6 +139,12 @@ def resize_image_to_bucket(image: Union[Image.Image, np.ndarray], bucket_reso: t
     return image
 
 
+# A decoder may output frames up to this many positions away from their timestamp order (B-frame
+# reordering depth plus one); resample_frame_indices reorders such frames by timestamp, while a
+# timestamp stepping back further is a broken timeline.
+VIDEO_REORDER_TOLERANCE_FRAMES = 4
+
+
 def resample_frame_indices(
     timestamps: list[float],
     *,
@@ -150,20 +156,40 @@ def resample_frame_indices(
 
     Used by fps_resample_mode="timestamps" to normalize videos of any (possibly variable)
     frame rate to exactly target_fps, so that audio/video alignment is deterministic.
-    `context` (the video path) only makes the error for a broken timeline readable.
+    `timestamps` are in decoder output order; the returned indices refer to that order.
+
+    A decoder may hand out frames in an order that differs from their timestamps by a few
+    positions (a stray timestamp inside a B-frame group, or a decoder ordering by picture
+    order count while the file's timestamps disagree); presentation order is timestamp order,
+    so such frames are reordered by timestamp with a warning. A timestamp that steps back by
+    more than `VIDEO_REORDER_TOLERANCE_FRAMES` source frames is a broken timeline (a stream-copy
+    join, a timestamp wrap) and an error. `context` (the video path) only makes the messages
+    readable.
     """
     if not timestamps:
         return []
     if source_frame_duration <= 0 or target_fps <= 0:
         raise ValueError("Video frame durations and target FPS must be positive")
-    for index, (left, right) in enumerate(zip(timestamps, timestamps[1:]), start=1):
-        if right < left:
-            suffix = f": {context}" if context else ""
+    suffix = f": {context}" if context else ""
+    order = list(range(len(timestamps)))
+    backward_steps = [index for index in range(1, len(timestamps)) if timestamps[index] < timestamps[index - 1]]
+    if backward_steps:
+        index = max(backward_steps, key=lambda index: timestamps[index - 1] - timestamps[index])
+        left, right = timestamps[index - 1], timestamps[index]
+        if left - right > VIDEO_REORDER_TOLERANCE_FRAMES * source_frame_duration:
             raise ValueError(
                 f"Video timestamps must be nondecreasing: frame {index} at {right:.3f}s follows frame {index - 1}"
                 f" at {left:.3f}s{suffix}. Re-mux or re-encode the video so its frame timestamps are monotonic"
                 " (e.g. ffmpeg -i in.mp4 -fps_mode cfr -c:a copy out.mp4)."
             )
+        index = backward_steps[0]
+        logger.warning(
+            f"Video frame {index} at {timestamps[index]:.3f}s was decoded after frame {index - 1} at"
+            f" {timestamps[index - 1]:.3f}s ({len(backward_steps)} such steps); frames are reordered by timestamp{suffix}."
+            " If the result stutters, re-encode the video (e.g. ffmpeg -i in.mp4 -fps_mode cfr -c:a copy out.mp4)."
+        )
+        order.sort(key=timestamps.__getitem__)  # stable: equal timestamps keep decode order
+        timestamps = [timestamps[index] for index in order]
 
     origin = timestamps[0]
     normalized = [timestamp - origin for timestamp in timestamps]
@@ -182,23 +208,29 @@ def resample_frame_indices(
             left_distance = target_time - normalized[left]
             right_distance = normalized[right] - target_time
             source_index = left if left_distance <= right_distance + 1e-12 else right
-        indices.append(source_index)
+        indices.append(order[source_index])
     return indices
 
 
 def video_origin_seconds(video_path: str) -> Optional[float]:
-    """Timestamp of the first decoded video frame: the origin of the frame grid that
+    """Timestamp of the earliest video frame: the origin of the frame grid that
     fps_resample_mode="timestamps" builds, so anything aligned to that grid (embedded audio)
     is placed relative to it. None if the file has no video stream or decodes no frame; a
-    frame without a timestamp sits at 0, as in the loader."""
+    frame without a timestamp sits at 0, as in the loader. Only the first few frames are
+    decoded: the loader reorders frames by timestamp within `VIDEO_REORDER_TOLERANCE_FRAMES`
+    positions, so the earliest of those is its origin."""
+    origin = None
     with av.open(video_path) as container:
         if not container.streams.video:
             return None
-        for frame in container.decode(container.streams.video[0]):
+        for index, frame in enumerate(container.decode(container.streams.video[0])):
             if frame.pts is None or frame.time_base is None:
                 return 0.0
-            return float(frame.pts * frame.time_base)
-    return None
+            timestamp = float(frame.pts * frame.time_base)
+            origin = timestamp if origin is None else min(origin, timestamp)
+            if index >= 2 * VIDEO_REORDER_TOLERANCE_FRAMES:
+                break
+    return origin
 
 
 def _load_video_timestamp_resampled(

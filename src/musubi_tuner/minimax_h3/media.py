@@ -13,7 +13,7 @@ from PIL import Image
 import torch
 
 from musubi_tuner.dataset.audio_utils import AudioSource as H3AudioSource
-from musubi_tuner.dataset.audio_utils import AudioSpec, decode_audio, slice_audio_window, window_repair_limit
+from musubi_tuner.dataset.audio_utils import AudioSpec, decode_audio, slice_audio_window
 from musubi_tuner.dataset.datasources import ContentDatasource
 from musubi_tuner.dataset.media_utils import load_video
 
@@ -364,8 +364,10 @@ class H3MediaDecoder(Protocol):
 class PyAVH3MediaDecoder:
     """Decodes MiniMax-H3 reference media (target media is decoded by the shared dataset layer)."""
 
-    def __init__(self, terminal_tolerance_samples: int = AUDIO_TERMINAL_TOLERANCE_SAMPLES):
-        self.terminal_tolerance_samples = terminal_tolerance_samples
+    def __init__(self, audio_spec: AudioSpec = H3_AUDIO_SPEC):
+        # the same spec the shared dataset layer decodes target audio with, so reference audio
+        # gets the same tolerances (cache scripts pass the spec with the command-line overrides)
+        self.audio_spec = audio_spec
 
     def decode_audio(
         self,
@@ -377,16 +379,22 @@ class PyAVH3MediaDecoder:
     ) -> torch.Tensor:
         if start_sample < 0 or sample_count <= 0:
             raise ValueError("MiniMax-H3 audio window must have a nonnegative start and positive length")
-        decoded = decode_audio(source, sample_rate=AUDIO_SAMPLE_RATE, channels=2)
+        spec = self.audio_spec
+        decoded = decode_audio(
+            source,
+            sample_rate=spec.sample_rate,
+            channels=spec.channels,
+            max_discontinuity_seconds=spec.max_discontinuity_seconds,
+        )
         return slice_audio_window(
             decoded.waveform,
             start_sample=start_sample,
             sample_count=sample_count,
-            pad_tolerance=self.terminal_tolerance_samples,
+            pad_tolerance=spec.codec_pad_tolerance,
             require_exact=require_exact,
             context=str(source.path),
             repairs=decoded.repairs,
-            max_repair_samples=window_repair_limit(AUDIO_SAMPLE_RATE),
+            max_repair_samples=spec.max_missing_samples,
         )
 
     def decode_reference_visual(
