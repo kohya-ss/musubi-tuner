@@ -15,6 +15,7 @@ import torch
 import musubi_tuner.cache_latents as cache_latents
 from musubi_tuner.dataset import config_utils
 from musubi_tuner.dataset.architectures import ARCHITECTURE_MINIMAX_H3
+from musubi_tuner.dataset.audio_utils import add_audio_tolerance_arguments, apply_audio_tolerance_arguments
 from musubi_tuner.dataset.cache_io import save_latent_cache_minimax_h3
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -528,6 +529,7 @@ def setup_parser() -> argparse.ArgumentParser:
         help="allow target crops outside the released 5-15 second duration range",
     )
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="disable numpy memmap while loading safetensors")
+    add_audio_tolerance_arguments(parser)
     return parser
 
 
@@ -541,7 +543,8 @@ def main() -> None:
     logger.info("Loading dataset config from %s", args.dataset_config)
     user_config = config_utils.load_user_config(args.dataset_config)
     blueprint = blueprint_generator.generate(user_config, args, architecture=ARCHITECTURE_MINIMAX_H3)
-    dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=H3_AUDIO_SPEC)
+    audio_spec = apply_audio_tolerance_arguments(H3_AUDIO_SPEC, args)
+    dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group, audio_spec=audio_spec)
     datasets = dataset_group.datasets
 
     plans = plan_h3_datasets(datasets, task=args.task, one_frame=args.one_frame)
@@ -593,7 +596,7 @@ def main() -> None:
         # the silence placeholder is a constant per audio VAE, so encode it once for every item
         silence_audio_latent = encode_one_frame_silence_latent(audio_vae)
 
-    decoder = PyAVH3MediaDecoder()
+    decoder = PyAVH3MediaDecoder(audio_spec)
     presence_counts: Counter[bool] = Counter()
     one_frame_item_count = 0
 

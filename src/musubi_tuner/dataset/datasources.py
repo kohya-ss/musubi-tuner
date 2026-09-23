@@ -604,7 +604,12 @@ class VideoDatasource(ContentDatasource):
         source = self.audio_sources[idx]
         if source is None:
             return None
-        return decode_audio(source, sample_rate=self.audio_spec.sample_rate, channels=self.audio_spec.channels)
+        return decode_audio(
+            source,
+            sample_rate=self.audio_spec.sample_rate,
+            channels=self.audio_spec.channels,
+            max_discontinuity_seconds=self.audio_spec.max_discontinuity_seconds,
+        )
 
     def _create_video_fetcher(self, index: int):
         if self.audio_spec is not None:

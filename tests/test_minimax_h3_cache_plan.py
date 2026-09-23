@@ -142,7 +142,7 @@ class _FakeCacheDataset:
     def __init__(self, items: list[ItemInfo]):
         self.items = items
 
-    def retrieve_latent_cache_batches(self, num_workers):
+    def retrieve_latent_cache_batches(self, num_workers, skip_broken=False):
         yield (64, 64), list(self.items)
 
     def retrieve_text_encoder_output_cache_batches(self, num_workers):
@@ -166,7 +166,7 @@ def test_latent_driver_skips_items_whose_cache_the_architecture_deems_current(tm
     items = _cache_items(tmp_path)
     for item in items:
         Path(item.latent_cache_path).touch()  # both files exist; only the metadata check tells them apart
-    args = SimpleNamespace(skip_existing=True, num_workers=1, batch_size=None, keep_cache=True)
+    args = SimpleNamespace(skip_existing=True, skip_broken=False, num_workers=1, batch_size=None, keep_cache=True)
     encoded = []
 
     cache_latents.encode_datasets(

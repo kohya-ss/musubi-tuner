@@ -121,6 +121,8 @@ When `--debug_mode` is specified, the actual caching process is not performed.
 
 By default, cache files not included in the dataset are automatically deleted. You can still keep cache files as before by specifying `--keep_cache`.
 
+A media file that fails to decode or validate stops the run. Specify `--skip_broken` to log the reason and skip such files instead; no cache is written for them and the number of skipped files is logged at the end.
+
 <details>
 <summary>日本語</summary>
 
@@ -143,6 +145,8 @@ VRAMが足りない場合は、`--vae_spatial_tile_sample_min_size`を128程度�
 `--debug_mode`指定時は、実際のキャッシュ処理は行われません。
 
 デフォルトではデータセットに含まれないキャッシュファイルは自動的に削除されます。`--keep_cache`を指定すると、キャッシュファイルを残すことができます。
+
+デコードや検証に失敗したメディアファイルがあると処理は停止します。`--skip_broken`を指定すると、理由をログに出してそのファイルをスキップします。スキップしたファイルのキャッシュは作成されず、終了時に件数が表示されます。
 
 </details>
 

@@ -441,7 +441,7 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
     for i, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{i}]")
         all_latent_cache_paths = []
-        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers, skip_broken=args.skip_broken)):
             batch: list[ItemInfo] = batch  # type: ignore
 
             # make sure content has 3 channels
