@@ -194,6 +194,43 @@ def test_tiny_vit3d_decoder_runs_without_comfy_runtime():
     assert torch.isfinite(output).all()
 
 
+def _tiny_video_vae_classes(monkeypatch):
+    """Shrink the published architecture so a checkpoint round trip fits in a test."""
+    import functools
+
+    monkeypatch.setattr(
+        video_vae, "ViT3DDecoder", functools.partial(ViT3DDecoder, num_layers=1, heads=2, dim_head=8, num_register_tokens=1)
+    )
+    monkeypatch.setattr(video_vae, "MiniMaxH3VideoVAE", functools.partial(MiniMaxH3VideoVAE, ch=32))
+
+
+def test_load_video_vae_without_decoder_reads_only_encoder_tensors(tmp_path: Path, monkeypatch):
+    _tiny_video_vae_classes(monkeypatch)
+    full = video_vae.MiniMaxH3VideoVAE()
+    # parameters and the persistent mask_token buffer; the normalization buffers keep their constants
+    for tensor in list(full.parameters()) + [full.decoder.mask_token]:
+        nn.init.uniform_(tensor, -0.1, 0.1)
+    path = tmp_path / "video_vae.safetensors"
+    save_file({f"vae.{key}": value for key, value in full.state_dict().items()}, str(path))
+
+    encoder_only = video_vae.load_video_vae(path, device="cpu", dtype=torch.float32, load_decoder=False)
+
+    assert encoder_only.decoder is None and encoder_only.post_quant_conv is None
+    assert not any(key.startswith(video_vae.VIDEO_VAE_DECODER_KEY_PREFIXES) for key in encoder_only.state_dict())
+    assert all(not parameter.is_meta for parameter in encoder_only.parameters())
+    pixels = torch.rand(1, 3, 17, 32, 32) * 2 - 1
+    with torch.no_grad():
+        expected = full.encode_moments(pixels)
+        got = encoder_only.encode_moments(pixels)
+    assert torch.equal(got, expected)
+    with pytest.raises(RuntimeError, match="without its decoder"):
+        encoder_only.decode(got.chunk(2, dim=1)[0])
+
+    reloaded = video_vae.load_video_vae(path, device="cpu", dtype=torch.float32)
+    assert reloaded.decoder is not None
+    assert set(reloaded.state_dict()) == set(full.state_dict())
+
+
 def test_resolve_safetensors_files_expands_first_shard_and_accepts_single_files(tmp_path: Path):
     first = tmp_path / "model-00001-of-00002.safetensors"
     second = tmp_path / "model-00002-of-00002.safetensors"

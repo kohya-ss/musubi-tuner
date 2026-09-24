@@ -348,6 +348,7 @@ python minimax_h3_cache_text_encoder_outputs.py \
 - `--skip_existing` rebuilds any cache whose stored metadata (task, cache seed, crop, format version, media and VAE fingerprints) no longer matches, so it is safe to leave on. Fingerprints are size + mtime, so a re-copied file triggers a one-time re-cache.
 - `--skip_broken` logs and skips a media file that fails to decode or validate (a broken timeline, audio ending far too early, an unreadable file) instead of stopping the run; no cache is written for it and a summary count is logged at the end. Without it the first such file stops the run, and a rerun with `--skip_existing` keeps the caches already written but decodes every file again. `--audio_max_discontinuity` and `--audio_max_missing` (seconds) widen the audio timeline limits described in Dataset preparation.
 - The latent cache script prints the supervised-audio fraction at the end; a warning means no item had real audio.
+- Latent caching loads only the encoder of the video VAE. The ViT decoder holds about 93% of the VAE's parameters (roughly 9 GB in the fp32 the encoder runs in) and is never used while caching, so the script needs far less VRAM than sampling or generation.
 - Text caching accepts the ConvRot INT8 and NVFP4+AWQ text encoders as well. On VRAM-limited GPUs add `--text_encoder_blocks_to_swap 50`, and `--text_encoder_attn_mode flash_attention_2` for long Ref2VA presentations.
 
 Per-recipe additions to the text-caching command:
@@ -364,6 +365,7 @@ latent のキャッシュとテキストエンコーダー出力のキャッシ�
 - `--skip_existing` は、保存されたメタデータ（task、cache seed、切り出し位置、フォーマットのバージョン、メディアと VAE のフィンガープリント）が一致しないキャッシュを作り直すので、常に付けておいて安全です。フィンガープリントはサイズ＋mtime なので、ファイルをコピーし直すと 1 回だけ再キャッシュされます。
 - `--skip_broken` を付けると、デコードや検証に失敗したメディアファイル（壊れたタイムライン、極端に早く終わる音声、読めないファイル）は理由をログに出してスキップし、実行を止めません。そのファイルのキャッシュは作られず、終了時に件数をまとめて表示します。付けない場合は最初の失敗で止まり、`--skip_existing` 付きの再実行は作成済みキャッシュを保持しますが全ファイルのデコードは再度行います。`--audio_max_discontinuity` と `--audio_max_missing`（秒）はデータセットの準備で説明した音声タイムラインの上限を広げます。
 - latent キャッシュのスクリプトは終了時に、実音声のあるサンプルの割合を表示します。warning が出た場合、実音声のあるアイテムが 1 つもありません。
+- latent キャッシュは video VAE のエンコーダーだけを読み込みます。ViT デコーダーは VAE のパラメータの約 93%（エンコード時の fp32 で約 9 GB）を占めますがキャッシュでは使わないため、サンプル生成や推論よりずっと少ない VRAM で動きます。
 - テキストキャッシュは ConvRot INT8 と NVFP4+AWQ のテキストエンコーダーも受け付けます。VRAM が少ない GPU では `--text_encoder_blocks_to_swap 50` を、Ref2VA の参照が多くテキストエンコーダーへの入力が長くなる場合は `--text_encoder_attn_mode flash_attention_2` を追加してください。
 
 テキストキャッシュのコマンドへのレシピ別の追加:
