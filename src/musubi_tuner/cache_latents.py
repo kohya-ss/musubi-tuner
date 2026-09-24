@@ -25,6 +25,7 @@ def show_image(
     image: Union[list[Union[Image.Image, np.ndarray], Union[Image.Image, np.ndarray]]],
     control_image: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
 ) -> int:
+    from musubi_tuner.utils import cv2_compat  # noqa: F401 - must be imported before `import cv2`
     import cv2
 
     imgs = (

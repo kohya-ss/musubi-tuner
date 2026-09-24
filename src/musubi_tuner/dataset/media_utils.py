@@ -9,6 +9,7 @@ from typing import Optional, Union, TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
+from musubi_tuner.utils import cv2_compat  # noqa: F401 - must be imported before `import cv2`
 import cv2
 import av
 
