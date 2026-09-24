@@ -93,6 +93,7 @@ def encode_and_save_batch(vae: qwen_image_autoencoder_kl.AutoencoderKLQwenImage,
 
     # debugging: decode and visualize the latents
     """
+    from musubi_tuner.utils import cv2_compat  # noqa: F401 - must be imported before `import cv2`
     import cv2
 
     for batch_idx in range(latents.shape[0]):

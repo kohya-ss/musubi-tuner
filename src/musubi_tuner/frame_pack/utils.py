@@ -1,5 +1,4 @@
 import os
-import cv2
 import json
 import random
 import glob
@@ -10,35 +9,6 @@ import datetime
 import torchvision
 
 from PIL import Image
-
-
-def min_resize(x, m):
-    if x.shape[0] < x.shape[1]:
-        s0 = m
-        s1 = int(float(m) / float(x.shape[0]) * float(x.shape[1]))
-    else:
-        s0 = int(float(m) / float(x.shape[1]) * float(x.shape[0]))
-        s1 = m
-    new_max = max(s1, s0)
-    raw_max = max(x.shape[0], x.shape[1])
-    if new_max < raw_max:
-        interpolation = cv2.INTER_AREA
-    else:
-        interpolation = cv2.INTER_LANCZOS4
-    y = cv2.resize(x, (s1, s0), interpolation=interpolation)
-    return y
-
-
-def d_resize(x, y):
-    H, W, C = y.shape
-    new_min = min(H, W)
-    raw_min = min(x.shape[0], x.shape[1])
-    if new_min < raw_min:
-        interpolation = cv2.INTER_AREA
-    else:
-        interpolation = cv2.INTER_LANCZOS4
-    y = cv2.resize(x, (W, H), interpolation=interpolation)
-    return y
 
 
 def resize_and_center_crop(image, target_width, target_height):
@@ -381,21 +351,6 @@ def visualize_txt_as_img(width, height, text, font_path="font/DejaVuSans.ttf", s
         y += line_height
 
     return np.array(txt)
-
-
-def blue_mark(x):
-    x = x.copy()
-    c = x[:, :, 2]
-    b = cv2.blur(c, (9, 9))
-    x[:, :, 2] = ((c - b) * 16.0 + b).clip(-1, 1)
-    return x
-
-
-def green_mark(x):
-    x = x.copy()
-    x[:, :, 2] = -1
-    x[:, :, 0] = -1
-    return x
 
 
 def frame_mark(x):

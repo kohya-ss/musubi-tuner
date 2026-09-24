@@ -16,6 +16,7 @@ from accelerate import Accelerator
 from safetensors.torch import load_file, save_file
 from safetensors import safe_open
 from PIL import Image
+from musubi_tuner.utils import cv2_compat  # noqa: F401 - must be imported before `import cv2`
 import cv2
 import numpy as np
 import torchvision.transforms.functional as TF
