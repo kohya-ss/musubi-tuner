@@ -207,6 +207,25 @@ class BaseDataset(torch.utils.data.Dataset):
     def prepare_for_training(self, num_timestep_buckets: Optional[int] = None):
         pass
 
+    def _warn_if_cache_count_mismatch(self, datasource_len: int, cache_item_keys: set) -> None:
+        if datasource_len == 0:
+            return
+        cache_count = len(cache_item_keys)
+        if cache_count == datasource_len:
+            return
+        if cache_count > datasource_len:
+            logger.warning(
+                f"Cache directory contains {cache_count} distinct item(s) but the datasource declares {datasource_len}."
+                " This may indicate a shared or stale cache directory."
+                " The cache directory must not be shared between datasets (see docs/dataset_config.md)."
+            )
+        else:
+            logger.warning(
+                f"Cache directory contains {cache_count} distinct item(s) but the datasource declares {datasource_len}."
+                " The cache may be incomplete — please re-run caching."
+                " The cache directory must not be shared between datasets (see docs/dataset_config.md)."
+            )
+
     def set_seed(self, seed: int, shared_epoch: SharedEpoch):
         self.seed = seed
         self.shared_epoch = shared_epoch
@@ -590,6 +609,7 @@ class ImageDataset(BaseDataset):
         # assign cache files to item info
         # (width, height) -> [ItemInfo] or (width, height, other conds...) -> [ItemInfo]
         bucketed_item_info: dict[Union[tuple[int, int], Any], list[ItemInfo]] = {}
+        cache_item_keys: set[str] = set()
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -598,6 +618,7 @@ class ImageDataset(BaseDataset):
             image_size = (image_width, image_height)
 
             item_key = "_".join(tokens[:-2])
+            cache_item_keys.add(item_key)
             text_encoder_output_cache_file = os.path.join(self.cache_directory, f"{item_key}_{self.architecture}_te.safetensors")
             if not os.path.exists(text_encoder_output_cache_file):
                 logger.warning(f"Text encoder output cache file not found: {text_encoder_output_cache_file}")
@@ -638,6 +659,8 @@ class ImageDataset(BaseDataset):
             for _ in range(self.num_repeats):
                 bucket.append(item_info)
             bucketed_item_info[bucket_reso] = bucket
+
+        self._warn_if_cache_count_mismatch(len(self.datasource), cache_item_keys)
 
         # prepare batch manager
         self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
@@ -1014,6 +1037,7 @@ class VideoDataset(BaseDataset):
 
         # assign cache files to item info
         bucketed_item_info: dict[tuple[int, int, int], list[ItemInfo]] = {}  # (width, height, frame_count) -> [ItemInfo]
+        cache_item_keys: set[str] = set()
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
 
@@ -1025,6 +1049,7 @@ class VideoDataset(BaseDataset):
             frame_pos, frame_count = int(frame_pos), int(frame_count)
 
             item_key = "_".join(tokens[:-3])
+            cache_item_keys.add(item_key)
             if self.architecture == ARCHITECTURE_MINIMAX_H3:
                 text_item_key = f"{item_key}_{tokens[-3]}"
             else:
@@ -1045,6 +1070,8 @@ class VideoDataset(BaseDataset):
             for _ in range(self.num_repeats):
                 bucket.append(item_info)
             bucketed_item_info[bucket_reso] = bucket
+
+        self._warn_if_cache_count_mismatch(len(self.datasource), cache_item_keys)
 
         # prepare batch manager
         self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
