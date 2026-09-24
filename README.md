@@ -65,7 +65,7 @@ If you find this project helpful, please consider supporting its development via
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
 - September 24, 2026
-    - Added support for Windows on ARM64 (e.g. NVIDIA RTX Spark PCs). [PR #1132](https://github.com/kohya-ss/musubi-tuner/pull/1132), [PR #1133](https://github.com/kohya-ss/musubi-tuner/pull/1133), [PR #TBD](https://github.com/kohya-ss/musubi-tuner/pull/TBD)
+    - Added support for Windows on ARM64 (e.g. NVIDIA RTX Spark PCs). [PR #1132](https://github.com/kohya-ss/musubi-tuner/pull/1132), [PR #1133](https://github.com/kohya-ss/musubi-tuner/pull/1133), [PR #1134](https://github.com/kohya-ss/musubi-tuner/pull/1134)
         - `opencv-python` is now optional (a Pillow/NumPy fallback is used when it is missing) and is skipped automatically on Windows on ARM64, where it has no wheel. For details, please refer to [Windows on ARM64](#windows-on-arm64).
         - `av` and `safetensors` in `pyproject.toml` have been updated to 17.1.0 and 0.8.0, the first versions with Windows ARM64 wheels. `av` 17.1.0 bundles FFmpeg 8.0; on macOS, its arm64 wheel requires macOS 14 or later.
 - September 16, 2026
