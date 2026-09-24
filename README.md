@@ -167,7 +167,7 @@ For detailed information on specific architectures, configurations, and advanced
 
 ### pip based installation
 
-Python 3.10 or later is required (verified with 3.10).
+Python 3.10 or later is required (verified with 3.10 and 3.12; the dependencies also install on 3.13 and 3.14).
 
 Create a virtual environment and install PyTorch and torchvision matching your CUDA version. 
 
@@ -197,7 +197,7 @@ pip install ascii-magic matplotlib tensorboard prompt-toolkit
 
 ### Windows on ARM64
 
-Windows on ARM64 (e.g. NVIDIA RTX Spark PCs) is supported. Use Python 3.12: the Windows ARM64 wheels of `av` require Python 3.11 or later, and those of PyTorch require 3.12. Install a PyTorch build for Windows on ARM64 that supports your GPU, then run `pip install -e .` as above. The following packages have no Windows ARM64 wheels and are handled automatically:
+Windows on ARM64 (e.g. NVIDIA RTX Spark PCs) is supported. Use Python 3.12 or later (the Windows ARM64 wheels of `av` require Python 3.11 or later, and those of PyTorch are newer still). Install a PyTorch build for Windows on ARM64 that supports your GPU and Python version, then run `pip install -e .` as above. The following packages have no Windows ARM64 wheels and are handled automatically:
 
 - `opencv-python` is skipped by an environment marker in `pyproject.toml`. The training and dataset pipeline only uses a small subset of OpenCV (`cv2.resize`, `cv2.cvtColor` and the debug-only `cv2.imshow`), so a Pillow/NumPy fallback is registered as `cv2` when OpenCV is missing. The fallback reproduces OpenCV's `INTER_AREA` and `INTER_LINEAR` resizing, which the dataset pipeline uses, so cached latents match an install with OpenCV up to rounding. `INTER_CUBIC` (used when an inference script upscales a start/end image) goes through Pillow and differs slightly. On other platforms you can also uninstall `opencv-python` after `pip install -e .` if you prefer to avoid it; the fallback takes over automatically.
 - `tensorboard` 2.x depends on `grpcio`, which has no Windows ARM64 wheel (pip would silently fall back to the ancient tensorboard 1.10). Install `tensorboardX` instead; `--log_with tensorboard` works unchanged through it. View the logs with TensorBoard on another machine.
