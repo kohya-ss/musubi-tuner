@@ -109,6 +109,14 @@ name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
+[tool.pyright]
+# Type-check against the project's supported Python (matches requires-python) and
+# resolve third-party imports from the uv-managed virtualenv instead of whatever
+# system interpreter happens to be on PATH.
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+
 [tool.ruff]
 line-length = 132
 indent-width = 4
