@@ -6,14 +6,14 @@ readme = "README.md"
 requires-python = ">=3.10, <3.13"
 dependencies = [
     "accelerate==1.6.0",
-    "av==15.1.0",
+    "av==17.1.0",
     "bitsandbytes",
     "diffusers==0.32.1",
     "einops==0.7.0",
     "huggingface-hub==0.34.3",
     "opencv-python==4.10.0.84",
     "pillow>=11.3.0",
-    "safetensors==0.4.5",
+    "safetensors==0.8.0",
     # "sageattention>=1.0.6",
     "toml==0.10.2",
     "tqdm==4.67.1",
