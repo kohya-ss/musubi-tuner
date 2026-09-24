@@ -6,7 +6,7 @@ Please create a TOML file for dataset configuration.
 
 Image and video datasets are supported. The configuration file can include multiple datasets, either image or video datasets, with caption text files or metadata JSONL files.
 
-The cache directory must be different for each dataset.
+The cache directory must be different for each dataset. Sharing a cache directory between datasets mixes the cached items of the other dataset into training.
 
 Each video is extracted frame by frame without additional processing and used for training. It is recommended to use videos with a frame rate of 24fps for HunyuanVideo, 16fps for Wan2.1 and 30fps for FramePack. You can check the videos that will be trained using `--debug_mode video` when caching latent (see [here](/README.md#latent-caching)).
 <details>
