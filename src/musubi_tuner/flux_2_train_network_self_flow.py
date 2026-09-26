@@ -8,8 +8,9 @@ rockerBOO's PR #913 implementation onto these seams.
 
 Reference: https://github.com/kohya-ss/musubi-tuner/pull/913
 
-This file is the proposed extension surface, not a runnable trainer. Do not
-use it to start a training run yet.
+The vanilla Flux 2 branch is runnable when ``--self_flow`` is off. The enabled
+Self-Flow algorithm remains an incomplete skeleton and must not be used until
+its teacher/student step and lifecycle hooks are implemented.
 
 Internal extension point — no API stability guarantees. Subclasses live in
 this repo; if you fork, expect breakage on updates.
@@ -81,6 +82,11 @@ class Flux2SelfFlowNetworkTrainer(Flux2NetworkTrainer):
                 )
             if args.mask_ratio > 0.5:
                 raise ValueError(f"--mask_ratio ({args.mask_ratio}) must be <= 0.5 (paper constraint R_M <= 0.5)")
+
+    def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> Optional[str]:
+        if args.self_flow:
+            return "--self_flow requires teacher/student candidate state and is not supported by Forward XM"
+        return None
 
     # endregion
 
