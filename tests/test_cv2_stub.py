@@ -1,8 +1,10 @@
 """Tests for the optional-OpenCV fallback (musubi_tuner/utils/cv2_compat.py + _cv2_stub.py).
 
-The equivalence tests need the real opencv-python and are skipped without it.
-The registration test runs in a subprocess with ``cv2`` blocked so it works
-either way.
+The equivalence tests need the real opencv-python and are skipped without it
+(``cv2`` may already be the stub at import time, registered by another test
+module through cv2_compat). The remaining tests exercise the stub directly and
+run either way; the registration test does so in a subprocess with ``cv2``
+blocked.
 """
 
 import subprocess
@@ -14,8 +16,11 @@ import pytest
 
 from musubi_tuner.utils import _cv2_stub as stub
 
-real_cv2 = pytest.importorskip("cv2")
-if getattr(real_cv2, "_IS_CV2_STUB", False):
+try:
+    import cv2 as real_cv2
+except ImportError:
+    real_cv2 = None
+if real_cv2 is not None and getattr(real_cv2, "_IS_CV2_STUB", False):
     real_cv2 = None
 
 needs_opencv = pytest.mark.skipif(real_cv2 is None, reason="real opencv-python not installed")

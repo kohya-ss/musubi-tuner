@@ -3,7 +3,7 @@ name = "musubi-tuner"
 version = "0.3.5"
 description = "Musubi Tuner by kohya_ss"
 readme = "README.md"
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.10"
 dependencies = [
     "accelerate==1.6.0",
     "av==17.1.0",
@@ -11,7 +11,9 @@ dependencies = [
     "diffusers==0.32.1",
     "einops==0.7.0",
     "huggingface-hub==0.34.3",
-    "opencv-python==4.10.0.84",
+    # opencv-python has no wheel for Windows on ARM64 (e.g. NVIDIA RTX Spark PCs); a Pillow/NumPy
+    # fallback (musubi_tuner.utils.cv2_compat) is used automatically when it is missing.
+    "opencv-python==4.10.0.84; platform_machine != 'ARM64'",
     "pillow>=11.3.0",
     "safetensors==0.8.0",
     # "sageattention>=1.0.6",
@@ -63,8 +65,11 @@ conflicts = [
 [dependency-groups]
 dev = [
   "ascii-magic==2.3.0",
-  "matplotlib==3.10.0",
-  "tensorboard",
+  "matplotlib==3.10.5",  # 3.10.5 is the first release with Windows ARM64 wheels
+  # tensorboard 2.x depends on grpcio, which has no wheel for Windows on ARM64; tensorboardX is a
+  # pure-Python drop-in that accelerate uses automatically for --log_with tensorboard.
+  "tensorboard; platform_machine != 'ARM64'",
+  "tensorboardX; platform_machine == 'ARM64'",
   "prompt-toolkit==3.0.51",
   # ruff 0.16.0 enabled many new lint rules by default, producing ~2000 new findings;
   # pinned below 0.16 until those are triaged and resolved

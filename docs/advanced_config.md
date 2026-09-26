@@ -239,7 +239,7 @@ To view logs in TensorBoard, open another command prompt and activate the virtua
 tensorboard --logdir=logs
 ```
 
-(tensorboard installation is required.)
+(tensorboard installation is required. On Windows on ARM64, `tensorboardX` is installed instead, and the logs are written in the same format; view them with TensorBoard on another machine.)
 
 Then open a browser and access http://localhost:6006/ to display it.
 
@@ -257,7 +257,7 @@ TensorBoardでログを確認するには、別のコマンドプロンプトを
 tensorboard --logdir=logs
 ```
 
-（tensorboardのインストールが必要です。）
+（tensorboardのインストールが必要です。Windows on ARM64 では代わりに `tensorboardX` をインストールします。ログは同じ形式で保存されるため、別のマシンの TensorBoard で参照してください。）
 
 その後ブラウザを開き、http://localhost:6006/ へアクセスすると表示されます。
 </details>

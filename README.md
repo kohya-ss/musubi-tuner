@@ -21,6 +21,7 @@
     - [Documentation](#documentation)
   - [Installation](#installation)
     - [pip based installation](#pip-based-installation)
+    - [Windows on ARM64](#windows-on-arm64)
     - [uv based installation](#uv-based-installation-experimental)
     - [Linux/MacOS](#linuxmacos)
     - [Windows](#windows)
@@ -63,6 +64,10 @@ If you find this project helpful, please consider supporting its development via
 
 GitHub Discussions Enabled: We've enabled GitHub Discussions for community Q&A, knowledge sharing, and technical information exchange. Please use Issues for bug reports and feature requests, and Discussions for questions and sharing experiences. [Join the conversation →](https://github.com/kohya-ss/musubi-tuner/discussions)
 
+- September 24, 2026
+    - Added support for Windows on ARM64 (e.g. NVIDIA RTX Spark PCs). [PR #1132](https://github.com/kohya-ss/musubi-tuner/pull/1132), [PR #1133](https://github.com/kohya-ss/musubi-tuner/pull/1133), [PR #1134](https://github.com/kohya-ss/musubi-tuner/pull/1134)
+        - `opencv-python` is now optional (a Pillow/NumPy fallback is used when it is missing) and is skipped automatically on Windows on ARM64, where it has no wheel. For details, please refer to [Windows on ARM64](#windows-on-arm64).
+        - `av` and `safetensors` in `pyproject.toml` have been updated to 17.1.0 and 0.8.0, the first versions with Windows ARM64 wheels. `av` 17.1.0 bundles FFmpeg 8.0; on macOS, its arm64 wheel requires macOS 14 or later.
 - September 16, 2026
     - Added experimental support for MiniMax-H3 (LoRA training and joint video/audio generation). Many thanks to sdbds for the initial [PR #1018](https://github.com/kohya-ss/musubi-tuner/pull/1018) and follow-ups.
         - For details, please refer to the [documentation](./docs/minimax_h3.md) and the [one-frame (image) training documentation](./docs/minimax_h3_1f.md). The list of merged features and remaining work is tracked in the [MiniMax-H3 support roadmap](https://github.com/kohya-ss/musubi-tuner/issues/1029).
@@ -162,7 +167,7 @@ For detailed information on specific architectures, configurations, and advanced
 
 ### pip based installation
 
-Python 3.10 or later is required (verified with 3.10).
+Python 3.10 or later is required (verified with 3.10 and 3.12; the dependencies also install on 3.13 and 3.14).
 
 Create a virtual environment and install PyTorch and torchvision matching your CUDA version. 
 
@@ -183,12 +188,25 @@ Optionally, you can use FlashAttention and SageAttention (**for inference only**
 Optional dependencies for additional features:
 - `ascii-magic`: Used for dataset verification
 - `matplotlib`: Used for timestep visualization
-- `tensorboard`: Used for logging training progress
+- `tensorboard`: Used for logging training progress (on Windows on ARM64, install `tensorboardX` instead; see below)
 - `prompt-toolkit`: Used for interactive prompt editing in Wan2.1 and FramePack inference scripts. If installed, it will be automatically used in interactive mode. Especially useful in Linux environments for easier prompt editing.
 
 ```bash
 pip install ascii-magic matplotlib tensorboard prompt-toolkit
 ```
+
+### Windows on ARM64
+
+Windows on ARM64 (e.g. NVIDIA RTX Spark PCs) is supported. Use Python 3.12 or later (the Windows ARM64 wheels of `av` require Python 3.11 or later, and those of PyTorch are newer still). Install a PyTorch build for Windows on ARM64 that supports your GPU and Python version, then run `pip install -e .` as above. The following packages have no Windows ARM64 wheels and are handled automatically:
+
+- `opencv-python` is skipped by an environment marker in `pyproject.toml`. The training and dataset pipeline only uses a small subset of OpenCV (`cv2.resize`, `cv2.cvtColor` and the debug-only `cv2.imshow`), so a Pillow/NumPy fallback is registered as `cv2` when OpenCV is missing. The fallback reproduces OpenCV's `INTER_AREA` and `INTER_LINEAR` resizing, which the dataset pipeline uses, so cached latents match an install with OpenCV up to rounding. `INTER_CUBIC` (used when an inference script upscales a start/end image) goes through Pillow and differs slightly. On other platforms you can also uninstall `opencv-python` after `pip install -e .` if you prefer to avoid it; the fallback takes over automatically.
+- `tensorboard` 2.x depends on `grpcio`, which has no Windows ARM64 wheel (pip would silently fall back to the ancient tensorboard 1.10). Install `tensorboardX` instead; `--log_with tensorboard` works unchanged through it. View the logs with TensorBoard on another machine.
+
+```bash
+pip install ascii-magic matplotlib tensorboardX prompt-toolkit
+```
+
+Optional packages such as `triton`, `sageattention` and `flash-attn` have not been verified on Windows on ARM64; the scripts run without them.
 
 ### uv based installation (experimental)
 
