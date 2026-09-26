@@ -581,12 +581,13 @@ def main() -> None:
             if source is not None:
                 media_fingerprints[source.path] = fingerprint_file(source.path)
 
-    logger.info("Loading MiniMax-H3 video VAE from %s", args.video_vae)
+    logger.info("Loading MiniMax-H3 video VAE (encoder only) from %s", args.video_vae)
     video_vae = load_video_vae(
         args.video_vae,
         device=device,
         dtype=VIDEO_VAE_ENCODE_DTYPE,
         disable_numpy_memmap=args.disable_numpy_memmap,
+        load_decoder=False,  # caching never decodes; the ViT decoder is ~9 GB in fp32
     )
     logger.info("Loading MiniMax-H3 audio VAE from %s", args.audio_vae)
     audio_vae = load_audio_vae(args.audio_vae, device=device, dtype=torch.float32, disable_numpy_memmap=args.disable_numpy_memmap)

@@ -29,6 +29,9 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 VIDEO_VAE_ENCODE_DTYPE = torch.float32
 VIDEO_VAE_DECODE_DTYPE = torch.float16
+# State-dict prefixes of the ViT decoder, which encode-only users (latent caching) leave unloaded:
+# the decoder holds ~2.4B of the VAE's ~2.6B parameters.
+VIDEO_VAE_DECODER_KEY_PREFIXES = ("decoder.", "post_quant_conv.")
 
 LATENTS_MEAN = [
     0.858090341091156,
@@ -447,6 +450,11 @@ class MiniMaxH3VideoVAE(nn.Module):
         self.register_buffer("pixel_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1), persistent=False)
         self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
 
+    def drop_decoder(self) -> None:
+        """Remove the ViT decoder for encode-only use; `decode` then raises until the VAE is reloaded."""
+        self.decoder = None
+        self.post_quant_conv = None
+
     def _split_tiles(self, length: int) -> tuple[list[int], list[int], list[int]]:
         if self.tile_size >= length:
             return [0], [length], []
@@ -564,6 +572,10 @@ class MiniMaxH3VideoVAE(nn.Module):
         return moments[:, :, : -self.token_drop] if self.token_drop else moments
 
     def _decode_video(self, latents: torch.Tensor) -> torch.Tensor:
+        if self.decoder is None:
+            raise RuntimeError(
+                "MiniMax-H3 video VAE was loaded without its decoder (encode-only); reload it with load_decoder=True"
+            )
         chunk_tokens = self.tokens_chunk_size
         chunk_frames = chunk_tokens * self.vae_ratio_t
         padded_token_count = latents.shape[2] + self.token_drop
@@ -678,21 +690,37 @@ def load_video_vae(
     device: str | torch.device = "cpu",
     dtype: torch.dtype = VIDEO_VAE_DECODE_DTYPE,
     disable_numpy_memmap: bool = False,
+    *,
+    load_decoder: bool = True,
 ) -> MiniMaxH3VideoVAE:
+    """Load the video VAE onto `device` in `dtype`.
+
+    `load_decoder=False` skips the ViT decoder's tensors entirely (they are never read from the
+    file) and returns an encode-only VAE; latent caching uses this since the decoder is ~93% of
+    the parameters.
+    """
     from accelerate import init_empty_weights
 
     from musubi_tuner.minimax_h3.checkpoint import strip_key_prefixes
-    from musubi_tuner.utils.safetensors_utils import load_safetensors
+    from musubi_tuner.utils.device_utils import synchronize_device
+    from musubi_tuner.utils.safetensors_utils import MemoryEfficientSafeOpen
 
     with init_empty_weights():
         vae = MiniMaxH3VideoVAE()
+    if not load_decoder:
+        vae.drop_decoder()
     # loading straight to the target device avoids a resident full-model CPU copy
     device = torch.device(device)
-    sd = load_safetensors(str(path), device=device, disable_mmap=True, disable_numpy_memmap=disable_numpy_memmap)
-    sd = strip_key_prefixes(sd, ("first_stage_model.", "video_vae.", "vae."))
-    for key in sd.keys():
-        if sd[key].is_floating_point():
-            sd[key] = sd[key].to(dtype)
+    sd = {}
+    with MemoryEfficientSafeOpen(str(path), disable_numpy_memmap=disable_numpy_memmap) as f:
+        # stripped model key -> key in the file
+        file_keys = strip_key_prefixes({key: key for key in f.keys()}, ("first_stage_model.", "video_vae.", "vae."))
+        for key, file_key in file_keys.items():
+            if not load_decoder and key.startswith(VIDEO_VAE_DECODER_KEY_PREFIXES):
+                continue
+            tensor = f.get_tensor(file_key, device=device)
+            sd[key] = tensor.to(dtype) if tensor.is_floating_point() else tensor
+    synchronize_device(device)
     vae.load_state_dict(sd, strict=True, assign=True)
     vae.to(device)
     vae.eval()
