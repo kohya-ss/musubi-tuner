@@ -69,6 +69,13 @@ class HiDreamO1NetworkTrainer(NetworkTrainer):
     def architecture_full_name(self) -> str:
         return ARCHITECTURE_HIDREAM_O1_FULL
 
+    def get_best_of_k_incompatibility_reason(self, args: argparse.Namespace) -> Optional[str]:
+        del args
+        return (
+            "HiDream-O1 uses candidate-local noise scaling/clipping and may add a batch-reduced DINO loss; "
+            "its candidate state cannot be reconstructed by the standard Forward XM path"
+        )
+
     def handle_model_specific_args(self, args):
         self.dit_dtype = torch.bfloat16
         args.dit_dtype = model_utils.dtype_to_str(self.dit_dtype)

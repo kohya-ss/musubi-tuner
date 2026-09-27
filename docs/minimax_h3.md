@@ -485,6 +485,26 @@ loss はゼロには収束しません（teacher はテキストから分から�
 
 </details>
 
+### Best-of-K
+
+`--h3_best_of_k K` enables MiniMax-H3 best-of-K when `K > 1`.
+`--h3_best_of_k_stream video` (the default) varies and ranks video noise by
+video MSE on multi-frame batches; `audio` varies and ranks audio noise by audio
+MSE. One-frame image batches always search video noise. The selected update
+still optimizes video loss plus weighted audio loss, so a stream-focused winner
+need not minimize that joint objective. An audio-search batch with zero
+effective audio weight falls back to one ordinary forward; `--video_only` with
+active audio search is rejected. MiniMax-H3 rejects the common
+`--xm_best_of_k` option for `K > 1`. Best-of-K supports the training adapter
+and guidance loss, but rejects `--h3_teacher_matching` when `K > 1` because
+the teacher's decomposed loss is not the candidate-ranking MSE.
+
+The former experimental `--h3_video_best_of_k K` spelling is not an alias;
+replace it with `--h3_best_of_k K --h3_best_of_k_stream video`. See
+[Explorative Modeling and Forward XM](./explorative_modeling.md) for semantics,
+cost, runtime-kind metrics, compatibility, and the strict selected-score
+non-finite policy.
+
 ### Audio policy
 
 Every sample contributes the video loss. A sample cached with real audio additionally contributes `--audio_loss_weight` (default 1.0) times the audio loss; items without real audio never contribute audio loss. `--video_only` disables audio supervision entirely (the model still attends to the audio latents as context). Because H3 is single-stream, a video-only LoRA modifies the weights the audio path uses too: treat audio from a fully video-only LoRA as unconstrained output. Image datasets should always pass `--video_only` (their audio rows are silence placeholders and would contribute nothing anyway).

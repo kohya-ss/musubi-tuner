@@ -146,6 +146,7 @@ Musubi Tunerの解説記事執筆や、関連ツールの開発に取り組ん�
 - [MiniMax-H3 (1フレーム学習)](./docs/minimax_h3_1f.md)
 
 **共通設定・その他:**
+- [探索的モデリングとForward XM](./docs/explorative_modeling.md)
 - [データセット設定](./docs/dataset_config.md)
 - [高度な設定](./docs/advanced_config.md)
 - [学習中のサンプル生成](./docs/sampling_during_training.md)
