@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from importlib.util import find_spec
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -561,6 +562,55 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                     self.assertEqual(image.size, (32, 32))
                     pixels = np.array(image)
             self.assertTrue(((pixels[..., 3] > 0) & (pixels[..., 3] < 255)).any())
+
+    def check_filtered_adapter_merge(self, lycoris):
+        from musubi_tuner import qwen_image_21_generate_image as generate
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            model = tiny()
+            original = {key: value.clone() for key, value in model.state_dict().items()}
+            save_file(original, str(path / "dit.safetensors"))
+            (path / "config.json").write_text(json.dumps(TINY_CONFIG))
+            weights = {}
+            for index in range(2):
+                key = f"lora_unet_transformer_blocks_{index}_attn_to_q"
+                weights[f"{key}.lora_down.weight"] = torch.ones(2, 16)
+                weights[f"{key}.lora_up.weight"] = torch.ones(16, 2)
+                weights[f"{key}.alpha"] = torch.tensor(2.0)
+            save_file(weights, str(path / "lora.safetensors"))
+            args = generate.setup_parser().parse_args(
+                [
+                    "--dit",
+                    str(path / "dit.safetensors"),
+                    "--vae",
+                    "unused",
+                    "--text_encoder",
+                    "unused",
+                    "--prompt",
+                    "test",
+                    "--save_path",
+                    temp,
+                    "--lora_weight",
+                    str(path / "lora.safetensors"),
+                    "--include_patterns",
+                    "transformer_blocks",
+                    "--exclude_patterns",
+                    "transformer_blocks_1",
+                ]
+            )
+            args.lycoris = lycoris
+            merged = generate.load_dit_model(args, torch.device("cpu"), torch.float32, [0.5])
+            for key, value in merged.state_dict().items():
+                expected = original[key] + 1.0 if key == "transformer_blocks.0.attn.to_q.weight" else original[key]
+                torch.testing.assert_close(value, expected)
+
+    def test_inference_lora_filtering(self):
+        self.check_filtered_adapter_merge(False)
+
+    @unittest.skipUnless(find_spec("lycoris"), "LyCORIS is not installed")
+    def test_inference_lycoris_filtering(self):
+        self.check_filtered_adapter_merge(True)
 
     def test_sampling_guidance_and_scheduler(self):
         from contextlib import nullcontext

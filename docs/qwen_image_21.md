@@ -206,6 +206,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--image_size` specifies height and width. Both must be multiples of 32.
 - For editing, add `--control_image_path path/to/control0.png path/to/control1.png`. Control images retain their order and are resized to approximately 1M pixels while preserving their aspect ratio.
 - Omit `--lora_weight` to use the base model. Multiple LoRAs can be supplied with matching multipliers; a single multiplier applies to all supplied LoRAs.
+- Use `--include_patterns` and `--exclude_patterns` to select LoRA modules by regular expression, with one pattern per weight file. For LyCORIS adapters, install `lycoris-lora` and add `--lycoris`. Adapters are merged before FP8 quantization.
 - `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
 - `--flow_shift` specifies a fixed flow shift. If omitted, sampling uses dynamic shifting, as in training previews.
 - `--text_encoder_cpu`, `--fp8_vl`, `--fp8_scaled`, `--blocks_to_swap`, and `--vae_tiling` are available to reduce VRAM usage.
@@ -219,6 +220,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--image_size`には高さ、幅の順に指定します。どちらも32の倍数である必要があります。
 - 編集には`--control_image_path path/to/control0.png path/to/control1.png`を追加します。制御画像は指定順を保持し、アスペクト比を維持して約100万画素にリサイズされます。
 - ベースモデルを使用する場合は`--lora_weight`を省略します。複数のLoRAと対応する倍率を指定できます。倍率が1個の場合はすべてのLoRAに適用されます。
+- `--include_patterns`と`--exclude_patterns`でLoRAモジュールを正規表現で選択できます。重みファイルごとに1つのパターンを指定します。LyCORISを使用する場合は`lycoris-lora`をインストールし、`--lycoris`を指定してください。アダプターはFP8量子化の前にマージされます。
 - `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
 - `--flow_shift`で固定シフトを指定します。省略時は学習中のプレビューと同じ動的シフトを使用します。
 - VRAM使用量を減らすには`--text_encoder_cpu`、`--fp8_vl`、`--fp8_scaled`、`--blocks_to_swap`、`--vae_tiling`が利用できます。

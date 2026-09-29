@@ -3,6 +3,7 @@ import gc
 import logging
 import random
 from datetime import datetime
+from importlib.util import find_spec
 
 import torch
 from safetensors.torch import load_file
@@ -11,6 +12,7 @@ from musubi_tuner.hv_generate_video import save_images_grid
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling, qwen_image_21_utils
 from musubi_tuner.utils.device_utils import clean_memory_on_device
+from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +30,13 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fp8_vl", action="store_true", help="Use FP8 storage for the text encoder language blocks")
     parser.add_argument("--lora_weight", type=str, nargs="+", default=None, help="LoRA weight paths")
     parser.add_argument("--lora_multiplier", type=float, nargs="+", default=None, help="LoRA multipliers, default is 1.0")
+    parser.add_argument(
+        "--include_patterns", type=str, nargs="*", default=None, help="LoRA module include patterns, one per weight"
+    )
+    parser.add_argument(
+        "--exclude_patterns", type=str, nargs="*", default=None, help="LoRA module exclude patterns, one per weight"
+    )
+    parser.add_argument("--lycoris", action="store_true", help="Use LyCORIS for inference")
     parser.add_argument("--prompt", type=str, required=True, help="Prompt for generation")
     parser.add_argument("--negative_prompt", type=str, default=None, help="Negative prompt for CFG")
     parser.add_argument("--control_image_path", type=str, nargs="+", default=None, help="Ordered control image paths")
@@ -48,6 +57,62 @@ def setup_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtype, multipliers: list[float] | None):
+    """Load the DiT and merge filtered adapters before quantization."""
+    lora_weights_list = []
+    for index, path in enumerate(args.lora_weight or []):
+        include = args.include_patterns[index] if args.include_patterns and len(args.include_patterns) > index else None
+        exclude = args.exclude_patterns[index] if args.exclude_patterns and len(args.exclude_patterns) > index else None
+        lora_weights_list.append(filter_lora_state_dict(load_file(path), include, exclude))
+    transformer = qwen_image_21_model.load_model(
+        args.dit,
+        device=device,
+        loading_device="cpu" if args.blocks_to_swap or args.lycoris else device,
+        dtype=dtype,
+        fp8_scaled=args.fp8_scaled and not args.lycoris,
+        config_path=args.dit_config,
+        disable_numpy_memmap=args.disable_numpy_memmap,
+        attn_mode="torch" if args.attn_mode == "sdpa" else args.attn_mode,
+        lora_weights_list=None if args.lycoris else lora_weights_list,
+        lora_multipliers=multipliers,
+    )
+    if args.lycoris:
+        from lycoris.kohya import create_network_from_weights
+
+        for index, weights_sd in enumerate(lora_weights_list):
+            network, _ = create_network_from_weights(
+                multiplier=multipliers[index] if multipliers else 1.0,
+                file=None,
+                weights_sd=weights_sd,
+                unet=transformer,
+                text_encoder=None,
+                vae=None,
+                for_inference=True,
+            )
+            if not network.unet_loras:
+                raise ValueError("LyCORIS weights contain no modules that match the Qwen-Image 2.1 model")
+            # Pass the multiplier to each module; the Kohya wrapper merges with 1.0.
+            for module in network.unet_loras:
+                module.to(device="cpu", dtype=dtype)
+                module.merge_to(multipliers[index] if multipliers else 1.0)
+        if args.fp8_scaled:
+            from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
+
+            state_dict = optimize_state_dict_with_fp8(
+                transformer.state_dict(), device, ["transformer_blocks"], ["norm"], move_to_device=args.blocks_to_swap == 0
+            )
+            apply_fp8_monkey_patch(transformer, state_dict, use_scaled_mm=False)
+            transformer.load_state_dict(state_dict, strict=True, assign=True)
+    transformer.eval().requires_grad_(False)
+    if args.blocks_to_swap:
+        transformer.enable_block_swap(args.blocks_to_swap, BlockSwapConfig(device, supports_backward=False))
+        transformer.move_to_device_except_swap_blocks(device)
+        transformer.switch_block_swap_for_inference()
+    else:
+        transformer.to(device)
+    return transformer
+
+
 def generate(args: argparse.Namespace) -> list[str]:
     """Load the models and save a generated RGBA image."""
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -66,6 +131,8 @@ def generate(args: argparse.Namespace) -> list[str]:
             multipliers = multipliers * len(args.lora_weight)
     if args.blocks_to_swap < 0:
         raise ValueError("--blocks_to_swap must be non-negative")
+    if args.lycoris and find_spec("lycoris") is None:
+        raise ImportError("LyCORIS is not installed. Install lycoris-lora to use --lycoris")
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     logger.info(f"Seed: {seed}")
@@ -83,23 +150,7 @@ def generate(args: argparse.Namespace) -> list[str]:
     clean_memory_on_device(device)
 
     vae = qwen_image_21_utils.load_vae(args.vae, "cpu", dtype, args.vae_tiling)
-    transformer = qwen_image_21_model.load_model(
-        args.dit,
-        device=device,
-        loading_device="cpu" if args.blocks_to_swap else device,
-        dtype=dtype,
-        fp8_scaled=args.fp8_scaled,
-        config_path=args.dit_config,
-        disable_numpy_memmap=args.disable_numpy_memmap,
-        attn_mode="torch" if args.attn_mode == "sdpa" else args.attn_mode,
-        lora_weights_list=[load_file(path) for path in args.lora_weight] if args.lora_weight else None,
-        lora_multipliers=multipliers,
-    )
-    transformer.eval().requires_grad_(False)
-    if args.blocks_to_swap:
-        transformer.enable_block_swap(args.blocks_to_swap, BlockSwapConfig(device, supports_backward=False))
-        transformer.move_to_device_except_swap_blocks(device)
-        transformer.switch_block_swap_for_inference()
+    transformer = load_dit_model(args, device, dtype, multipliers)
 
     height, width = args.image_size
     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
