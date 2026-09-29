@@ -250,6 +250,14 @@ class QwenImage21IntegrationTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(decoded).all())
             torch.testing.assert_close(utils.unpack_latents(utils.pack_latents(latent), 2, 2), latent)
 
+            images = [image, np.full((64, 32, 4), 64, dtype=np.uint8), np.full_like(image, 192)]
+            expected = [utils.encode_image(vae, value)[0] for value in images]
+            with patch.object(vae, "encode", wraps=vae.encode) as encode:
+                actual = utils.encode_images(vae, images)
+            self.assertEqual([call.args[0].shape[0] for call in encode.call_args_list], [2, 1])
+            for left, right in zip(actual, expected):
+                torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-4)
+
     def test_cache_to_trainer_lora_step(self):
         from contextlib import nullcontext
 
@@ -339,7 +347,7 @@ class QwenImage21IntegrationTests(unittest.TestCase):
         )
         from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 
-        from musubi_tuner.qwen_image_21.qwen_image_21_utils import encode_prompt
+        from musubi_tuner.qwen_image_21.qwen_image_21_utils import encode_prompt, encode_prompts
 
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
@@ -401,6 +409,16 @@ class QwenImage21IntegrationTests(unittest.TestCase):
                 # The final assistant suffix is retained and comes from before RMSNorm.
                 torch.testing.assert_close(features[-5:], captured[0][0, -5:])
                 self.assertEqual(len(encoder.model.language_model.norm._forward_hooks), 0)
+
+            prompts = ["hello", "a longer caption", "edit"]
+            references = [[], [image], [image, Image.new("RGB", (64, 32))]]
+            expected = [encode_prompt(processor, encoder, prompt, refs) for prompt, refs in zip(prompts, references)]
+            with patch.object(encoder.model, "forward", wraps=encoder.model.forward) as forward:
+                actual = encode_prompts(processor, encoder, prompts, references)
+            self.assertEqual(forward.call_count, 1)
+            for left, right in zip(actual, expected):
+                for a, b in zip(left, right):
+                    torch.testing.assert_close(a, b, atol=1e-5, rtol=1e-4)
 
     def test_cache_cli_help_has_no_argument_conflicts(self):
         import io

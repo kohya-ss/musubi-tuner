@@ -20,13 +20,21 @@ def encode_and_save_batch(vae, batch: list[ItemInfo]) -> None:
     for item in batch:
         if isinstance(item.content, list):
             raise ValueError("Only one target image per item is supported")
-        latent = qwen_image_21_utils.encode_image(vae, item.content)[0]
-        references = [qwen_image_21_utils.encode_image(vae, image)[0] for image in item.control_content or []]
+    latents = qwen_image_21_utils.encode_images(vae, [item.content for item in batch])
+    references = [[] for _ in batch]
+    for control_index in range(max((len(item.control_content or []) for item in batch), default=0)):
+        indices = [index for index, item in enumerate(batch) if len(item.control_content or []) > control_index]
+        controls = qwen_image_21_utils.encode_images(vae, [batch[index].control_content[control_index] for index in indices])
+        for index, latent in zip(indices, controls):
+            references[index].append(latent)
+    for item, latent, control_latents in zip(batch, latents, references):
         logger.info(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {latent.shape}, "
-            f"control latents shape: {[reference.shape for reference in references]}"
+            f"control latents shape: {[reference.shape for reference in control_latents]}"
         )
-        save_latent_cache_qwen_image_21(item, latent, references, qwen_image_21_utils.reference_fingerprints(item.control_content))
+        save_latent_cache_qwen_image_21(
+            item, latent, control_latents, qwen_image_21_utils.reference_fingerprints(item.control_content)
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:

@@ -58,7 +58,7 @@ Use the same dataset configuration for latent and text encoder caching. After ch
 
 RGB images receive an opaque alpha channel for the VAE. Transparent regions in control images are composited over white for the text encoder.
 
-The cache scripts encode one item at a time. `--batch_size` controls the batch passed to the cache callback, not the model's forward batch size.
+`--batch_size` controls the encoding batch size. The VAE groups equal-sized images within each batch; the text encoder supports different caption lengths and reference counts. Reduce the batch size if encoding runs out of memory.
 
 <details>
 <summary>日本語</summary>
@@ -71,7 +71,7 @@ latentとテキストエンコーダーのキャッシュには同じデータ�
 
 RGB画像にはVAE用の不透明なアルファチャンネルが追加されます。テキストエンコーダーでは、制御画像の透明部分を白背景に合成します。
 
-キャッシュスクリプトは1項目ずつエンコードします。`--batch_size`はキャッシュ処理に渡すバッチを制御し、モデルのforwardのバッチサイズは変更しません。
+`--batch_size`でエンコードのバッチサイズを指定します。VAEはバッチ内の同じサイズの画像をまとめて処理します。テキストエンコーダーは異なるキャプション長や制御画像数に対応します。メモリが不足する場合はバッチサイズを減らしてください。
 
 </details>
 

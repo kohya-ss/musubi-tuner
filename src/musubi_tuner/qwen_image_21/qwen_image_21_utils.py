@@ -124,10 +124,24 @@ def image_tensor(image: ImageInput, channels: int = 4) -> torch.Tensor:
 @torch.no_grad()
 def encode_image(vae: "AutoencoderKLQwenImage21", image: ImageInput) -> torch.Tensor:
     """Encode an image and apply the VAE's per-channel latent normalization."""
-    pixels = image_tensor(image, vae.config.in_channels).to(device=vae.device, dtype=vae.dtype)
-    latents = vae.encode(pixels).latent_dist.mode()
-    mean, std = latent_stats(vae, latents)
-    return (latents - mean) / std
+    return encode_images(vae, [image])[0].unsqueeze(0)
+
+
+@torch.no_grad()
+def encode_images(vae: "AutoencoderKLQwenImage21", images: list[ImageInput]) -> list[torch.Tensor]:
+    """Encode equal-sized images together and return latents in input order."""
+    groups = {}
+    for index, image in enumerate(images):
+        pixels = image_tensor(image, vae.config.in_channels)
+        groups.setdefault(pixels.shape[-2:], []).append((index, pixels))
+    results = [None] * len(images)
+    for group in groups.values():
+        pixels = torch.cat([pixels for _, pixels in group]).to(device=vae.device, dtype=vae.dtype)
+        latents = vae.encode(pixels).latent_dist.mode()
+        mean, std = latent_stats(vae, latents)
+        for (index, _), latent in zip(group, (latents - mean) / std):
+            results[index] = latent
+    return results
 
 
 @torch.no_grad()
@@ -201,22 +215,38 @@ def encode_prompt(
     Returns text features before the final RMSNorm, reference insertion positions,
     and reference grid sizes. Vision tokens are removed from the text features.
     """
-    images = list(images or [])
-    refs = " ".join(f"<image{i + 1}><|vision_start|><|image_pad|><|vision_end|>" for i in range(len(images)))
-    text = SYSTEM + "<|im_start|>user\n" + refs + (prompt or " ") + "<|im_end|>\n<|im_start|>assistant\n"
-    kwargs = dict(text=[text], padding=True, padding_side="left", return_tensors="pt")
-    if images:
+    return encode_prompts(processor, encoder, [prompt], [images or []])[0]
+
+
+@torch.no_grad()
+def encode_prompts(
+    processor, encoder, prompts: list[str], images: Optional[list[list[ImageInput]]] = None
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Encode a batch of captions and ordered reference images without retaining padding."""
+    if images is None:
+        images = [[] for _ in prompts]
+    if len(images) != len(prompts):
+        raise ValueError("Each prompt must have a reference image list")
+    if not prompts:
+        return []
+    texts, image_batches, grids = [], [], []
+    for prompt, references in zip(prompts, images):
+        refs = " ".join(f"<image{i + 1}><|vision_start|><|image_pad|><|vision_end|>" for i in range(len(references)))
+        texts.append(SYSTEM + "<|im_start|>user\n" + refs + (prompt or " ") + "<|im_end|>\n<|im_start|>assistant\n")
         rgb = []
-        for image in images:
+        for image in references:
             image = Image.fromarray(image) if isinstance(image, np.ndarray) else image
             if image.mode == "RGBA":
                 white = Image.new("RGB", image.size, "white")
                 white.paste(image, mask=image.getchannel("A"))
                 image = white
             rgb.append(image.convert("RGB"))
-        # Images are already resized by the dataset. Resizing again would change
-        # the reference grid relative to the VAE cache.
-        kwargs.update(images=rgb, do_resize=False)
+        image_batches.extend(rgb)
+        grids.append(torch.tensor([[im.height // 16, im.width // 16] for im in rgb], dtype=torch.int64).reshape(-1, 2))
+    kwargs = dict(text=texts, padding=True, padding_side="left", return_tensors="pt")
+    if image_batches:
+        # Both encoders must use the same reference image size.
+        kwargs.update(images=image_batches, do_resize=False)
     inputs = processor(**kwargs).to(encoder.device)
     encoder_model = getattr(encoder, "model", encoder)
     language_model = getattr(encoder_model, "language_model", encoder_model)
@@ -227,37 +257,33 @@ def encode_prompt(
         encoder_model(**inputs, output_hidden_states=False, return_dict=True, use_cache=False)
     finally:
         handle.remove()
-    valid = inputs.attention_mask[0].bool()
-    ids = inputs.input_ids[0, valid]
     if len(pre_norm_hidden) != 1:
         raise RuntimeError("Expected one Qwen3-VL final language norm invocation")
-    hidden = pre_norm_hidden[0][0, valid]
+    if image_batches and not torch.equal(inputs.image_grid_thw[:, 1:].cpu(), torch.cat(grids)):
+        raise ValueError("VLM resized reference images: reference VAE and VLM grids must agree")
     im_start = processor.tokenizer.convert_tokens_to_ids("<|im_start|>")
-    starts = (ids == im_start).nonzero(as_tuple=True)[0]
-    if len(starts) < 2:
-        raise ValueError("Unexpected Qwen3-VL template: missing user turn")
-    drop = int(starts[1])
-    ids, hidden = ids[drop:], hidden[drop:]
     image_id = processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-    keep = ids != image_id
-    spans = []
-    previous = False
-    for i, is_image in enumerate((~keep).tolist()):
-        if is_image and not previous:
-            spans.append(int(keep[:i].sum()))
-        previous = is_image
-    if len(spans) != len(images):
-        raise ValueError("VLM image spans do not match reference images")
-    grids = (
-        torch.tensor([[im.height // 16, im.width // 16] for im in rgb], dtype=torch.int64)
-        if images
-        else torch.empty(0, 2, dtype=torch.int64)
-    )
-    if images:
-        actual = inputs.image_grid_thw[:, 1:].cpu()  # Qwen3-VL patch size 16, before spatial merge
-        if not torch.equal(actual, grids):
-            raise ValueError("VLM resized reference images: reference VAE and VLM grids must agree")
-    return hidden[keep].contiguous(), torch.tensor(spans, dtype=torch.int64), grids
+    results = []
+    for row, references in enumerate(images):
+        valid = inputs.attention_mask[row].bool()
+        ids = inputs.input_ids[row, valid]
+        hidden = pre_norm_hidden[0][row, valid]
+        starts = (ids == im_start).nonzero(as_tuple=True)[0]
+        if len(starts) < 2:
+            raise ValueError("Unexpected Qwen3-VL template: missing user turn")
+        drop = int(starts[1])
+        ids, hidden = ids[drop:], hidden[drop:]
+        keep = ids != image_id
+        spans = []
+        previous = False
+        for i, is_image in enumerate((~keep).tolist()):
+            if is_image and not previous:
+                spans.append(int(keep[:i].sum()))
+            previous = is_image
+        if len(spans) != len(references):
+            raise ValueError("VLM image spans do not match reference images")
+        results.append((hidden[keep].contiguous(), torch.tensor(spans, dtype=torch.int64), grids[row]))
+    return results
 
 
 def _linear_forward(self: nn.Linear, x: torch.Tensor) -> torch.Tensor:
