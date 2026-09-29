@@ -206,6 +206,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--image_size` specifies height and width. Both must be multiples of 32.
 - For editing, add `--control_image_path path/to/control0.png path/to/control1.png`. Control images retain their order and are resized to approximately 1M pixels while preserving their aspect ratio.
 - `--resize_control_to_image_size` resizes and crops control images to the output dimensions. `--resize_control_to_official_size` explicitly selects the default approximately 1M-pixel policy. Both encoders use the same resized control images.
+- For masked editing, add `--mask_path path/to/mask.png --resize_control_to_image_size`. White regions are repainted and black regions retain the first control image's latents. The mask is resized and cropped to the output dimensions. Preserved regions still pass through VAE reconstruction.
 - Omit `--lora_weight` to use the base model. Multiple LoRAs can be supplied with matching multipliers; a single multiplier applies to all supplied LoRAs.
 - Use `--include_patterns` and `--exclude_patterns` to select LoRA modules by regular expression, with one pattern per weight file. For LyCORIS adapters, install `lycoris-lora` and add `--lycoris`. Adapters are merged before FP8 quantization.
 - `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
@@ -223,6 +224,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--image_size`には高さ、幅の順に指定します。どちらも32の倍数である必要があります。
 - 編集には`--control_image_path path/to/control0.png path/to/control1.png`を追加します。制御画像は指定順を保持し、アスペクト比を維持して約100万画素にリサイズされます。
 - `--resize_control_to_image_size`で制御画像を出力サイズにリサイズ・クロップします。`--resize_control_to_official_size`は既定の約100万画素へのリサイズを明示的に指定します。両方のエンコーダーは同じリサイズ済み画像を使用します。
+- マスク付き編集には`--mask_path path/to/mask.png --resize_control_to_image_size`を追加します。白い領域を描き直し、黒い領域では最初の制御画像のlatentを保持します。マスクは出力サイズにリサイズ・クロップされます。保持する領域にもVAEによる再構成が適用されます。
 - ベースモデルを使用する場合は`--lora_weight`を省略します。複数のLoRAと対応する倍率を指定できます。倍率が1個の場合はすべてのLoRAに適用されます。
 - `--include_patterns`と`--exclude_patterns`でLoRAモジュールを正規表現で選択できます。重みファイルごとに1つのパターンを指定します。LyCORISを使用する場合は`lycoris-lora`をインストールし、`--lycoris`を指定してください。アダプターはFP8量子化の前にマージされます。
 - `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
@@ -236,7 +238,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 
 ### Batch and interactive inference / バッチ・対話推論
 
-Use `--from_file path/to/prompts.txt` instead of `--prompt` to process one prompt per line. Blank lines and lines starting with `#` are ignored. Each line can override `--w`, `--h`, `--d`, `--s`, `--l` (or `--g`), `--fs`, `--n`, and repeated `--ci` options:
+Use `--from_file path/to/prompts.txt` instead of `--prompt` to process one prompt per line. Blank lines and lines starting with `#` are ignored. Each line can override `--w`, `--h`, `--d`, `--s`, `--l` (or `--g`), `--fs`, `--n`, `--m` (mask path), and repeated `--ci` options:
 
 ```text
 A cat holding a sign --w 1024 --h 1024 --d 42
@@ -248,7 +250,7 @@ Use `--interactive` to enter prompts with the same format in the console. Enter 
 <details>
 <summary>日本語</summary>
 
-`--prompt`の代わりに`--from_file path/to/prompts.txt`を指定すると、1行につき1つのプロンプトを処理します。空行と`#`で始まる行は無視されます。各行で`--w`、`--h`、`--d`、`--s`、`--l`（または`--g`）、`--fs`、`--n`、複数の`--ci`を指定できます。
+`--prompt`の代わりに`--from_file path/to/prompts.txt`を指定すると、1行につき1つのプロンプトを処理します。空行と`#`で始まる行は無視されます。各行で`--w`、`--h`、`--d`、`--s`、`--l`（または`--g`）、`--fs`、`--n`、`--m`（マスクのパス）、複数の`--ci`を指定できます。
 
 `--interactive`では同じ形式のプロンプトをコンソールから入力できます。`q`、`quit`、`exit`で終了します。どちらのモードも読み込み済みのモデルを再利用します。各行で省略したオプションにはコマンドラインの設定が使われます。
 

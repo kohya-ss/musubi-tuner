@@ -50,6 +50,7 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--negative_prompt", type=str, default=None, help="Negative prompt for CFG")
     parser.add_argument("--control_image_path", type=str, nargs="+", default=None, help="Ordered control image paths")
+    parser.add_argument("--mask_path", type=str, default=None, help="Inpainting mask, white for the region to repaint")
     resize = parser.add_mutually_exclusive_group()
     resize.add_argument("--resize_control_to_image_size", action="store_true", help="Resize and crop controls to the output size")
     resize.add_argument(
@@ -152,6 +153,7 @@ def parse_prompt_line(line: str) -> dict:
         "l": ("guidance_scale", float),
         "fs": ("flow_shift", float),
         "n": ("negative_prompt", str),
+        "m": ("mask_path", str),
     }
     for part in parts[1:]:
         option, _, value = part.strip().partition(" ")
@@ -186,6 +188,8 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
         raise ValueError("Generation requires --dit and --text_encoder")
     if args.prompt is None:
         raise ValueError("A prompt is required for generation")
+    if args.mask_path and not args.control_image_path:
+        raise ValueError("--mask_path requires a control image")
     if args.infer_steps < 1 or min(args.image_size) < 32 or any(size % 32 for size in args.image_size):
         raise ValueError("Image dimensions must be positive multiples of 32 and --infer_steps must be positive")
     if args.flow_shift is not None and args.flow_shift <= 0:
@@ -210,6 +214,7 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
         "negative_prompt": args.negative_prompt,
         "cfg_scale": args.guidance_scale,
         "control_image_path": args.control_image_path,
+        "mask_path": args.mask_path,
     }
     te_device = torch.device("cpu") if args.text_encoder_cpu else device
     if shared_models is not None and "encoder" in shared_models:

@@ -688,6 +688,48 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
             self.assertEqual((run.call_args.args[0].infer_steps, run.call_args.args[0].flow_shift), (3, 2))
 
+    def test_inpainting_preserves_unmasked_latents(self):
+        import numpy as np
+        from musubi_tuner.qwen_image_21 import qwen_image_21_sampling as sampling
+
+        reference = torch.randn(1, 64, 1, 2, 4)
+        transformer = Mock(return_value=torch.ones(1, 8, 64))
+        prompt = {
+            "reference_images": [np.zeros((32, 64, 4), dtype=np.uint8)],
+            "positive": (torch.zeros(3, 4096), torch.tensor([1]), torch.tensor([[2, 4]])),
+        }
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            patch.object(sampling.qwen_image_21_utils, "encode_image", return_value=reference),
+        ):
+
+            def sample():
+                return sampling.sample_image(
+                    transformer,
+                    Mock(),
+                    prompt,
+                    torch.device("cpu"),
+                    torch.float32,
+                    64,
+                    32,
+                    3,
+                    torch.Generator().manual_seed(42),
+                    return_latents=True,
+                )
+
+            baseline = sample()
+            mask_path = Path(temp) / "mask.png"
+            prompt["mask_path"] = str(mask_path)
+            for value in (0, 255):
+                Image.new("L", (64, 32), value).save(mask_path)
+                torch.testing.assert_close(sample(), reference if value == 0 else baseline)
+            mask = np.zeros((32, 64), dtype=np.uint8)
+            mask[:, 32:] = 255
+            Image.fromarray(mask).save(mask_path)
+            result = sample()
+            torch.testing.assert_close(result[..., :2], reference[..., :2])
+            torch.testing.assert_close(result[..., 2:], baseline[..., 2:])
+
     def test_inference_compiled_model(self):
         from musubi_tuner import qwen_image_21_generate_image as generate
 

@@ -3,6 +3,7 @@ import logging
 import numpy as np
 import torch
 from PIL import Image
+from torch.nn import functional as F
 from tqdm import tqdm
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21
@@ -68,6 +69,18 @@ def sample_image(
     img_shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in reference_latents] + [(1, height // 16, width // 16)]]
     reference_latents = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in reference_latents]
     latents = torch.randn((1, height // 16 * (width // 16), 64), generator=generator, device=device, dtype=dit_dtype)
+    inpainting_mask = None
+    if sample_parameter.get("mask_path"):
+        if not reference_latents or img_shapes[0][0] != (1, height // 16, width // 16):
+            raise ValueError(
+                "Inpainting requires the first control image to match the output size; use --resize_control_to_image_size"
+            )
+        with Image.open(sample_parameter["mask_path"]) as image:
+            mask = resize_image_to_bucket(image.convert("RGB"), (width, height))[:, :, 0].copy()
+        mask = torch.from_numpy(mask).float()[None, None] / 255.0
+        mask = F.interpolate(mask, size=(height // 16, width // 16), mode="bilinear", align_corners=False)
+        inpainting_mask = mask.flatten(2).transpose(1, 2).to(device=device, dtype=dit_dtype)
+        noise = latents.clone()
     # Qwen-Image 2.1 uses the same scheduler configuration as Qwen-Image.
     scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
     sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
@@ -89,7 +102,7 @@ def sample_image(
         )
 
     with tqdm(total=sample_steps, desc="Denoising steps") as pbar:
-        for timestep in scheduler.timesteps:
+        for index, timestep in enumerate(scheduler.timesteps):
             transformer.prepare_block_swap_before_forward()
             noise_pred = predict("positive", timestep)
             if do_cfg:
@@ -97,6 +110,11 @@ def sample_image(
                 noise_pred_uncond = predict("negative", timestep)
                 noise_pred = noise_pred_uncond + cfg_scale * (noise_pred - noise_pred_uncond)
             latents = scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
+            if inpainting_mask is not None:
+                # Preserve the reference at the next noise level, ending with clean latents.
+                sigma = scheduler.sigmas[index + 1].to(device=device, dtype=dit_dtype)
+                control_latents = reference_latents[0] * (1 - sigma) + noise * sigma
+                latents = latents * inpainting_mask + control_latents * (1 - inpainting_mask)
             pbar.update()
         latents = qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16)
         if return_latents:
