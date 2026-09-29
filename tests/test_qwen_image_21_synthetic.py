@@ -433,6 +433,33 @@ class QwenImage21IntegrationTests(unittest.TestCase):
 
 
 class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
+    def test_lora_diffusers_conversion(self):
+        from musubi_tuner.convert_lora import convert_from_diffusers, convert_to_diffusers
+
+        model = tiny()
+        modules = [
+            name
+            for name, module in model.named_modules()
+            if name.startswith("transformer_blocks.") and isinstance(module, torch.nn.Linear)
+        ]
+        modules.extend(["transformer_blocks.0.img_mlp.net.0.proj", "transformer_blocks.0.txt_mlp.net.2"])
+        for module_name in modules:
+            with self.subTest(module=module_name):
+                name = "lora_unet_" + module_name.replace(".", "_")
+                down, up = torch.randn(2, 4), torch.randn(4, 2)
+                weights = {name + ".lora_down.weight": down, name + ".lora_up.weight": up, name + ".alpha": torch.tensor(1.0)}
+                converted = convert_to_diffusers("lora_unet_", "transformer", weights)
+                prefix = "transformer." + module_name
+                self.assertEqual(set(converted), {prefix + ".lora_A.weight", prefix + ".lora_B.weight"})
+                torch.testing.assert_close(
+                    converted[prefix + ".lora_B.weight"] @ converted[prefix + ".lora_A.weight"], (up @ down) / 2
+                )
+                restored = convert_from_diffusers("lora_unet_", converted)
+                self.assertEqual(set(restored), set(weights))
+                torch.testing.assert_close(
+                    restored[name + ".lora_up.weight"] @ restored[name + ".lora_down.weight"], (up @ down) / 2
+                )
+
     def test_fused_weight_split_reads_once(self):
         source = Mock()
         source.keys.return_value = ["model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight"]

@@ -33,6 +33,9 @@ QWEN_IMAGE_KEYS = [
     "transformer_blocks.*.attn.norm_added_k",
     "transformer_blocks.*.img_mlp.net.0.proj",
     "transformer_blocks.*.img_mlp.net.2",
+    "transformer_blocks.*.img_mlp.proj",  # Qwen-Image 2.1
+    "transformer_blocks.*.img_mlp.gate_layer",
+    "transformer_blocks.*.img_mlp.out",
     "transformer_blocks.*.txt_mod.1",
     "transformer_blocks.*.txt_mlp.net.0.proj",
     "transformer_blocks.*.txt_mlp.net.2",
