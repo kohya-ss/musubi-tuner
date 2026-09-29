@@ -646,6 +646,15 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 delta = 2.0 if lycoris else 1.0
                 expected = original[key] + delta if key == "transformer_blocks.0.attn.to_q.weight" else original[key]
                 torch.testing.assert_close(value, expected)
+            args.save_merged_model = str(path / "export" / "model.safetensors")
+            args.lora_multiplier = [0.5]
+            args.dtype = "float32"
+            args.fp8_scaled = True
+            args.vae = args.text_encoder = args.save_path = None
+            generate.save_merged_model(args)
+            reloaded = load_model(args.save_merged_model, dtype=torch.float32)
+            for key, value in reloaded.state_dict().items():
+                torch.testing.assert_close(value, merged.state_dict()[key])
 
     def test_inference_lora_filtering(self):
         self.check_filtered_adapter_merge(False)

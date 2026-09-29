@@ -236,6 +236,17 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 
 </details>
 
+### Exporting a merged model / マージ済みモデルの出力
+
+Use `--save_merged_model path/to/merged.safetensors` with `--dit`, `--lora_weight`, and optional multipliers to export a merged DiT without generation. This mode does not require `--vae`, `--text_encoder`, `--prompt`, or `--save_path`. Include/exclude patterns and LyCORIS are supported. The model is saved in `--dtype` before FP8 quantization, with its configuration included in the checkpoint metadata.
+
+<details>
+<summary>日本語</summary>
+
+`--dit`、`--lora_weight`、必要に応じた倍率とともに`--save_merged_model path/to/merged.safetensors`を指定すると、生成を行わずにマージ済みDiTを保存します。このモードでは`--vae`、`--text_encoder`、`--prompt`、`--save_path`は不要です。include/excludeパターンとLyCORISにも対応します。モデルはFP8量子化の前に`--dtype`の精度で保存され、設定はチェックポイントのメタデータに含まれます。
+
+</details>
+
 ### Batch and interactive inference / バッチ・対話推論
 
 Use `--from_file path/to/prompts.txt` instead of `--prompt` to process one prompt per line. Blank lines and lines starting with `#` are ignored. Each line can override `--w`, `--h`, `--d`, `--s`, `--l` (or `--g`), `--fs`, `--n`, `--m` (mask path), and repeated `--ci` options:

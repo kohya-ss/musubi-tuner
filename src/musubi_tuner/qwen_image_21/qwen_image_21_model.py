@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 from accelerate import init_empty_weights
+from safetensors import safe_open
 from torch import nn
 from torch.nn import functional as F
 
@@ -221,6 +222,19 @@ class QwenImage21Transformer2DModel(QwenImageTransformer2DModel):
         causal_condition=True,
     ):
         nn.Module.__init__(self)
+        self.config = dict(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            num_layers=num_layers,
+            attention_head_dim=attention_head_dim,
+            num_attention_heads=num_attention_heads,
+            context_in_dim=context_in_dim,
+            mlp_ratio=mlp_ratio,
+            axes_dims_rope=list(axes_dims_rope),
+            eps=eps,
+            patch_size=patch_size,
+            causal_condition=causal_condition,
+        )
         if patch_size != 1 or not causal_condition:
             raise ValueError("Qwen-Image 2.1 training requires patch_size=1 and causal_condition=True")
         if sum(axes_dims_rope) != attention_head_dim or any(d <= 0 or d % 2 for d in axes_dims_rope):
@@ -395,6 +409,11 @@ def load_model(
     path = Path(dit_path)
     config_file = Path(config_path) if config_path else (path / "config.json" if path.is_dir() else path.parent / "config.json")
     config = json.loads(config_file.read_text(encoding="utf-8")) if config_file.is_file() else {}
+    if config_path is None and path.is_file():
+        with safe_open(str(path), framework="pt", device="cpu") as file:
+            metadata = file.metadata() or {}
+        if "qwen_image_21_config" in metadata:
+            config = json.loads(metadata["qwen_image_21_config"])
     if config.get("_class_name", "QwenImage21Transformer2DModel") != "QwenImage21Transformer2DModel":
         raise ValueError("This is not a QwenImage21Transformer2DModel config")
     config = {k: v for k, v in config.items() if not k.startswith("_")}

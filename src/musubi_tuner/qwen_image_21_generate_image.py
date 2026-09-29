@@ -1,6 +1,7 @@
 import argparse
 import copy
 import gc
+import json
 import logging
 import random
 from datetime import datetime
@@ -17,6 +18,7 @@ from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampli
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
+from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -27,7 +29,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Qwen-Image 2.1 inference script")
     parser.add_argument("--dit", type=str, default=None, help="DiT directory or safetensors file")
     parser.add_argument("--dit_config", type=str, default=None, help="DiT config.json for a single-file checkpoint")
-    parser.add_argument("--vae", type=str, required=True, help="VAE directory or safetensors file")
+    parser.add_argument("--vae", type=str, default=None, help="VAE directory or safetensors file")
     parser.add_argument("--vae_tiling", action="store_true", help="Enable VAE spatial tiling")
     parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL directory or safetensors file")
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Run the text encoder on CPU")
@@ -45,6 +47,7 @@ def setup_parser() -> argparse.ArgumentParser:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--from_file", type=str, default=None, help="Read prompts from a text file")
     modes.add_argument("--interactive", action="store_true", help="Read prompts from the console")
+    modes.add_argument("--save_merged_model", type=str, default=None, help="Save the merged DiT without running inference")
     modes.add_argument(
         "--latent_path", type=str, nargs="+", default=None, help="Decode saved Qwen-Image 2.1 latents without inference"
     )
@@ -62,7 +65,7 @@ def setup_parser() -> argparse.ArgumentParser:
         "--guidance_scale", type=float, default=1.0, help="CFG scale, requires a negative prompt when greater than 1"
     )
     parser.add_argument("--flow_shift", type=float, default=None, help="Fixed flow shift; default uses dynamic shifting")
-    parser.add_argument("--save_path", type=str, required=True, help="Directory for generated PNG images")
+    parser.add_argument("--save_path", type=str, default=None, help="Directory for generated images and latents")
     parser.add_argument("--output_type", choices=["images", "latent", "latent_images"], default="images", help="Output type")
     parser.add_argument("--no_metadata", action="store_true", help="Do not save latent metadata")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
@@ -79,6 +82,9 @@ def setup_parser() -> argparse.ArgumentParser:
 
 def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.dtype, multipliers: list[float] | None):
     """Load the DiT and merge filtered adapters before quantization."""
+    if args.lycoris and find_spec("lycoris") is None:
+        raise ImportError("LyCORIS is not installed. Install lycoris-lora to use --lycoris")
+    fp8_scaled = args.fp8_scaled and not args.save_merged_model
     lora_weights_list = []
     for index, path in enumerate(args.lora_weight or []):
         include = args.include_patterns[index] if args.include_patterns and len(args.include_patterns) > index else None
@@ -87,9 +93,9 @@ def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.
     transformer = qwen_image_21_model.load_model(
         args.dit,
         device=device,
-        loading_device="cpu" if args.blocks_to_swap or args.lycoris else device,
+        loading_device="cpu" if args.blocks_to_swap or args.lycoris or args.save_merged_model else device,
         dtype=dtype,
-        fp8_scaled=args.fp8_scaled and not args.lycoris,
+        fp8_scaled=fp8_scaled and not args.lycoris,
         config_path=args.dit_config,
         disable_numpy_memmap=args.disable_numpy_memmap,
         attn_mode="torch" if args.attn_mode == "sdpa" else args.attn_mode,
@@ -115,7 +121,7 @@ def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.
             for module in network.unet_loras:
                 module.to(device="cpu", dtype=dtype)
                 module.merge_to(multipliers[index] if multipliers else 1.0)
-        if args.fp8_scaled:
+        if fp8_scaled:
             from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch, optimize_state_dict_with_fp8
 
             state_dict = optimize_state_dict_with_fp8(
@@ -124,6 +130,8 @@ def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.
             apply_fp8_monkey_patch(transformer, state_dict, use_scaled_mm=False)
             transformer.load_state_dict(state_dict, strict=True, assign=True)
     transformer.eval().requires_grad_(False)
+    if args.save_merged_model:
+        return transformer
     if args.blocks_to_swap:
         transformer.enable_block_swap(
             args.blocks_to_swap,
@@ -180,12 +188,37 @@ def apply_overrides(args: argparse.Namespace, overrides: dict) -> argparse.Names
     return args
 
 
+def get_lora_multipliers(args: argparse.Namespace) -> list[float] | None:
+    """Validate and expand one multiplier per adapter."""
+    multipliers = args.lora_multiplier
+    if multipliers is not None:
+        if not args.lora_weight or len(multipliers) not in (1, len(args.lora_weight)):
+            raise ValueError("Specify one --lora_multiplier or one per LoRA weight")
+        if len(multipliers) == 1:
+            multipliers = multipliers * len(args.lora_weight)
+    return multipliers
+
+
+def save_merged_model(args: argparse.Namespace) -> None:
+    """Save the merged DiT in its compute dtype with the model configuration."""
+    if not args.dit:
+        raise ValueError("--save_merged_model requires --dit")
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model = load_dit_model(args, device, getattr(torch, args.dtype), get_lora_multipliers(args))
+    path = Path(args.save_merged_model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mem_eff_save_file(model.state_dict(), str(path), {"qwen_image_21_config": json.dumps(model.config)})
+    logger.info(f"Merged model saved to {path}")
+
+
 def generate(args: argparse.Namespace, shared_models: dict | None = None) -> list[str]:
     """Generate an image and save the requested image or latent outputs."""
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = getattr(torch, args.dtype)
     if not args.dit or not args.text_encoder:
         raise ValueError("Generation requires --dit and --text_encoder")
+    if not args.vae or not args.save_path:
+        raise ValueError("Generation requires --vae and --save_path")
     if args.prompt is None:
         raise ValueError("A prompt is required for generation")
     if args.mask_path and not args.control_image_path:
@@ -196,16 +229,9 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
         raise ValueError("--flow_shift must be positive")
     if args.guidance_scale > 1 and args.negative_prompt is None:
         raise ValueError("--guidance_scale greater than 1 requires --negative_prompt")
-    multipliers = args.lora_multiplier
-    if multipliers is not None:
-        if not args.lora_weight or len(multipliers) not in (1, len(args.lora_weight)):
-            raise ValueError("Specify one --lora_multiplier or one per LoRA weight")
-        if len(multipliers) == 1:
-            multipliers = multipliers * len(args.lora_weight)
+    multipliers = get_lora_multipliers(args)
     if args.blocks_to_swap < 0:
         raise ValueError("--blocks_to_swap must be non-negative")
-    if args.lycoris and find_spec("lycoris") is None:
-        raise ImportError("LyCORIS is not installed. Install lycoris-lora to use --lycoris")
 
     seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
     logger.info(f"Seed: {seed}")
@@ -318,6 +344,8 @@ def decode_latent(latents, vae, args, device, dtype, name) -> list[str]:
 
 def decode_saved_latents(args: argparse.Namespace) -> list[str]:
     """Decode saved latents using only the VAE."""
+    if not args.vae or not args.save_path:
+        raise ValueError("Latent decoding requires --vae and --save_path")
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = getattr(torch, args.dtype)
     vae = qwen_image_21_utils.load_vae(args.vae, "cpu", dtype, args.vae_tiling)
@@ -337,7 +365,9 @@ def decode_saved_latents(args: argparse.Namespace) -> list[str]:
 
 def main():
     args = setup_parser().parse_args()
-    if args.latent_path:
+    if args.save_merged_model:
+        save_merged_model(args)
+    elif args.latent_path:
         decode_saved_latents(args)
     elif args.from_file:
         with open(args.from_file, encoding="utf-8") as file:
