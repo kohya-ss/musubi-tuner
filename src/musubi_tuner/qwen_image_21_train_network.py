@@ -2,12 +2,14 @@
 
 import argparse
 import gc
+import logging
 
 import numpy as np
 import torch
 from PIL import Image
 from safetensors.torch import load_file
 from torch.nn import functional as F
+from tqdm import tqdm
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21, ARCHITECTURE_QWEN_IMAGE_21_FULL
 from musubi_tuner.dataset.bucket import BucketSelector
@@ -20,6 +22,9 @@ from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
 from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.device_utils import clean_memory_on_device
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def prepare_conditioning(batch: dict, device: torch.device, dtype: torch.dtype):
@@ -142,8 +147,10 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         return DiTOutput(pred=pred, target=(noise - latents).to(device=accelerator.device, dtype=network_dtype))
 
     def process_sample_prompts(self, args, accelerator, sample_prompts):
+        logger.info(f"cache Text Encoder outputs for sample prompt: {sample_prompts}")
         processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, device=accelerator.device, fp8_vl=args.fp8_vl)
         prompts = load_prompts(sample_prompts)
+        logger.info("Encoding with VLM")
         for prompt in prompts:
             images = []
             for path in prompt.get("control_image_path", []):
@@ -156,6 +163,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
             if prompt.get("negative_prompt") is not None and (prompt.get("cfg_scale") or 1.0) > 1.0:
                 captions.append(("negative", prompt["negative_prompt"]))
             for name, caption in captions:
+                logger.info(f"cache Text Encoder outputs for prompt: {caption} with image: {prompt.get('control_image_path')}")
                 prompt[name] = tuple(t.cpu() for t in qwen_image_21_utils.encode_prompt(processor, encoder, caption, images))
         del processor, encoder
         gc.collect()
@@ -185,6 +193,8 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         width, height = max(32, width // 32 * 32), max(32, height // 32 * 32)
         device = accelerator.device
         vae.to(device)
+        if sample_parameter["reference_images"]:
+            logger.info("Encoding control images with VAE")
         refs = [qwen_image_21_utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
         vae.to("cpu")
         shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in refs] + [(1, height // 16, width // 16)]]
@@ -210,7 +220,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                 image_slots=[slots.tolist()],
             )
 
-        with torch.no_grad(), accelerator.autocast():
+        with torch.no_grad(), accelerator.autocast(), tqdm(total=sample_steps, desc="Denoising steps") as pbar:
             for timestep in scheduler.timesteps:
                 transformer.prepare_block_swap_before_forward()
                 pred = predict("positive", timestep)
@@ -219,8 +229,11 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                     negative = predict("negative", timestep)
                     pred = negative + cfg_scale * (pred - negative)
                 latents = scheduler.step(pred, timestep, latents, return_dict=False)[0]
+                pbar.update()
             vae.to(device)
+            logger.info(f"Decoding image from latents: {latents.shape}")
             pixels = qwen_image_21_utils.decode_latents(vae, qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16))
+        logger.info("Decoding complete")
         # The sample writer expects RGB [B, C, F, H, W]. Composite RGBA over white.
         if pixels.shape[1] == 4:
             pixels = pixels[:, :3] * pixels[:, 3:4] + 1 - pixels[:, 3:4]
