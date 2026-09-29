@@ -68,7 +68,6 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
             raise ValueError("output_dir is required / output_dirが必要です")
         if args.output_name is None:
             raise ValueError("output_name is required / output_nameが必要です")
-        assert not args.fp8_scaled or args.fp8_base, "fp8_scaled requires fp8_base / fp8_scaledはfp8_baseが必要です"
 
         if args.sage_attn:
             raise ValueError(
@@ -178,18 +177,8 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
         # prepare optimizer, data loader etc.
         accelerator.print("prepare optimizer, data loader etc.")
 
-        name_and_params = list(transformer.named_parameters())
-        # single param group for now
-        params_to_optimize = []
-        params_to_optimize.append({"params": [p for _, p in name_and_params], "lr": args.learning_rate})
-        param_names = [[n for n, _ in name_and_params]]
-
-        # calculate number of trainable parameters
-        n_params = 0
-        for group in params_to_optimize:
-            for p in group["params"]:
-                n_params += p.numel()
-
+        params_to_optimize = [{"params": list(transformer.parameters()), "lr": args.learning_rate}]
+        n_params = sum(parameter.numel() for parameter in params_to_optimize[0]["params"])
         accelerator.print(f"number of trainable parameters: {n_params}")
 
         optimizer_name, optimizer_args, optimizer, optimizer_train_fn, optimizer_eval_fn = self.get_optimizer(
@@ -225,13 +214,10 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
         # prepare lr_scheduler
         lr_scheduler = self.get_lr_scheduler(args, optimizer, accelerator.num_processes)
 
-        # prepare training model. accelerator does some magic here
+        # Prepare the training model with Accelerate.
 
         args.full_fp16 = False
         if args.full_bf16:
-            assert args.mixed_precision == "bf16", (
-                "full_bf16 requires mixed precision='bf16' / full_bf16を使う場合はmixed_precision='bf16'を指定してください。"
-            )
             accelerator.print("enable full bf16 training.")
 
         if blocks_to_swap > 0:
@@ -243,7 +229,6 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
 
         if args.compile:
             transformer = self.compile_transformer(args, transformer)
-            transformer.__dict__["_orig_mod"] = transformer  # for annoying accelerator checks
 
         optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         training_model = transformer
@@ -253,25 +238,24 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
 
         # patch for fused backward pass, adafactor only
         if args.fused_backward_pass:
-            # use fused optimizer for backward pass: other optimizers will be supported in the future
             import musubi_tuner.modules.adafactor_fused as adafactor_fused
 
             adafactor_fused.patch_adafactor_fused(optimizer)
 
-            for param_group, param_name_group in zip(optimizer.param_groups, param_names):
-                for parameter, param_name in zip(param_group["params"], param_name_group):
+            for param_group in optimizer.param_groups:
+                for parameter in param_group["params"]:
                     if parameter.requires_grad:
 
-                        def create_grad_hook(p_name, p_group):
+                        def create_grad_hook(group):
                             def grad_hook(tensor: torch.Tensor):
                                 if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                                     accelerator.clip_grad_norm_(tensor, args.max_grad_norm)
-                                optimizer.step_param(tensor, p_group)
+                                optimizer.step_param(tensor, group)
                                 tensor.grad = None
 
                             return grad_hook
 
-                        parameter.register_post_accumulate_grad_hook(create_grad_hook(param_name, param_group))
+                        parameter.register_post_accumulate_grad_hook(create_grad_hook(param_group))
 
         # epoch数を計算する
         num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -289,7 +273,6 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
         accelerator.print(f"  gradient accumulation steps / 勾配を合計するステップ数 = {args.gradient_accumulation_steps}")
         accelerator.print(f"  total optimization steps / 学習ステップ数: {args.max_train_steps}")
 
-        # TODO refactor metadata creation and move to util
         metadata = {
             "ss_session_id": session_id,  # random integer indicating which group of epochs the model came from
             "ss_training_started_at": training_started_at,  # unix timestamp
@@ -330,25 +313,18 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
 
         metadata["ss_datasets"] = json.dumps(datasets_metadata)
 
-        # model name and hash
-        # calculate hash takes time, so we omit it for now
+        # Record checkpoint names without calculating hashes.
         if args.dit is not None:
-            # logger.info(f"calculate hash for DiT model: {args.dit}")
             logger.info(f"set DiT model name for metadata: {args.dit}")
             sd_model_name = args.dit
             if os.path.exists(sd_model_name):
-                # metadata["ss_sd_model_hash"] = model_utils.model_hash(sd_model_name)
-                # metadata["ss_new_sd_model_hash"] = model_utils.calculate_sha256(sd_model_name)
                 sd_model_name = os.path.basename(sd_model_name)
             metadata["ss_sd_model_name"] = sd_model_name
 
         if args.vae is not None:
-            # logger.info(f"calculate hash for VAE model: {args.vae}")
             logger.info(f"set VAE model name for metadata: {args.vae}")
             vae_name = args.vae
             if os.path.exists(vae_name):
-                # metadata["ss_vae_hash"] = model_utils.model_hash(vae_name)
-                # metadata["ss_new_vae_hash"] = model_utils.calculate_sha256(vae_name)
                 vae_name = os.path.basename(vae_name)
             metadata["ss_vae_name"] = vae_name
 
@@ -420,23 +396,8 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
             metadata_to_save.update(sai_metadata)
             metadata_to_save["qwen_image_21_config"] = json.dumps(unwrapped_model.config)
 
-            # temporarily remove self-referencing _orig_mod to avoid infinite recursion in state_dict()
-            has_self_ref_orig_mod_module = (
-                hasattr(unwrapped_model, "_modules")
-                and "_orig_mod" in unwrapped_model._modules
-                and unwrapped_model._modules["_orig_mod"] is unwrapped_model
-            )
-            if has_self_ref_orig_mod_module:
-                del unwrapped_model._modules["_orig_mod"]
-
-            try:
-                state_dict = unwrapped_model.state_dict()
-            finally:
-                # restore _orig_mod after state_dict() if it was removed
-                if has_self_ref_orig_mod_module:
-                    unwrapped_model._modules["_orig_mod"] = unwrapped_model
-
-            # if model is compiled, get original model state dict
+            state_dict = unwrapped_model.state_dict()
+            # Save compiled blocks with their original parameter names.
             if any("._orig_mod." in key for key in state_dict):
                 logger.info("detected compiled model, getting original model state dict for saving")
                 state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}

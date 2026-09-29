@@ -9,8 +9,7 @@ from safetensors.torch import load_file
 from torch.nn import functional as F
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21, ARCHITECTURE_QWEN_IMAGE_21_FULL
-from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling
-from musubi_tuner.qwen_image_21 import qwen_image_21_utils
+from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling, qwen_image_21_utils
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -85,12 +84,12 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
     def load_transformer(self, accelerator, args, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype):
         model = qwen_image_21_model.load_model(
             dit_path,
-            accelerator.device,
-            loading_device,
-            dit_weight_dtype,
-            args.fp8_scaled,
-            args.dit_config,
-            args.disable_numpy_memmap,
+            device=accelerator.device,
+            loading_device=loading_device,
+            dtype=dit_weight_dtype,
+            fp8_scaled=args.fp8_scaled,
+            config_path=args.dit_config,
+            disable_numpy_memmap=args.disable_numpy_memmap,
             attn_mode=attn_mode,
             lora_weights_list=[load_file(path) for path in args.base_weights] if args.base_weights else None,
             lora_multipliers=args.base_weights_multiplier,

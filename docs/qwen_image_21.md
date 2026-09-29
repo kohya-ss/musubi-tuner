@@ -211,7 +211,7 @@ A cat holding a sign --w 1024 --h 1024 --s 40 --d 42 --ci path/to/control0.png -
 
 `--l` sets the CFG scale (default: 1.0, no CFG). To enable CFG, specify a value greater than 1 and a negative prompt with `--n`.
 
-Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides it with a fixed flow shift. This is separate from `--discrete_flow_shift` in the training command. Sample PNG images retain the VAE's alpha channel. Repeated prompts with the same ordered control images share text encoder outputs.
+Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides it with a fixed flow shift. This is separate from `--discrete_flow_shift` in the training command. Sample PNG images retain the alpha channel.
 
 <details>
 <summary>日本語</summary>
@@ -222,7 +222,7 @@ Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides
 
 `--l`でCFGスケールを指定します（既定値: 1.0、CFGなし）。CFGを有効にするには、1より大きい値と`--n`によるネガティブプロンプトを指定してください。
 
-サンプリングでは既定で解像度に応じた動的シフトを使用します。`--fs`を指定すると固定のflow shiftで上書きします。学習コマンドの`--discrete_flow_shift`とは別の設定です。サンプルPNGはVAEのアルファチャンネルを保持します。同じプロンプトと同じ順序の制御画像にはテキストエンコーダーの出力を再利用します。
+サンプリングでは既定で解像度に応じた動的シフトを使用します。`--fs`を指定すると固定のflow shiftで上書きします。学習コマンドの`--discrete_flow_shift`とは別の設定です。サンプルPNGはアルファチャンネルを保持します。
 
 </details>
 
@@ -243,10 +243,10 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 
 - `--image_size` specifies height and width. Both must be multiples of 32.
 - For editing, add `--control_image_path path/to/control0.png path/to/control1.png`. Control images retain their order and are resized to approximately 1M pixels while preserving their aspect ratio.
-- `--resize_control_to_image_size` resizes and crops control images to the output dimensions. `--resize_control_to_official_size` explicitly selects the default approximately 1M-pixel policy. Both encoders use the same resized control images.
+- `--resize_control_to_image_size` resizes and crops control images to the output dimensions. `--resize_control_to_official_size` explicitly selects the default approximately 1M-pixel policy.
 - For masked editing, add `--mask_path path/to/mask.png --resize_control_to_image_size`. White regions are repainted and black regions retain the first control image's latents. The mask is resized and cropped to the output dimensions. Preserved regions still pass through VAE reconstruction.
 - Omit `--lora_weight` to use the base model. Multiple LoRAs can be supplied with matching multipliers; a single multiplier applies to all supplied LoRAs.
-- Use `--include_patterns` and `--exclude_patterns` to select LoRA modules by regular expression, with one pattern per weight file. For LyCORIS adapters, install `lycoris-lora` and add `--lycoris`. Adapters are merged before FP8 quantization.
+- Use `--include_patterns` and `--exclude_patterns` to select LoRA modules by regular expression, with one pattern per weight file. For LyCORIS adapters, install `lycoris-lora` and add `--lycoris`.
 - `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
 - `--flow_shift` specifies a fixed flow shift. If omitted, sampling uses dynamic shifting, as in training previews.
 - `--text_encoder_cpu`, `--fp8_vl`, `--fp8_scaled`, `--blocks_to_swap`, and `--vae_tiling` are available to reduce VRAM usage.
@@ -261,10 +261,10 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 
 - `--image_size`には高さ、幅の順に指定します。どちらも32の倍数である必要があります。
 - 編集には`--control_image_path path/to/control0.png path/to/control1.png`を追加します。制御画像は指定順を保持し、アスペクト比を維持して約100万画素にリサイズされます。
-- `--resize_control_to_image_size`で制御画像を出力サイズにリサイズ・クロップします。`--resize_control_to_official_size`は既定の約100万画素へのリサイズを明示的に指定します。両方のエンコーダーは同じリサイズ済み画像を使用します。
+- `--resize_control_to_image_size`で制御画像を出力サイズにリサイズ・クロップします。`--resize_control_to_official_size`は既定の約100万画素へのリサイズを明示的に指定します。
 - マスク付き編集には`--mask_path path/to/mask.png --resize_control_to_image_size`を追加します。白い領域を描き直し、黒い領域では最初の制御画像のlatentを保持します。マスクは出力サイズにリサイズ・クロップされます。保持する領域にもVAEによる再構成が適用されます。
 - ベースモデルを使用する場合は`--lora_weight`を省略します。複数のLoRAと対応する倍率を指定できます。倍率が1個の場合はすべてのLoRAに適用されます。
-- `--include_patterns`と`--exclude_patterns`でLoRAモジュールを正規表現で選択できます。重みファイルごとに1つのパターンを指定します。LyCORISを使用する場合は`lycoris-lora`をインストールし、`--lycoris`を指定してください。アダプターはFP8量子化の前にマージされます。
+- `--include_patterns`と`--exclude_patterns`でLoRAモジュールを正規表現で選択できます。重みファイルごとに1つのパターンを指定します。LyCORISを使用する場合は`lycoris-lora`をインストールし、`--lycoris`を指定してください。
 - `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
 - `--flow_shift`で固定シフトを指定します。省略時は学習中のプレビューと同じ動的シフトを使用します。
 - VRAM使用量を減らすには`--text_encoder_cpu`、`--fp8_vl`、`--fp8_scaled`、`--blocks_to_swap`、`--vae_tiling`が利用できます。
@@ -318,13 +318,13 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
     --save_path path/to/output
 ```
 
-`--latent_path` accepts multiple files. Do not use latent files from earlier Qwen-Image models or dataset caches. The saved generation latents are normalized 64-channel tensors and retain the alpha information for RGBA decoding.
+`--latent_path` accepts multiple files. Use latents saved by this generation script, not earlier Qwen-Image models or dataset caches. Decoded PNGs retain the alpha channel.
 
 <details>
 <summary>日本語</summary>
 
 `--output_type latent`でデコードせずに生成したlatentを保存し、`--output_type latent_images`でlatentとPNGの両方を保存します。既定値は`images`です。`--no_metadata`を指定しない場合、latentファイルには生成パラメーターも保存されます。
 
-上記の例のように、保存したlatentはQwen-Image 2.1のVAEだけでデコードできます。`--latent_path`には複数のファイルを指定できます。従来のQwen-Imageのlatentやデータセットのキャッシュは使用しないでください。生成時に保存するlatentは正規化済みの64チャンネルのテンソルで、RGBAデコード用のアルファ情報も保持します。
+上記の例のように、保存したlatentはQwen-Image 2.1のVAEだけでデコードできます。`--latent_path`には複数のファイルを指定できます。この生成スクリプトで保存したlatentを使用してください。従来のQwen-Imageのlatentやデータセットのキャッシュは使用できません。デコードしたPNGはアルファチャンネルを保持します。
 
 </details>

@@ -37,7 +37,7 @@ ImageInput = Union[Image.Image, np.ndarray]
 
 QWEN_IMAGE_21_ID = "Qwen/Qwen-Image-2.1"
 
-SYSTEM = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
+SYSTEM_PROMPT = "<|im_start|>system\nComprehend and analyze the provided prompt.<|im_end|>\n"
 VAE_SCALE_FACTOR = 16
 LATENT_CHANNELS = 64
 
@@ -232,7 +232,7 @@ def encode_prompts(
     texts, image_batches, grids = [], [], []
     for prompt, references in zip(prompts, images):
         refs = " ".join(f"<image{i + 1}><|vision_start|><|image_pad|><|vision_end|>" for i in range(len(references)))
-        texts.append(SYSTEM + "<|im_start|>user\n" + refs + (prompt or " ") + "<|im_end|>\n<|im_start|>assistant\n")
+        texts.append(SYSTEM_PROMPT + "<|im_start|>user\n" + refs + (prompt or " ") + "<|im_end|>\n<|im_start|>assistant\n")
         rgb = []
         for image in references:
             image = Image.fromarray(image) if isinstance(image, np.ndarray) else image

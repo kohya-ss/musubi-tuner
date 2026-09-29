@@ -599,7 +599,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 with Image.open(output) as image:
                     np.testing.assert_array_equal(pixels, np.asarray(image))
 
-    def check_filtered_adapter_merge(self, lycoris):
+    def _check_filtered_adapter_merge(self, lycoris):
         from musubi_tuner import qwen_image_21_generate_image as generate
 
         with tempfile.TemporaryDirectory() as temp:
@@ -657,7 +657,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 torch.testing.assert_close(value, merged.state_dict()[key])
 
     def test_inference_lora_filtering(self):
-        self.check_filtered_adapter_merge(False)
+        self._check_filtered_adapter_merge(False)
 
     def test_file_and_interactive_prompts(self):
         from musubi_tuner import qwen_image_21_generate_image as generate
@@ -788,6 +788,9 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                     "--gradient_checkpointing",
                     "--save_state_on_train_end",
                     "--mem_eff_save",
+                    "--compile",
+                    "--compile_backend",
+                    "eager",
                 ]
             )
             dataset = load_datasets(args)[0]
@@ -849,7 +852,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
 
     @unittest.skipUnless(find_spec("lycoris"), "LyCORIS is not installed")
     def test_inference_lycoris_filtering(self):
-        self.check_filtered_adapter_merge(True)
+        self._check_filtered_adapter_merge(True)
 
     def test_sampling_guidance_and_scheduler(self):
         from contextlib import nullcontext
@@ -1020,7 +1023,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 legacy = NetworkTrainer().sample_timesteps(args, 1, [0.5], latents, torch.device("cpu"))
                 torch.testing.assert_close(legacy, torch.tensor([legacy_mu]).sigmoid())
 
-    def test_sample_prompt_resize_uses_architecture_keyword(self):
+    def test_sample_prompt_control_resize(self):
         from musubi_tuner import qwen_image_21_train_network as train
 
         with tempfile.TemporaryDirectory() as temp:
