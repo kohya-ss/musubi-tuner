@@ -253,3 +253,27 @@ Use `--interactive` to enter prompts with the same format in the console. Enter 
 `--interactive`では同じ形式のプロンプトをコンソールから入力できます。`q`、`quit`、`exit`で終了します。どちらのモードも読み込み済みのモデルを再利用します。各行で省略したオプションにはコマンドラインの設定が使われます。
 
 </details>
+
+### Saving and decoding latents / latentの保存とデコード
+
+Use `--output_type latent` to save the generated latent without decoding, or `--output_type latent_images` to save both the latent and PNG. The default is `images`. Latent files include generation parameters unless `--no_metadata` is specified.
+
+Saved latents can be decoded with only the Qwen-Image 2.1 VAE:
+
+```bash
+python src/musubi_tuner/qwen_image_21_generate_image.py \
+    --vae path/to/vae_model \
+    --latent_path path/to/latent.safetensors \
+    --save_path path/to/output
+```
+
+`--latent_path` accepts multiple files. Do not use latent files from earlier Qwen-Image models or dataset caches. The saved generation latents are normalized 64-channel tensors and retain the alpha information for RGBA decoding.
+
+<details>
+<summary>日本語</summary>
+
+`--output_type latent`でデコードせずに生成したlatentを保存し、`--output_type latent_images`でlatentとPNGの両方を保存します。既定値は`images`です。`--no_metadata`を指定しない場合、latentファイルには生成パラメーターも保存されます。
+
+上記の例のように、保存したlatentはQwen-Image 2.1のVAEだけでデコードできます。`--latent_path`には複数のファイルを指定できます。従来のQwen-Imageのlatentやデータセットのキャッシュは使用しないでください。生成時に保存するlatentは正規化済みの64チャンネルのテンソルで、RGBAデコード用のアルファ情報も保持します。
+
+</details>

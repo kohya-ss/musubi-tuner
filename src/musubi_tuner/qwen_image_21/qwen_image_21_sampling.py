@@ -56,8 +56,9 @@ def sample_image(
     discrete_flow_shift: float | None = None,
     cfg_scale: float | None = None,
     do_classifier_free_guidance: bool = True,
+    return_latents: bool = False,
 ) -> torch.Tensor:
-    """Sample an RGBA image and return a CPU tensor in [0, 1]."""
+    """Return normalized latents or an RGBA image in [0, 1] on CPU."""
     width, height = max(32, width // 32 * 32), max(32, height // 32 * 32)
     vae.to(device)
     if sample_parameter["reference_images"]:
@@ -97,8 +98,11 @@ def sample_image(
                 noise_pred = noise_pred_uncond + cfg_scale * (noise_pred - noise_pred_uncond)
             latents = scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
             pbar.update()
+        latents = qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16)
+        if return_latents:
+            return latents.cpu()
         vae.to(device)
         logger.info(f"Decoding image from latents: {latents.shape}")
-        pixels = qwen_image_21_utils.decode_latents(vae, qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16))
+        pixels = qwen_image_21_utils.decode_latents(vae, latents)
     logger.info("Decoding complete")
     return pixels.float().cpu()

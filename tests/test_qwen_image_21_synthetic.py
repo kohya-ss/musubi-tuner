@@ -551,6 +551,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 ]
             )
             encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]))
+            args.output_type = "latent_images"
             with (
                 patch.object(generate.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())) as load_encoder,
                 patch.object(generate.qwen_image_21_utils, "encode_prompt", return_value=encoded),
@@ -558,15 +559,45 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 patch.object(generate, "load_dit_model", wraps=generate.load_dit_model) as load_dit,
             ):
                 shared_models = {}
-                output = generate.generate(args, shared_models)[0]
+                latent_path, output = generate.generate(args, shared_models)
+                self.assertEqual(load_file(latent_path)["latent"].shape, (1, 64, 1, 2, 2))
                 with Image.open(output) as image:
                     self.assertEqual(image.mode, "RGBA")
                     self.assertEqual(image.size, (32, 32))
                     pixels = np.array(image)
-                self.assertNotEqual(output, generate.generate(args, shared_models)[0])
+                args.output_type = "latent"
+                args.no_metadata = True
+                with patch.object(generate, "decode_latent", side_effect=AssertionError("latent-only output must not decode")):
+                    second_latent = generate.generate(args, shared_models)[0]
+                self.assertNotEqual(latent_path, second_latent)
                 self.assertEqual(load_encoder.call_count, 1)
                 self.assertEqual(load_dit.call_count, 1)
             self.assertTrue(((pixels[..., 3] > 0) & (pixels[..., 3] < 255)).any())
+            decode_args = generate.setup_parser().parse_args(
+                [
+                    "--vae",
+                    str(path / "vae"),
+                    "--latent_path",
+                    latent_path,
+                    second_latent,
+                    "--save_path",
+                    str(path / "decoded"),
+                    "--device",
+                    "cpu",
+                    "--dtype",
+                    "float32",
+                ]
+            )
+            with (
+                patch.object(generate, "load_dit_model", side_effect=AssertionError("decode must not load DiT")),
+                patch.object(
+                    generate.qwen_image_21_utils, "load_text_encoder", side_effect=AssertionError("decode must not load TE")
+                ),
+            ):
+                decoded = generate.decode_saved_latents(decode_args)
+            for output in decoded:
+                with Image.open(output) as image:
+                    np.testing.assert_array_equal(pixels, np.asarray(image))
 
     def check_filtered_adapter_merge(self, lycoris):
         from musubi_tuner import qwen_image_21_generate_image as generate
@@ -580,8 +611,13 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             weights = {}
             for index in range(2):
                 key = f"lora_unet_transformer_blocks_{index}_attn_to_q"
-                weights[f"{key}.lora_down.weight"] = torch.ones(2, 16)
-                weights[f"{key}.lora_up.weight"] = torch.ones(16, 2)
+                if lycoris:
+                    for name in ("hada_w1", "hada_w2"):
+                        weights[f"{key}.{name}_a"] = torch.ones(16, 2)
+                        weights[f"{key}.{name}_b"] = torch.ones(2, 16)
+                else:
+                    weights[f"{key}.lora_down.weight"] = torch.ones(2, 16)
+                    weights[f"{key}.lora_up.weight"] = torch.ones(16, 2)
                 weights[f"{key}.alpha"] = torch.tensor(2.0)
             save_file(weights, str(path / "lora.safetensors"))
             args = generate.setup_parser().parse_args(
@@ -607,7 +643,8 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             args.lycoris = lycoris
             merged = generate.load_dit_model(args, torch.device("cpu"), torch.float32, [0.5])
             for key, value in merged.state_dict().items():
-                expected = original[key] + 1.0 if key == "transformer_blocks.0.attn.to_q.weight" else original[key]
+                delta = 2.0 if lycoris else 1.0
+                expected = original[key] + delta if key == "transformer_blocks.0.attn.to_q.weight" else original[key]
                 torch.testing.assert_close(value, expected)
 
     def test_inference_lora_filtering(self):

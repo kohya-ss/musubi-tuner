@@ -5,15 +5,17 @@ import logging
 import random
 from datetime import datetime
 from importlib.util import find_spec
+from pathlib import Path
 
 import torch
-from safetensors.torch import load_file
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 
 from musubi_tuner.hv_generate_video import save_images_grid
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling, qwen_image_21_utils
 from musubi_tuner.utils import model_utils
-from musubi_tuner.utils.device_utils import clean_memory_on_device
+from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
 logger = logging.getLogger(__name__)
@@ -23,11 +25,11 @@ logging.basicConfig(level=logging.INFO)
 def setup_parser() -> argparse.ArgumentParser:
     """Create the Qwen-Image 2.1 inference parser."""
     parser = argparse.ArgumentParser(description="Qwen-Image 2.1 inference script")
-    parser.add_argument("--dit", type=str, required=True, help="DiT directory or safetensors file")
+    parser.add_argument("--dit", type=str, default=None, help="DiT directory or safetensors file")
     parser.add_argument("--dit_config", type=str, default=None, help="DiT config.json for a single-file checkpoint")
     parser.add_argument("--vae", type=str, required=True, help="VAE directory or safetensors file")
     parser.add_argument("--vae_tiling", action="store_true", help="Enable VAE spatial tiling")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Qwen3-VL directory or safetensors file")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Qwen3-VL directory or safetensors file")
     parser.add_argument("--text_encoder_cpu", action="store_true", help="Run the text encoder on CPU")
     parser.add_argument("--fp8_vl", action="store_true", help="Use FP8 storage for the text encoder language blocks")
     parser.add_argument("--lora_weight", type=str, nargs="+", default=None, help="LoRA weight paths")
@@ -43,6 +45,9 @@ def setup_parser() -> argparse.ArgumentParser:
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--from_file", type=str, default=None, help="Read prompts from a text file")
     modes.add_argument("--interactive", action="store_true", help="Read prompts from the console")
+    modes.add_argument(
+        "--latent_path", type=str, nargs="+", default=None, help="Decode saved Qwen-Image 2.1 latents without inference"
+    )
     parser.add_argument("--negative_prompt", type=str, default=None, help="Negative prompt for CFG")
     parser.add_argument("--control_image_path", type=str, nargs="+", default=None, help="Ordered control image paths")
     resize = parser.add_mutually_exclusive_group()
@@ -57,6 +62,8 @@ def setup_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--flow_shift", type=float, default=None, help="Fixed flow shift; default uses dynamic shifting")
     parser.add_argument("--save_path", type=str, required=True, help="Directory for generated PNG images")
+    parser.add_argument("--output_type", choices=["images", "latent", "latent_images"], default="images", help="Output type")
+    parser.add_argument("--no_metadata", action="store_true", help="Do not save latent metadata")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     parser.add_argument("--device", type=str, default=None, help="Device to use, default is CUDA if available")
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16", help="Model compute dtype")
@@ -172,9 +179,11 @@ def apply_overrides(args: argparse.Namespace, overrides: dict) -> argparse.Names
 
 
 def generate(args: argparse.Namespace, shared_models: dict | None = None) -> list[str]:
-    """Load the models and save a generated RGBA image."""
+    """Generate an image and save the requested image or latent outputs."""
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = getattr(torch, args.dtype)
+    if not args.dit or not args.text_encoder:
+        raise ValueError("Generation requires --dit and --text_encoder")
     if args.prompt is None:
         raise ValueError("A prompt is required for generation")
     if args.infer_steps < 1 or min(args.image_size) < 32 or any(size % 32 for size in args.image_size):
@@ -231,7 +240,7 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
 
     height, width = args.image_size
     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
-        pixels = qwen_image_21_sampling.sample_image(
+        latents = qwen_image_21_sampling.sample_image(
             transformer,
             vae,
             sample_parameter=prompt,
@@ -244,14 +253,78 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
             discrete_flow_shift=args.flow_shift,
             cfg_scale=args.guidance_scale,
             do_classifier_free_guidance=args.negative_prompt is not None,
+            return_latents=True,
         )
-    vae.to("cpu")
     if shared_models is not None:
+        if args.blocks_to_swap:
+            # Finish pending transfers before moving the reused model to CPU.
+            for index in range(len(transformer.transformer_blocks)):
+                transformer.offloader.wait_for_block(index)
+            synchronize_device(device)
         transformer.to("cpu")
         shared_models.update(vae=vae, transformer=transformer)
         clean_memory_on_device(device)
     name = f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}_{seed}"
-    paths = save_images_grid(pixels.unsqueeze(2), args.save_path, name, create_subdir=False)
+    paths = []
+    if args.output_type in ("latent", "latent_images"):
+        paths.append(save_latent(latents, args, name, seed))
+    if args.output_type in ("images", "latent_images"):
+        paths.extend(decode_latent(latents, vae, args, device, dtype, name))
+    for path in paths:
+        logger.info(f"Saved image to {path}")
+    return paths
+
+
+def save_latent(latents: torch.Tensor, args: argparse.Namespace, name: str, seed: int) -> str:
+    """Save normalized Qwen-Image 2.1 latents and generation parameters."""
+    path = Path(args.save_path) / f"{name}_latent.safetensors"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = (
+        None
+        if args.no_metadata
+        else {
+            "architecture": "qwen_image_21",
+            "seeds": str(seed),
+            "height": str(latents.shape[-2] * 16),
+            "width": str(latents.shape[-1] * 16),
+            "prompt": args.prompt,
+            "infer_steps": str(args.infer_steps),
+            "guidance_scale": str(args.guidance_scale),
+            "flow_shift": str(args.flow_shift),
+        }
+    )
+    if metadata is not None and args.negative_prompt is not None:
+        metadata["negative_prompt"] = args.negative_prompt
+    save_file({"latent": latents.contiguous()}, str(path), metadata=metadata)
+    return str(path)
+
+
+def decode_latent(latents, vae, args, device, dtype, name) -> list[str]:
+    """Decode normalized latents and save RGBA images."""
+    if latents.ndim != 5 or tuple(latents.shape[:3]) != (1, 64, 1) or any(size < 2 or size % 2 for size in latents.shape[-2:]):
+        raise ValueError("Expected Qwen-Image 2.1 latents with shape [1, 64, 1, H, W] and even spatial dimensions")
+    vae.to(device)
+    logger.info(f"Decoding image from latents: {latents.shape}")
+    with torch.no_grad(), torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
+        pixels = qwen_image_21_utils.decode_latents(vae, latents.to(device=device, dtype=dtype))
+    vae.to("cpu")
+    return save_images_grid(pixels.float().cpu().unsqueeze(2), args.save_path, name, create_subdir=False)
+
+
+def decode_saved_latents(args: argparse.Namespace) -> list[str]:
+    """Decode saved latents using only the VAE."""
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    dtype = getattr(torch, args.dtype)
+    vae = qwen_image_21_utils.load_vae(args.vae, "cpu", dtype, args.vae_tiling)
+    paths = []
+    for path in args.latent_path:
+        with safe_open(path, framework="pt", device="cpu") as file:
+            metadata = file.metadata() or {}
+            if metadata.get("architecture", "qwen_image_21") != "qwen_image_21":
+                raise ValueError(f"Not a Qwen-Image 2.1 latent: {path}")
+            latents = file.get_tensor("latent")
+        name = f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}_{Path(path).stem}"
+        paths.extend(decode_latent(latents, vae, args, device, dtype, name))
     for path in paths:
         logger.info(f"Saved image to {path}")
     return paths
@@ -259,7 +332,9 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
 
 def main():
     args = setup_parser().parse_args()
-    if args.from_file:
+    if args.latent_path:
+        decode_saved_latents(args)
+    elif args.from_file:
         with open(args.from_file, encoding="utf-8") as file:
             prompts = [parse_prompt_line(line) for line in file if line.strip() and not line.lstrip().startswith("#")]
         shared_models = {}
