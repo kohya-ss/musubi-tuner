@@ -29,9 +29,9 @@ def encode_and_save_batch(processor, encoder, batch: list[ItemInfo]) -> None:
     outputs = qwen_image_21_utils.encode_prompts(
         processor, encoder, [item.caption for item in batch], [item.control_content or [] for item in batch]
     )
-    for item, (embed, slots, grids) in zip(batch, outputs):
+    for item, (prompt_embeds, image_slots, image_grids) in zip(batch, outputs):
         save_text_encoder_output_cache_qwen_image_21(
-            item, embed, slots, grids, qwen_image_21_utils.reference_fingerprints(item.control_content)
+            item, prompt_embeds, image_slots, image_grids, qwen_image_21_utils.reference_fingerprints(item.control_content)
         )
 
 

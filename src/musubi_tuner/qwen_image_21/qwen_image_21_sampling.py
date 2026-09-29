@@ -62,10 +62,10 @@ def sample_image(
     vae.to(device)
     if sample_parameter["reference_images"]:
         logger.info("Encoding control images with VAE")
-    refs = [qwen_image_21_utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
+    reference_latents = [qwen_image_21_utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
     vae.to("cpu")
-    shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in refs] + [(1, height // 16, width // 16)]]
-    refs = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in refs]
+    img_shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in reference_latents] + [(1, height // 16, width // 16)]]
+    reference_latents = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in reference_latents]
     latents = torch.randn((1, height // 16 * (width // 16), 64), generator=generator, device=device, dtype=dit_dtype)
     # Qwen-Image 2.1 uses the same scheduler configuration as Qwen-Image.
     scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
@@ -77,25 +77,25 @@ def sample_image(
     do_cfg = do_classifier_free_guidance and cfg_scale > 1.0
 
     def predict(name, timestep):
-        embed, slots, _ = sample_parameter[name]
+        prompt_embeds, image_slots, _ = sample_parameter[name]
         return transformer(
             hidden_states=latents,
-            encoder_hidden_states=embed[None].to(device=device, dtype=dit_dtype),
+            encoder_hidden_states=prompt_embeds[None].to(device=device, dtype=dit_dtype),
             timestep=timestep.expand(1).to(dit_dtype) / 1000,
-            img_shapes=shapes,
-            reference_latents=refs,
-            image_slots=[slots.tolist()],
+            img_shapes=img_shapes,
+            reference_latents=reference_latents,
+            image_slots=[image_slots.tolist()],
         )
 
     with tqdm(total=sample_steps, desc="Denoising steps") as pbar:
         for timestep in scheduler.timesteps:
             transformer.prepare_block_swap_before_forward()
-            pred = predict("positive", timestep)
+            noise_pred = predict("positive", timestep)
             if do_cfg:
                 transformer.prepare_block_swap_before_forward()
-                negative = predict("negative", timestep)
-                pred = negative + cfg_scale * (pred - negative)
-            latents = scheduler.step(pred, timestep, latents, return_dict=False)[0]
+                noise_pred_uncond = predict("negative", timestep)
+                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred - noise_pred_uncond)
+            latents = scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
             pbar.update()
         vae.to(device)
         logger.info(f"Decoding image from latents: {latents.shape}")

@@ -21,13 +21,13 @@ def encode_and_save_batch(vae, batch: list[ItemInfo]) -> None:
         if isinstance(item.content, list):
             raise ValueError("Only one target image per item is supported")
     latents = qwen_image_21_utils.encode_images(vae, [item.content for item in batch])
-    references = [[] for _ in batch]
+    batch_control_latents = [[] for _ in batch]
     for control_index in range(max((len(item.control_content or []) for item in batch), default=0)):
         indices = [index for index, item in enumerate(batch) if len(item.control_content or []) > control_index]
-        controls = qwen_image_21_utils.encode_images(vae, [batch[index].control_content[control_index] for index in indices])
-        for index, latent in zip(indices, controls):
-            references[index].append(latent)
-    for item, latent, control_latents in zip(batch, latents, references):
+        control_latents = qwen_image_21_utils.encode_images(vae, [batch[index].control_content[control_index] for index in indices])
+        for index, latent in zip(indices, control_latents):
+            batch_control_latents[index].append(latent)
+    for item, latent, control_latents in zip(batch, latents, batch_control_latents):
         logger.info(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}, target latents shape: {latent.shape}, "
             f"control latents shape: {[reference.shape for reference in control_latents]}"

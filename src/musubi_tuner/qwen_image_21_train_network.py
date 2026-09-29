@@ -175,16 +175,16 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
             pixels = qwen_image_21_sampling.sample_image(
                 transformer,
                 vae,
-                sample_parameter,
-                accelerator.device,
-                dit_dtype,
-                width,
-                height,
-                sample_steps,
-                generator,
-                discrete_flow_shift,
-                cfg_scale,
-                do_classifier_free_guidance,
+                sample_parameter=sample_parameter,
+                device=accelerator.device,
+                dit_dtype=dit_dtype,
+                width=width,
+                height=height,
+                sample_steps=sample_steps,
+                generator=generator,
+                discrete_flow_shift=discrete_flow_shift,
+                cfg_scale=cfg_scale,
+                do_classifier_free_guidance=do_classifier_free_guidance,
             )
         return pixels.unsqueeze(2)
 

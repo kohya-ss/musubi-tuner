@@ -171,7 +171,7 @@ See [Sampling during training](./sampling_during_training.md) for the prompt for
 A cat holding a sign --w 1024 --h 1024 --s 40 --d 42 --ci path/to/control0.png --ci path/to/control1.png
 ```
 
-`--l` sets the CFG scale (default: 1.0, no CFG). To enable CFG, specify a value greater than 1 and a negative prompt with `--n`. Unlike earlier Qwen-Image models, Qwen-Image 2.1 does not apply norm rescaling after CFG.
+`--l` sets the CFG scale (default: 1.0, no CFG). To enable CFG, specify a value greater than 1 and a negative prompt with `--n`.
 
 Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides it with a fixed flow shift. This is separate from `--discrete_flow_shift` in the training command. Sample PNG images retain the VAE's alpha channel. Repeated prompts with the same ordered control images share text encoder outputs.
 
@@ -182,7 +182,7 @@ Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides
 
 プロンプトの形式は[学習中のサンプル画像生成](./sampling_during_training.md)を参照してください。複数の制御画像を使用する場合は、上記の例のように`--ci`を繰り返して指定します。
 
-`--l`でCFGスケールを指定します（既定値: 1.0、CFGなし）。CFGを有効にするには、1より大きい値と`--n`によるネガティブプロンプトを指定してください。従来のQwen-Imageとは異なり、Qwen-Image 2.1ではCFG後のノルム補正を行いません。
+`--l`でCFGスケールを指定します（既定値: 1.0、CFGなし）。CFGを有効にするには、1より大きい値と`--n`によるネガティブプロンプトを指定してください。
 
 サンプリングでは既定で解像度に応じた動的シフトを使用します。`--fs`を指定すると固定のflow shiftで上書きします。学習コマンドの`--discrete_flow_shift`とは別の設定です。サンプルPNGはVAEのアルファチャンネルを保持します。同じプロンプトと同じ順序の制御画像にはテキストエンコーダーの出力を再利用します。
 
@@ -209,7 +209,7 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
 - `--flow_shift` specifies a fixed flow shift. If omitted, sampling uses dynamic shifting, as in training previews.
 - `--text_encoder_cpu`, `--fp8_vl`, `--fp8_scaled`, `--blocks_to_swap`, and `--vae_tiling` are available to reduce VRAM usage.
-- Output PNGs retain the alpha channel. The text encoder is released before loading the DiT.
+- Output PNGs retain the alpha channel.
 
 <details>
 <summary>日本語</summary>
@@ -222,6 +222,6 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
 - `--flow_shift`で固定シフトを指定します。省略時は学習中のプレビューと同じ動的シフトを使用します。
 - VRAM使用量を減らすには`--text_encoder_cpu`、`--fp8_vl`、`--fp8_scaled`、`--blocks_to_swap`、`--vae_tiling`が利用できます。
-- 出力PNGはアルファチャンネルを保持します。テキストエンコーダーはDiTの読み込み前に解放されます。
+- 出力PNGはアルファチャンネルを保持します。
 
 </details>

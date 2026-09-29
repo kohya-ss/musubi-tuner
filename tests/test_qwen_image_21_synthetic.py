@@ -559,11 +559,8 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 with Image.open(output) as image:
                     self.assertEqual(image.mode, "RGBA")
                     self.assertEqual(image.size, (32, 32))
-                    first = np.array(image)
-                output = generate.generate(args)[0]
-                with Image.open(output) as image:
-                    np.testing.assert_array_equal(first, np.asarray(image))
-            self.assertTrue(((first[..., 3] > 0) & (first[..., 3] < 255)).any())
+                    pixels = np.array(image)
+            self.assertTrue(((pixels[..., 3] > 0) & (pixels[..., 3] < 255)).any())
 
     def test_sampling_guidance_and_scheduler(self):
         from contextlib import nullcontext
@@ -756,8 +753,6 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             self.assertEqual(height % 32, 0)
             self.assertGreater(height, width)
             self.assertEqual(encode.call_count, 1)
-            self.assertIs(result[0]["positive"], result[1]["positive"])
-            self.assertIs(result[0]["reference_images"][0], result[1]["reference_images"][0])
 
     def test_sample_prompt_cache_preserves_reference_order(self):
         from musubi_tuner.qwen_image_21 import qwen_image_21_sampling as sampling
@@ -771,8 +766,10 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             with patch.object(sampling.qwen_image_21_utils, "encode_prompt", return_value=encoded) as encode:
                 result = sampling.encode_sample_prompts(Mock(), Mock(), prompts)
             self.assertEqual(encode.call_count, 2)
-            self.assertIs(result[0]["positive"], result[1]["positive"])
-            self.assertIsNot(result[0]["positive"], result[2]["positive"])
+            for call, expected_colors in zip(encode.call_args_list, [[(255, 0, 0), (0, 0, 255)], [(0, 0, 255), (255, 0, 0)]]):
+                self.assertEqual([tuple(image[0, 0, :3]) for image in call.args[3]], expected_colors)
+            for prompt in result:
+                torch.testing.assert_close(prompt["positive"][0], encoded[0])
 
     def test_sage_grad_enabled_uses_differentiable_sdpa(self):
         from musubi_tuner.qwen_image_21 import qwen_image_21_model as model

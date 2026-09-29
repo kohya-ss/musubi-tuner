@@ -106,16 +106,16 @@ def generate(args: argparse.Namespace) -> list[str]:
         pixels = qwen_image_21_sampling.sample_image(
             transformer,
             vae,
-            prompt,
-            device,
-            dtype,
-            width,
-            height,
-            args.infer_steps,
-            torch.Generator(device=device).manual_seed(seed),
-            args.flow_shift,
-            args.guidance_scale,
-            args.negative_prompt is not None,
+            sample_parameter=prompt,
+            device=device,
+            dit_dtype=dtype,
+            width=width,
+            height=height,
+            sample_steps=args.infer_steps,
+            generator=torch.Generator(device=device).manual_seed(seed),
+            discrete_flow_shift=args.flow_shift,
+            cfg_scale=args.guidance_scale,
+            do_classifier_free_guidance=args.negative_prompt is not None,
         )
     vae.to("cpu")
     name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{seed}"
