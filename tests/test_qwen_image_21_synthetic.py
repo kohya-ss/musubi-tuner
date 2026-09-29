@@ -876,6 +876,10 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             self.assertEqual(height % 32, 0)
             self.assertGreater(height, width)
             self.assertEqual(encode.call_count, 1)
+            with patch.object(train.qwen_image_21_utils, "encode_prompt", return_value=encoded) as encode:
+                resized = train.qwen_image_21_sampling.encode_sample_prompts(Mock(), Mock(), prompts, control_image_size=(64, 32))
+            self.assertEqual(resized[0]["reference_images"][0].shape, (32, 64, 4))
+            self.assertEqual(encode.call_args.args[3][0].shape, (32, 64, 4))
 
     def test_sample_prompt_cache_preserves_reference_order(self):
         from musubi_tuner.qwen_image_21 import qwen_image_21_sampling as sampling

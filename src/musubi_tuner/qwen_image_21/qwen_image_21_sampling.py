@@ -14,7 +14,7 @@ from musubi_tuner.qwen_image_21 import qwen_image_21_utils
 logger = logging.getLogger(__name__)
 
 
-def encode_sample_prompts(processor, encoder, prompts: list[dict]) -> list[dict]:
+def encode_sample_prompts(processor, encoder, prompts: list[dict], control_image_size: tuple[int, int] | None = None) -> list[dict]:
     """Encode sample prompts, reusing captions with the same ordered control images."""
     image_cache = {}
     text_cache = {}
@@ -24,7 +24,7 @@ def encode_sample_prompts(processor, encoder, prompts: list[dict]) -> list[dict]
             if path not in image_cache:
                 with Image.open(path) as source:
                     source = source.convert("RGBA")
-                    size = BucketSelector.calculate_bucket_resolution(
+                    size = control_image_size or BucketSelector.calculate_bucket_resolution(
                         source.size, (1024, 1024), architecture=ARCHITECTURE_QWEN_IMAGE_21
                     )
                     image_cache[path] = resize_image_to_bucket(source, size)

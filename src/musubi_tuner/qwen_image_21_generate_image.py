@@ -45,6 +45,11 @@ def setup_parser() -> argparse.ArgumentParser:
     modes.add_argument("--interactive", action="store_true", help="Read prompts from the console")
     parser.add_argument("--negative_prompt", type=str, default=None, help="Negative prompt for CFG")
     parser.add_argument("--control_image_path", type=str, nargs="+", default=None, help="Ordered control image paths")
+    resize = parser.add_mutually_exclusive_group()
+    resize.add_argument("--resize_control_to_image_size", action="store_true", help="Resize and crop controls to the output size")
+    resize.add_argument(
+        "--resize_control_to_official_size", action="store_true", help="Resize controls to approximately 1M pixels (default)"
+    )
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="Image size: height width")
     parser.add_argument("--infer_steps", type=int, default=40, help="Number of denoising steps")
     parser.add_argument(
@@ -203,7 +208,8 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
         encoder.to(te_device)
     else:
         processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, te_device, dtype, args.fp8_vl)
-    prompt = qwen_image_21_sampling.encode_sample_prompts(processor, encoder, [prompt])[0]
+    control_image_size = tuple(reversed(args.image_size)) if args.resize_control_to_image_size else None
+    prompt = qwen_image_21_sampling.encode_sample_prompts(processor, encoder, [prompt], control_image_size=control_image_size)[0]
     if shared_models is not None:
         encoder.to("cpu")
         shared_models.update(processor=processor, encoder=encoder)
