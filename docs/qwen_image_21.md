@@ -187,3 +187,41 @@ Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides
 サンプリングでは既定で解像度に応じた動的シフトを使用します。`--fs`を指定すると固定のflow shiftで上書きします。学習コマンドの`--discrete_flow_shift`とは別の設定です。サンプルPNGはVAEのアルファチャンネルを保持します。同じプロンプトと同じ順序の制御画像にはテキストエンコーダーの出力を再利用します。
 
 </details>
+
+## Inference / 推論
+
+Use `qwen_image_21_generate_image.py` to generate images with a trained LoRA:
+
+```bash
+python src/musubi_tuner/qwen_image_21_generate_image.py \
+    --dit path/to/dit_model \
+    --vae path/to/vae_model \
+    --text_encoder path/to/text_encoder \
+    --prompt "A cat holding a sign" \
+    --image_size 1024 1024 --infer_steps 40 --seed 42 \
+    --lora_weight path/to/lora.safetensors --lora_multiplier 1.0 \
+    --attn_mode sdpa --save_path path/to/output
+```
+
+- `--image_size` specifies height and width. Both must be multiples of 32.
+- For editing, add `--control_image_path path/to/control0.png path/to/control1.png`. Control images retain their order and are resized to approximately 1M pixels while preserving their aspect ratio.
+- Omit `--lora_weight` to use the base model. Multiple LoRAs can be supplied with matching multipliers; a single multiplier applies to all supplied LoRAs.
+- `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
+- `--flow_shift` specifies a fixed flow shift. If omitted, sampling uses dynamic shifting, as in training previews.
+- `--text_encoder_cpu`, `--fp8_vl`, `--fp8_scaled`, `--blocks_to_swap`, and `--vae_tiling` are available to reduce VRAM usage.
+- Output PNGs retain the alpha channel. The text encoder is released before loading the DiT.
+
+<details>
+<summary>日本語</summary>
+
+学習したLoRAで画像を生成するには`qwen_image_21_generate_image.py`を使用します。
+
+- `--image_size`には高さ、幅の順に指定します。どちらも32の倍数である必要があります。
+- 編集には`--control_image_path path/to/control0.png path/to/control1.png`を追加します。制御画像は指定順を保持し、アスペクト比を維持して約100万画素にリサイズされます。
+- ベースモデルを使用する場合は`--lora_weight`を省略します。複数のLoRAと対応する倍率を指定できます。倍率が1個の場合はすべてのLoRAに適用されます。
+- `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
+- `--flow_shift`で固定シフトを指定します。省略時は学習中のプレビューと同じ動的シフトを使用します。
+- VRAM使用量を減らすには`--text_encoder_cpu`、`--fp8_vl`、`--fp8_scaled`、`--blocks_to_swap`、`--vae_tiling`が利用できます。
+- 出力PNGはアルファチャンネルを保持します。テキストエンコーダーはDiTの読み込み前に解放されます。
+
+</details>

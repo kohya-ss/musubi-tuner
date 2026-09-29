@@ -258,6 +258,26 @@ class QwenImage21IntegrationTests(unittest.TestCase):
             for left, right in zip(actual, expected):
                 torch.testing.assert_close(left, right, atol=1e-5, rtol=1e-4)
 
+            from musubi_tuner.dataset.image_video_dataset import ItemInfo
+            from musubi_tuner.qwen_image_21_cache_latents import encode_and_save_batch
+
+            with tempfile.TemporaryDirectory() as temp:
+                items = []
+                for index, target_index in enumerate([0, 2]):
+                    item = ItemInfo(str(index), "edit", (32, 32), (32, 32))
+                    item.content = images[target_index]
+                    item.control_content = [images[target_index], images[1]]
+                    item.latent_cache_path = str(Path(temp) / f"{index}.safetensors")
+                    items.append(item)
+                encode_and_save_batch(vae, items)
+                for item, target_index in zip(items, [0, 2]):
+                    cached = load_file(item.latent_cache_path)
+                    torch.testing.assert_close(cached["latents_1x2x2_float32"], expected[target_index], atol=1e-5, rtol=1e-4)
+                    torch.testing.assert_close(
+                        cached["latents_control_0_1x2x2_float32"], expected[target_index], atol=1e-5, rtol=1e-4
+                    )
+                    torch.testing.assert_close(cached["latents_control_1_1x4x2_float32"], expected[1], atol=1e-5, rtol=1e-4)
+
     def test_cache_to_trainer_lora_step(self):
         from contextlib import nullcontext
 
@@ -427,6 +447,24 @@ class QwenImage21IntegrationTests(unittest.TestCase):
                 for a, b in zip(left, right):
                     torch.testing.assert_close(a, b, atol=1e-5, rtol=1e-4)
 
+            from musubi_tuner.dataset.image_video_dataset import ItemInfo
+            from musubi_tuner.qwen_image_21_cache_text_encoder_outputs import encode_and_save_batch
+
+            items = []
+            for index, (prompt, refs) in enumerate(zip(prompts, references)):
+                item = ItemInfo(str(index), prompt, (32, 32), (32, 32))
+                item.control_content = refs
+                item.text_encoder_output_cache_path = str(path / f"{index}_te.safetensors")
+                items.append(item)
+            with patch.object(encoder.model, "forward", wraps=encoder.model.forward) as forward:
+                encode_and_save_batch(processor, encoder, items)
+            self.assertEqual(forward.call_count, 1)
+            for item, (features, slots, grids) in zip(items, expected):
+                cached = load_file(item.text_encoder_output_cache_path)
+                torch.testing.assert_close(cached["varlen_vl_embed_float32"], features, atol=1e-5, rtol=1e-4)
+                torch.testing.assert_close(cached["varlen_image_slots_int64"], slots)
+                torch.testing.assert_close(cached["varlen_reference_grids_int64"], grids)
+
     def test_cache_cli_help_has_no_argument_conflicts(self):
         import io
         from contextlib import redirect_stdout
@@ -458,6 +496,75 @@ class QwenImage21IntegrationTests(unittest.TestCase):
 
 
 class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
+    def test_standalone_generation_with_lora(self):
+        import numpy as np
+
+        from musubi_tuner import qwen_image_21_generate_image as generate
+        from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            config = {**TINY_CONFIG, "in_channels": 64, "out_channels": 64, "context_in_dim": 4096}
+            model = QwenImage21Transformer2DModel(**config)
+            save_file(model.state_dict(), str(path / "dit.safetensors"))
+            (path / "config.json").write_text(json.dumps(config))
+            vae = AutoencoderKLQwenImage21(base_dim=4, decoder_base_dim=4, num_res_blocks=1).eval()
+            vae.save_pretrained(path / "vae")
+            network = lora_qwen_image_21.create_arch_network(1.0, 2, 2, None, None, model)
+            network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
+            with torch.no_grad():
+                for module in network.unet_loras:
+                    module.lora_up.weight.fill_(0.1)
+            network.save_weights(str(path / "lora.safetensors"), torch.float32, {})
+            control = path / "control.png"
+            Image.new("RGBA", (32, 32), (255, 0, 0, 128)).save(control)
+            args = generate.setup_parser().parse_args(
+                [
+                    "--dit",
+                    str(path / "dit.safetensors"),
+                    "--vae",
+                    str(path / "vae"),
+                    "--text_encoder",
+                    "unused",
+                    "--prompt",
+                    "edit",
+                    "--control_image_path",
+                    str(control),
+                    "--lora_weight",
+                    str(path / "lora.safetensors"),
+                    "--lora_multiplier",
+                    "0.5",
+                    "--save_path",
+                    str(path / "output"),
+                    "--image_size",
+                    "32",
+                    "32",
+                    "--infer_steps",
+                    "2",
+                    "--seed",
+                    "42",
+                    "--device",
+                    "cpu",
+                    "--dtype",
+                    "float32",
+                ]
+            )
+            encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]))
+            with (
+                patch.object(generate.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())),
+                patch.object(generate.qwen_image_21_utils, "encode_prompt", return_value=encoded),
+                patch.object(generate.qwen_image_21_sampling.BucketSelector, "calculate_bucket_resolution", return_value=(32, 32)),
+            ):
+                output = generate.generate(args)[0]
+                with Image.open(output) as image:
+                    self.assertEqual(image.mode, "RGBA")
+                    self.assertEqual(image.size, (32, 32))
+                    first = np.array(image)
+                output = generate.generate(args)[0]
+                with Image.open(output) as image:
+                    np.testing.assert_array_equal(first, np.asarray(image))
+            self.assertTrue(((first[..., 3] > 0) & (first[..., 3] < 255)).any())
+
     def test_sampling_guidance_and_scheduler(self):
         from contextlib import nullcontext
 
