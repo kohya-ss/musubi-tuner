@@ -161,6 +161,44 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 
 </details>
 
+## Full-model Fine-tuning / モデル全体のファインチューニング
+
+Use `qwen_image_21_train.py` to train all DiT parameters. Use the same dataset configuration and caches as LoRA training. The VAE and text encoder remain frozen and are only loaded when generating training samples.
+
+```bash
+accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
+    src/musubi_tuner/qwen_image_21_train.py \
+    --dit path/to/dit_model \
+    --dataset_config path/to/toml \
+    --sdpa --mixed_precision bf16 --full_bf16 --gradient_checkpointing \
+    --optimizer_type AdamW --learning_rate 5e-6 \
+    --timestep_sampling qwen_shift --weighting_scheme none \
+    --max_train_steps 2000 --save_every_n_steps 200 \
+    --mem_eff_save --save_state_on_train_end \
+    --output_dir path/to/output --output_name qwen_image_21_finetuned
+```
+
+- Do not specify `--network_module`, `--network_dim`, or `--network_alpha` for full-model training.
+- Without `--full_bf16`, model parameters are stored in FP32. `--full_bf16` requires `--mixed_precision bf16` and reduces parameter and optimizer memory usage. Full-model training requires substantially more memory than LoRA training.
+- Gradient checkpointing, standard block swapping, and training previews are supported. FP8 base weights and H2D-only block swapping are not supported for full-model training.
+- `--fused_backward_pass` is available with Adafactor and `--gradient_accumulation_steps 1`.
+- `--mem_eff_save` reduces peak memory when saving model checkpoints. State saving still uses Accelerate's regular saving path. Use `--resume path/to/state` to restore model, optimizer, and scheduler state.
+- Checkpoints contain the full DiT and its configuration. Pass the resulting safetensors file to `--dit` for inference or further training.
+
+<details>
+<summary>日本語</summary>
+
+`qwen_image_21_train.py`でDiTの全パラメーターを学習します。LoRA学習と同じデータセット設定とキャッシュを使用します。VAEとテキストエンコーダーは学習せず、学習中にサンプル画像を生成する場合のみ読み込みます。
+
+- 全体学習では`--network_module`、`--network_dim`、`--network_alpha`を指定しません。
+- `--full_bf16`を指定しない場合、モデルのパラメーターはFP32で保持します。`--full_bf16`には`--mixed_precision bf16`が必要で、パラメーターとオプティマイザーのメモリ使用量を減らせます。全体学習はLoRA学習より大幅に多くのメモリを必要とします。
+- 勾配チェックポイント、通常のブロックスワップ、学習中のサンプル生成に対応します。FP8のベース重みとH2D-onlyブロックスワップは全体学習では使用できません。
+- `--fused_backward_pass`はAdafactorと`--gradient_accumulation_steps 1`で使用できます。
+- `--mem_eff_save`はモデル保存時のピークメモリを減らします。状態保存には通常のAccelerateの保存処理を使用します。`--resume path/to/state`でモデル、オプティマイザー、スケジューラーの状態を復元できます。
+- チェックポイントにはDiT全体と設定が含まれます。生成や追加学習には保存したsafetensorsファイルを`--dit`に指定してください。
+
+</details>
+
 ## Sampling during training / 学習中のサンプル画像生成
 
 To generate sample images, add `--sample_prompts path/to/prompts.txt` and `--sample_every_n_steps 200` to the training command. Also specify `--vae` and `--text_encoder`.

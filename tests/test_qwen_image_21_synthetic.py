@@ -739,6 +739,84 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             torch.testing.assert_close(result[..., :2], reference[..., :2])
             torch.testing.assert_close(result[..., 2:], baseline[..., 2:])
 
+    def test_full_finetuning_from_cache(self):
+        from musubi_tuner import qwen_image_21_train as train
+        from musubi_tuner.dataset.cache_io import save_latent_cache_qwen_image_21, save_text_encoder_output_cache_qwen_image_21
+        from musubi_tuner.dataset.image_video_dataset import ItemInfo
+        from musubi_tuner.qwen_image_21.qwen_image_21_utils import load_datasets
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            images = path / "images"
+            images.mkdir()
+            image = images / "sample.png"
+            Image.new("RGBA", (32, 32), "red").save(image)
+            image.with_suffix(".txt").write_text("edit")
+            cache = path / "cache"
+            cache.mkdir()
+            dataset_config = path / "dataset.toml"
+            dataset_config.write_text(
+                f'[general]\nresolution = 32\nbatch_size = 1\ncaption_extension = ".txt"\n'
+                f'[[datasets]]\nimage_directory = "{images.as_posix()}"\ncache_directory = "{cache.as_posix()}"\n'
+            )
+            config = {**TINY_CONFIG, "in_channels": 64, "out_channels": 64, "context_in_dim": 4096}
+            model = QwenImage21Transformer2DModel(**config)
+            original = {key: value.clone() for key, value in model.state_dict().items()}
+            save_file(original, str(path / "dit.safetensors"))
+            (path / "config.json").write_text(json.dumps(config))
+            args = train.setup_parser().parse_args(
+                [
+                    "--dit",
+                    str(path / "dit.safetensors"),
+                    "--dataset_config",
+                    str(dataset_config),
+                    "--output_dir",
+                    str(path / "output"),
+                    "--output_name",
+                    "full",
+                    "--sdpa",
+                    "--mixed_precision",
+                    "no",
+                    "--optimizer_type",
+                    "AdamW",
+                    "--learning_rate",
+                    "0.001",
+                    "--max_train_steps",
+                    "1",
+                    "--max_data_loader_n_workers",
+                    "0",
+                    "--gradient_checkpointing",
+                    "--save_state_on_train_end",
+                    "--mem_eff_save",
+                ]
+            )
+            dataset = load_datasets(args)[0]
+            item = ItemInfo(str(image), "edit", (32, 32), (32, 32))
+            item.latent_cache_path = dataset.get_latent_cache_path(item)
+            item.text_encoder_output_cache_path = dataset.get_text_encoder_output_cache_path(item)
+            hashes = torch.zeros(1, 32, dtype=torch.uint8)
+            save_latent_cache_qwen_image_21(item, torch.randn(64, 1, 2, 2), [torch.randn(64, 1, 2, 2)], hashes)
+            save_text_encoder_output_cache_qwen_image_21(
+                item, torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]), hashes
+            )
+            train.QwenImage21Trainer().train(args)
+            checkpoint = path / "output" / "full.safetensors"
+            result = load_file(str(checkpoint))
+            self.assertEqual(set(result), set(original))
+            for prefix in ("img_in", "txt_in", "time_text_embed", "modulation", "transformer_blocks", "norm_out", "proj_out"):
+                self.assertTrue(
+                    any(not torch.equal(value, original[key]) for key, value in result.items() if key.startswith(prefix)), prefix
+                )
+            self.assertTrue(all(torch.isfinite(value).all() for value in result.values()))
+            reloaded = load_model(str(checkpoint), dtype=torch.float32)
+            for key, value in reloaded.state_dict().items():
+                torch.testing.assert_close(value, result[key])
+            args.resume = str(path / "output" / "full-state")
+            args.output_name = "resumed"
+            train.QwenImage21Trainer().train(args)
+            resumed = load_file(str(path / "output" / "resumed.safetensors"))
+            self.assertFalse(torch.equal(result["proj_out.weight"], resumed["proj_out.weight"]))
+
     def test_inference_compiled_model(self):
         from musubi_tuner import qwen_image_21_generate_image as generate
 
