@@ -18,6 +18,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_KREA2_FULL,
     ARCHITECTURE_MINIMAX_H3_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
+    ARCHITECTURE_QWEN_IMAGE_21_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
 )
@@ -228,6 +229,25 @@ def save_latent_cache_qwen_image(item_info: ItemInfo, latent: torch.Tensor, cont
             sd[f"latents_control_{i}_{F}x{H}x{W}_{dtype_str}"] = cl.detach().cpu().contiguous()
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_latent_cache_qwen_image_21(
+    item_info: ItemInfo,
+    latent: torch.Tensor,
+    reference_latents: list[torch.Tensor],
+    reference_hashes: torch.Tensor,
+):
+    """Save Qwen-Image 2.1 latents and reference image hashes."""
+    tensors = {"latents": latent}
+    tensors.update({f"latents_control_{index}": reference for index, reference in enumerate(reference_latents)})
+    sd = {}
+    for name, tensor in tensors.items():
+        if tensor.ndim != 4 or tensor.shape[:2] != (64, 1):
+            raise ValueError("Qwen-Image 2.1 cached latents must have shape [64, 1, H, W]")
+        _, frames, height, width = tensor.shape
+        sd[f"{name}_{frames}x{height}x{width}_{dtype_to_str(tensor.dtype)}"] = tensor.detach().cpu().contiguous()
+    sd["varlen_reference_hashes_uint8"] = reference_hashes.cpu().contiguous()
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_21_FULL)
 
 
 def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
@@ -463,6 +483,23 @@ def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.
     sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
+
+
+def save_text_encoder_output_cache_qwen_image_21(
+    item_info: ItemInfo,
+    embed: torch.Tensor,
+    image_slots: torch.Tensor,
+    reference_grids: torch.Tensor,
+    reference_hashes: torch.Tensor,
+):
+    """Save Qwen-Image 2.1 text features and reference image metadata."""
+    sd = {
+        f"varlen_vl_embed_{dtype_to_str(embed.dtype)}": embed.detach().cpu().contiguous(),
+        "varlen_image_slots_int64": image_slots.cpu().contiguous(),
+        "varlen_reference_grids_int64": reference_grids.cpu().contiguous(),
+        "varlen_vlm_reference_hashes_uint8": reference_hashes.cpu().contiguous(),
+    }
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_21_FULL, merge_existing=False)
 
 
 def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tensor):
