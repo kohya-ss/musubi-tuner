@@ -12,8 +12,8 @@ from torch.nn import functional as F
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21, ARCHITECTURE_QWEN_IMAGE_21_FULL
 from musubi_tuner.dataset.bucket import BucketSelector
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket
-from musubi_tuner.qwen_image21 import model as model_module
-from musubi_tuner.qwen_image21 import utils
+from musubi_tuner.qwen_image_21 import qwen_image_21_model
+from musubi_tuner.qwen_image_21 import qwen_image_21_utils
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
 from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer
@@ -35,7 +35,7 @@ def prepare_conditioning(batch: dict, device: torch.device, dtype: torch.dtype):
         raise ValueError("Reference cache indices must be contiguous")
     for key in control_keys:
         latent = batch[key]
-        refs.append(utils.pack_latents(latent).to(device=device, dtype=dtype))
+        refs.append(qwen_image_21_utils.pack_latents(latent).to(device=device, dtype=dtype))
         shapes.append((1, latent.shape[-2], latent.shape[-1]))
     if "image_slots" not in batch or "reference_grids" not in batch:
         raise ValueError("Missing 2.1 reference metadata; rebuild text caches even for text-to-image")
@@ -83,7 +83,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
             raise ValueError("Sampling requires --text_encoder and --vae")
 
     def load_transformer(self, accelerator, args, dit_path, attn_mode, split_attn, loading_device, dit_weight_dtype):
-        model = model_module.load_model(
+        model = qwen_image_21_model.load_model(
             dit_path,
             accelerator.device,
             loading_device,
@@ -116,12 +116,12 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         return latents.shape[-2] * latents.shape[-1]
 
     def load_vae(self, args, vae_dtype, vae_path):
-        return utils.load_vae(vae_path, "cpu", vae_dtype, args.vae_tiling)
+        return qwen_image_21_utils.load_vae(vae_path, "cpu", vae_dtype, args.vae_tiling)
 
     def call_dit(
         self, args, accelerator, transformer, latents, batch, noise, noisy_model_input, timesteps, network_dtype, **kwargs
     ):
-        target = utils.pack_latents(noisy_model_input).to(device=accelerator.device, dtype=network_dtype)
+        target = qwen_image_21_utils.pack_latents(noisy_model_input).to(device=accelerator.device, dtype=network_dtype)
         text, lengths, refs, shapes, slots = prepare_conditioning(batch, accelerator.device, network_dtype)
         if args.gradient_checkpointing:
             target.requires_grad_(True)
@@ -137,11 +137,11 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                 reference_latents=refs,
                 image_slots=slots,
             )
-        pred = utils.unpack_latents(pred, latents.shape[-2], latents.shape[-1])
+        pred = qwen_image_21_utils.unpack_latents(pred, latents.shape[-2], latents.shape[-1])
         return DiTOutput(pred=pred, target=(noise - latents).to(device=accelerator.device, dtype=network_dtype))
 
     def process_sample_prompts(self, args, accelerator, sample_prompts):
-        processor, encoder = utils.load_text_encoder(args.text_encoder, device=accelerator.device, fp8_vl=args.fp8_vl)
+        processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, device=accelerator.device, fp8_vl=args.fp8_vl)
         prompts = load_prompts(sample_prompts)
         for prompt in prompts:
             images = []
@@ -152,7 +152,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                     images.append(resize_image_to_bucket(source, size))
             prompt["reference_images"] = images
             for name, caption in [("positive", prompt.get("prompt", "")), ("negative", prompt.get("negative_prompt", " "))]:
-                prompt[name] = tuple(t.cpu() for t in utils.encode_prompt(processor, encoder, caption, images))
+                prompt[name] = tuple(t.cpu() for t in qwen_image_21_utils.encode_prompt(processor, encoder, caption, images))
         del processor, encoder
         gc.collect()
         clean_memory_on_device(accelerator.device)
@@ -181,10 +181,10 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         width, height = max(32, width // 32 * 32), max(32, height // 32 * 32)
         device = accelerator.device
         vae.to(device)
-        refs = [utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
+        refs = [qwen_image_21_utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
         vae.to("cpu")
         shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in refs] + [(1, height // 16, width // 16)]]
-        refs = [utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in refs]
+        refs = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in refs]
         latents = torch.randn((1, height // 16 * (width // 16), 64), generator=generator, device=device, dtype=dit_dtype)
         scheduler = FlowMatchEulerDiscreteScheduler(shift=discrete_flow_shift or 3.0)
         scheduler.set_timesteps(sample_steps, device=device)
@@ -212,7 +212,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                     pred = guided * (pred.norm(dim=-1, keepdim=True) / guided.norm(dim=-1, keepdim=True).clamp_min(1e-6))
                 latents = scheduler.step(pred, timestep, latents, return_dict=False)[0]
             vae.to(device)
-            pixels = utils.decode_latents(vae, utils.unpack_latents(latents, height // 16, width // 16))
+            pixels = qwen_image_21_utils.decode_latents(vae, qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16))
         # The sample writer expects RGB [B, C, F, H, W]. Composite RGBA over white.
         if pixels.shape[1] == 4:
             pixels = pixels[:, :3] * pixels[:, 3:4] + 1 - pixels[:, 3:4]

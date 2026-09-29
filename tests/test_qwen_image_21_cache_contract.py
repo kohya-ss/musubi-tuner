@@ -11,7 +11,7 @@ from musubi_tuner.dataset.cache_io import (
     save_text_encoder_output_cache_qwen_image_21,
 )
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
-from musubi_tuner.qwen_image21.utils import reference_fingerprints
+from musubi_tuner.qwen_image_21.qwen_image_21_utils import reference_fingerprints
 from musubi_tuner.qwen_image_21_train_network import prepare_conditioning
 
 

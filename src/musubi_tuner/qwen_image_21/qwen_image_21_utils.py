@@ -3,10 +3,13 @@
 import hashlib
 import logging
 from pathlib import Path
+from types import MethodType
 from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import torch
+from torch import nn
+from torch.nn import functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
@@ -17,8 +20,10 @@ from musubi_tuner.dataset.config_utils import (
     generate_dataset_group_by_blueprint,
     load_user_config,
 )
-from musubi_tuner.qwen_image21.precision import store_linears_in_fp8
-from musubi_tuner.qwen_image21.qwen3_vl import QWEN3_VL_8B_INSTRUCT_CONFIG, normalize_qwen3_vl_state_dict_for_base_model
+from musubi_tuner.qwen_image_21.qwen_image_21_text_encoder import (
+    QWEN3_VL_8B_INSTRUCT_CONFIG,
+    normalize_qwen3_vl_state_dict_for_base_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +31,7 @@ if TYPE_CHECKING:
     from argparse import Namespace
 
     from musubi_tuner.dataset.image_video_dataset import ImageDataset
-    from musubi_tuner.qwen_image21.autoencoder import AutoencoderKLQwenImage21
+    from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
 
 ImageInput = Union[Image.Image, np.ndarray]
 
@@ -79,7 +84,7 @@ def load_vae(
     tiling: bool = False,
 ) -> "AutoencoderKLQwenImage21":
     """Load a local Qwen-Image 2.1 VAE directory or Diffusers-format checkpoint."""
-    from musubi_tuner.qwen_image21.autoencoder import AutoencoderKLQwenImage21
+    from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
 
     path = Path(path)
     if path.is_dir():
@@ -253,3 +258,19 @@ def encode_prompt(
         if not torch.equal(actual, grids):
             raise ValueError("VLM resized reference images: reference VAE and VLM grids must agree")
     return hidden[keep].contiguous(), torch.tensor(spans, dtype=torch.int64), grids
+
+
+def _linear_forward(self: nn.Linear, x: torch.Tensor) -> torch.Tensor:
+    return F.linear(x, self.weight.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
+
+
+def store_linears_in_fp8(module: nn.Module) -> None:
+    """Store Linear weights in FP8 and cast to the input dtype during forward.
+
+    Norms, embeddings, and biases keep their dtype. F.linear preserves input
+    gradients so LoRA layers before these frozen layers can be trained.
+    """
+    for layer in module.modules():
+        if isinstance(layer, nn.Linear):
+            layer.weight = nn.Parameter(layer.weight.to(torch.float8_e4m3fn), requires_grad=False)
+            layer.forward = MethodType(_linear_forward, layer)

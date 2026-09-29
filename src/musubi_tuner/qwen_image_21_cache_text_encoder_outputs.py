@@ -8,7 +8,7 @@ import torch
 from musubi_tuner import cache_text_encoder_outputs
 from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_qwen_image_21
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
-from musubi_tuner.qwen_image21 import utils
+from musubi_tuner.qwen_image_21 import qwen_image_21_utils
 from musubi_tuner.utils.model_utils import str_to_dtype
 
 logger = logging.getLogger(__name__)
@@ -26,8 +26,10 @@ def encode_and_save_batch(processor, encoder, batch: list[ItemInfo]) -> None:
             item.caption,
             control_shapes,
         )
-        embed, slots, grids = utils.encode_prompt(processor, encoder, item.caption, item.control_content)
-        save_text_encoder_output_cache_qwen_image_21(item, embed, slots, grids, utils.reference_fingerprints(item.control_content))
+        embed, slots, grids = qwen_image_21_utils.encode_prompt(processor, encoder, item.caption, item.control_content)
+        save_text_encoder_output_cache_qwen_image_21(
+            item, embed, slots, grids, qwen_image_21_utils.reference_fingerprints(item.control_content)
+        )
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -45,10 +47,10 @@ def setup_parser() -> argparse.ArgumentParser:
 def main():
     parser = setup_parser()
     args = parser.parse_args()
-    datasets = utils.load_datasets(args)
+    datasets = qwen_image_21_utils.load_datasets(args)
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Loading Qwen3-VL text encoder: %s", args.text_encoder)
-    processor, encoder = utils.load_text_encoder(
+    processor, encoder = qwen_image_21_utils.load_text_encoder(
         args.text_encoder, device=device, dtype=str_to_dtype(args.text_encoder_dtype), fp8_vl=args.fp8_vl
     )
     logger.info("Encoding with Qwen3-VL on %s", device)

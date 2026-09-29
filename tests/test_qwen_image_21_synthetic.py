@@ -16,8 +16,13 @@ from torch.nn import functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from musubi_tuner.networks import lora_qwen_image_21
-from musubi_tuner.qwen_image21.model import QwenImage21Transformer2DModel, canonical_weight_hook, load_model, segmented_attention
-from musubi_tuner.qwen_image21.precision import store_linears_in_fp8
+from musubi_tuner.qwen_image_21.qwen_image_21_model import (
+    QwenImage21Transformer2DModel,
+    canonical_weight_hook,
+    load_model,
+    segmented_attention,
+)
+from musubi_tuner.qwen_image_21.qwen_image_21_utils import store_linears_in_fp8
 from musubi_tuner.utils.safetensors_utils import TensorWeightAdapter, WeightTransformHooks
 
 TINY_CONFIG = dict(
@@ -168,7 +173,7 @@ class QwenImage21IntegrationTests(unittest.TestCase):
     def test_single_file_qwen3vl_text_encoder_loading(self):
         from transformers import Qwen3VLConfig, Qwen3VLForConditionalGeneration
 
-        from musubi_tuner.qwen_image21 import utils
+        from musubi_tuner.qwen_image_21 import qwen_image_21_utils as utils
 
         config = Qwen3VLConfig(
             text_config=dict(
@@ -227,8 +232,8 @@ class QwenImage21IntegrationTests(unittest.TestCase):
     def test_vae_rgba_encode_decode_and_normalization(self):
         import numpy as np
 
-        from musubi_tuner.qwen_image21 import utils
-        from musubi_tuner.qwen_image21.autoencoder import AutoencoderKLQwenImage21
+        from musubi_tuner.qwen_image_21 import qwen_image_21_utils as utils
+        from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
 
         vae = AutoencoderKLQwenImage21(base_dim=4, decoder_base_dim=4, num_res_blocks=1).eval()
         with torch.no_grad():
@@ -289,7 +294,7 @@ class QwenImage21IntegrationTests(unittest.TestCase):
 
         import numpy as np
 
-        from musubi_tuner.qwen_image21.autoencoder import AutoencoderKLQwenImage21
+        from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
         from musubi_tuner.qwen_image_21_train_network import QwenImage21NetworkTrainer
 
         vae = AutoencoderKLQwenImage21(base_dim=4, decoder_base_dim=4, num_res_blocks=1).eval()
@@ -334,7 +339,7 @@ class QwenImage21IntegrationTests(unittest.TestCase):
         )
         from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoProcessor
 
-        from musubi_tuner.qwen_image21.utils import encode_prompt
+        from musubi_tuner.qwen_image_21.qwen_image_21_utils import encode_prompt
 
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
@@ -513,8 +518,8 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[90, 44]]))
             with (
                 patch.object(train, "load_prompts", return_value=prompts),
-                patch.object(train.utils, "load_text_encoder", return_value=(Mock(), Mock())),
-                patch.object(train.utils, "encode_prompt", return_value=encoded),
+                patch.object(train.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())),
+                patch.object(train.qwen_image_21_utils, "encode_prompt", return_value=encoded),
             ):
                 result = train.QwenImage21NetworkTrainer().process_sample_prompts(
                     args, SimpleNamespace(device=torch.device("cpu")), "unused"
@@ -525,7 +530,7 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             self.assertGreater(height, width)
 
     def test_sage_grad_enabled_uses_differentiable_sdpa(self):
-        from musubi_tuner.qwen_image21 import model
+        from musubi_tuner.qwen_image_21 import qwen_image_21_model as model
 
         tensors = [torch.randn(1, 6, 2, 8, requires_grad=True) for _ in range(3)]
         segments = [[(0, 2, True), (2, 6, False)]]

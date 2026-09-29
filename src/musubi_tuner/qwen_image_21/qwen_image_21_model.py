@@ -19,7 +19,7 @@ from torch.nn import functional as F
 from musubi_tuner.modules import attention as attention_backends
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.qwen_image.qwen_image_model import QwenImageTransformer2DModel, TimestepEmbedding
-from musubi_tuner.qwen_image21.precision import store_linears_in_fp8
+from musubi_tuner.qwen_image_21.qwen_image_21_utils import store_linears_in_fp8
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
 from musubi_tuner.utils.model_utils import create_cpu_offloading_wrapper
 from musubi_tuner.utils.safetensors_utils import WeightTransformHooks
