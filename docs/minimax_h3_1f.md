@@ -178,6 +178,23 @@ fp_1f_clean_indices = [0]     # control image positions (24 fps pixel-frame indi
 fp_1f_target_index = 24       # target position — REQUIRED when controls are present
 ```
 
+The same dataset with `image_jsonl_file` (the indices stay in the TOML and apply to every line):
+
+```toml
+[[datasets]]
+image_jsonl_file = "/data/h3/edit/items.jsonl"
+cache_directory = "/data/h3/cache-edit"
+fp_1f_clean_indices = [0]
+fp_1f_target_index = 24
+```
+
+```jsonl
+{"image_path": "/data/h3/edit/targets/001.png", "control_path": "/data/h3/edit/sources/001.png", "caption": "..."}
+{"image_path": "/data/h3/edit/targets/002.png", "control_path": "/data/h3/edit/sources/002.png", "caption": "..."}
+```
+
+For several controls per item, use `control_path_0`, `control_path_1`, ... on every line, with one `fp_1f_clean_indices` entry per control (e.g. `[0, 48]` for a first/last pair).
+
 - `control_directory` matches controls to targets by filename (`image.png` ↔ `image.png` / `image_0.png`), or use `image_jsonl_file` with `control_path` (or `control_path_0`/`control_path_1`) per line. `fp_1f_clean_indices` is what makes the controls timed FL2VA anchors; the same control images without indices are untimed Ref2VA references instead (see the reference training section below).
 - `fp_1f_clean_indices` gives one index per control image, in control order (`image_0.png` / `control_path_0` first): the controls become the ordered condition slots `cond_000`, `cond_001`, ... and `<Picture 1>`, `<Picture 2>`, ... in the same order. A slot has no time meaning of its own — only the indices do. Any number of controls is accepted; one or two matches the released FL2VA API, **three or more is experimental** (a first/middle/last triple for inbetween training, for example) and its benefit should be checked with an A/B against the two-anchor form.
 - Both `fp_1f_clean_indices` and an explicit `fp_1f_target_index` are required when time-annotated controls are present; there are no defaults. Controls are resized to the target's bucket resolution.
