@@ -608,6 +608,36 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
     def test_inference_lora_filtering(self):
         self.check_filtered_adapter_merge(False)
 
+    def test_inference_compiled_model(self):
+        from musubi_tuner import qwen_image_21_generate_image as generate
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp)
+            model = tiny().eval()
+            save_file(model.state_dict(), str(path / "dit.safetensors"))
+            (path / "config.json").write_text(json.dumps(TINY_CONFIG))
+            args = generate.setup_parser().parse_args(
+                [
+                    "--dit",
+                    str(path / "dit.safetensors"),
+                    "--vae",
+                    "unused",
+                    "--text_encoder",
+                    "unused",
+                    "--prompt",
+                    "test",
+                    "--save_path",
+                    temp,
+                    "--compile",
+                    "--compile_backend",
+                    "eager",
+                ]
+            )
+            compiled = generate.load_dit_model(args, torch.device("cpu"), torch.float32, None)
+            batch = inputs()
+            with torch.no_grad():
+                torch.testing.assert_close(compiled(**batch), model(**batch))
+
     @unittest.skipUnless(find_spec("lycoris"), "LyCORIS is not installed")
     def test_inference_lycoris_filtering(self):
         self.check_filtered_adapter_merge(True)

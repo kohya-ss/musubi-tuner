@@ -210,6 +210,8 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--guidance_scale` defaults to 1.0. Values greater than 1 require `--negative_prompt`.
 - `--flow_shift` specifies a fixed flow shift. If omitted, sampling uses dynamic shifting, as in training previews.
 - `--text_encoder_cpu`, `--fp8_vl`, `--fp8_scaled`, `--blocks_to_swap`, and `--vae_tiling` are available to reduce VRAM usage.
+- Add `--use_pinned_memory_for_block_swap` to use pinned memory for block transfers. This may improve transfer speed but uses more shared GPU memory on Windows.
+- `--compile` enables `torch.compile` for the DiT blocks. Use `--compile_backend`, `--compile_mode`, and the other shared compile options as needed.
 - Output PNGs retain the alpha channel.
 
 <details>
@@ -224,6 +226,8 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - `--guidance_scale`の既定値は1.0です。1より大きい値には`--negative_prompt`が必要です。
 - `--flow_shift`で固定シフトを指定します。省略時は学習中のプレビューと同じ動的シフトを使用します。
 - VRAM使用量を減らすには`--text_encoder_cpu`、`--fp8_vl`、`--fp8_scaled`、`--blocks_to_swap`、`--vae_tiling`が利用できます。
+- `--use_pinned_memory_for_block_swap`でブロック転送に固定メモリを使用します。転送が高速になる場合がありますが、Windowsでは共有GPUメモリの使用量が増えます。
+- `--compile`でDiTブロックの`torch.compile`を有効にします。必要に応じて`--compile_backend`、`--compile_mode`などの共通オプションを指定してください。
 - 出力PNGはアルファチャンネルを保持します。
 
 </details>

@@ -11,6 +11,7 @@ from safetensors.torch import load_file
 from musubi_tuner.hv_generate_video import save_images_grid
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
 from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling, qwen_image_21_utils
+from musubi_tuner.utils import model_utils
 from musubi_tuner.utils.device_utils import clean_memory_on_device
 from musubi_tuner.utils.lora_utils import filter_lora_state_dict
 
@@ -53,7 +54,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--attn_mode", choices=["sdpa", "torch", "flash", "flash3", "xformers", "sageattn"], default="sdpa")
     parser.add_argument("--fp8_scaled", action="store_true", help="Use scaled FP8 for DiT weights")
     parser.add_argument("--blocks_to_swap", type=int, default=0, help="Number of DiT blocks to swap to CPU")
+    parser.add_argument("--use_pinned_memory_for_block_swap", action="store_true", help="Use pinned memory for block swapping")
     parser.add_argument("--disable_numpy_memmap", action="store_true", help="Disable numpy memory mapping when loading weights")
+    model_utils.setup_parser_compile(parser)
     return parser
 
 
@@ -105,11 +108,18 @@ def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.
             transformer.load_state_dict(state_dict, strict=True, assign=True)
     transformer.eval().requires_grad_(False)
     if args.blocks_to_swap:
-        transformer.enable_block_swap(args.blocks_to_swap, BlockSwapConfig(device, supports_backward=False))
+        transformer.enable_block_swap(
+            args.blocks_to_swap,
+            BlockSwapConfig(device, supports_backward=False, use_pinned_memory=args.use_pinned_memory_for_block_swap),
+        )
         transformer.move_to_device_except_swap_blocks(device)
         transformer.switch_block_swap_for_inference()
     else:
         transformer.to(device)
+    if args.compile:
+        transformer = model_utils.compile_transformer(
+            args, transformer, [transformer.transformer_blocks], disable_linear=args.blocks_to_swap > 0
+        )
     return transformer
 
 
