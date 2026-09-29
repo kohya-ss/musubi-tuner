@@ -475,9 +475,20 @@ class QwenImage21Trainer(QwenImage21NetworkTrainer):
                     accelerator.backward(loss)
 
                     if not args.fused_backward_pass:
+                        if accelerator.sync_gradients and blocks_to_swap > 0 and args.block_swap_optimizer_patch_params:
+                            unwrapped_transformer.wait_for_pending_block_moves()
                         if accelerator.sync_gradients and args.max_grad_norm != 0.0:
                             params_to_clip = transformer.parameters()
                             accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+
+                        if accelerator.sync_gradients and blocks_to_swap > 0 and args.block_swap_optimizer_patch_params:
+                            # Move gradients to the parameter device for AdamW and Adafactor.
+                            # Optimizers with device-specific state, such as AdamW8bit, are not supported.
+                            for group in optimizer.param_groups:
+                                for param in group["params"]:
+                                    if param.grad is not None and param.device != param.grad.device:
+                                        # CPU optimizer updates must wait for the gradient copy.
+                                        param.grad = param.grad.to(param.device)
 
                         optimizer.step()
                         lr_scheduler.step()
@@ -603,6 +614,11 @@ def setup_parser() -> argparse.ArgumentParser:
     parser = qwen_image_21_train_network.setup_parser()
     parser.add_argument("--full_bf16", action="store_true", help="Enable full bfloat16 training for Qwen-Image 2.1")
     parser.add_argument("--fused_backward_pass", action="store_true", help="Use fused backward pass for Adafactor optimizer")
+    parser.add_argument(
+        "--block_swap_optimizer_patch_params",
+        action="store_true",
+        help="Move gradients to the parameter device before optimizer steps with block swapping (AdamW and Adafactor)",
+    )
     parser.add_argument("--mem_eff_save", action="store_true", help="Use memory-efficient checkpoint saving")
     return parser
 

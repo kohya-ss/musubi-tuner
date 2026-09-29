@@ -182,6 +182,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 - Without `--full_bf16`, model parameters are stored in FP32. `--full_bf16` requires `--mixed_precision bf16` and reduces parameter and optimizer memory usage. Full-model training requires substantially more memory than LoRA training.
 - Gradient checkpointing, standard block swapping, and training previews are supported. FP8 base weights and H2D-only block swapping are not supported for full-model training.
 - `--fused_backward_pass` is available with Adafactor and `--gradient_accumulation_steps 1`.
+- With `--blocks_to_swap`, use `--block_swap_optimizer_patch_params` for AdamW or Adafactor to move gradients to the parameter device before optimizer steps. This is not needed with `--fused_backward_pass` and does not support AdamW8bit or other optimizers with device-specific state.
 - `--mem_eff_save` reduces peak memory when saving model checkpoints. State saving still uses Accelerate's regular saving path. Use `--resume path/to/state` to restore model, optimizer, and scheduler state.
 - Checkpoints contain the full DiT and its configuration. Pass the resulting safetensors file to `--dit` for inference or further training.
 
@@ -194,6 +195,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 - `--full_bf16`を指定しない場合、モデルのパラメーターはFP32で保持します。`--full_bf16`には`--mixed_precision bf16`が必要で、パラメーターとオプティマイザーのメモリ使用量を減らせます。全体学習はLoRA学習より大幅に多くのメモリを必要とします。
 - 勾配チェックポイント、通常のブロックスワップ、学習中のサンプル生成に対応します。FP8のベース重みとH2D-onlyブロックスワップは全体学習では使用できません。
 - `--fused_backward_pass`はAdafactorと`--gradient_accumulation_steps 1`で使用できます。
+- `--blocks_to_swap`とAdamWまたはAdafactorを併用する場合は、`--block_swap_optimizer_patch_params`で更新前に勾配をパラメーターと同じデバイスへ移動します。`--fused_backward_pass`では不要です。AdamW8bitなど、デバイス固有の状態を持つオプティマイザーには対応しません。
 - `--mem_eff_save`はモデル保存時のピークメモリを減らします。状態保存には通常のAccelerateの保存処理を使用します。`--resume path/to/state`でモデル、オプティマイザー、スケジューラーの状態を復元できます。
 - チェックポイントにはDiT全体と設定が含まれます。生成や追加学習には保存したsafetensorsファイルを`--dit`に指定してください。
 

@@ -83,6 +83,9 @@ def sample_image(
         noise = latents.clone()
     # Qwen-Image 2.1 uses the same scheduler configuration as Qwen-Image.
     scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
+    if sample_steps == 1:
+        # A single sigma at 1 cannot be stretched to a different terminal sigma.
+        scheduler.shift_terminal = None
     sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
     mu = qwen_image_utils.calculate_shift_qwen_image(latents.shape[1])
     scheduler.set_timesteps(sample_steps, device=device, sigmas=sigmas, mu=mu)

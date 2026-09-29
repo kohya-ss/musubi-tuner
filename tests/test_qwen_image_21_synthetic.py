@@ -740,6 +740,15 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             torch.testing.assert_close(result[..., 2:], baseline[..., 2:])
 
     def test_full_finetuning_from_cache(self):
+        self._check_full_finetuning_from_cache()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for block swap training")
+    def test_full_finetuning_block_swap_accumulation(self):
+        for optimizer_type in ("AdamW", "Adafactor"):
+            with self.subTest(optimizer_type=optimizer_type):
+                self._check_full_finetuning_from_cache(optimizer_type, block_swap=True)
+
+    def _check_full_finetuning_from_cache(self, optimizer_type="AdamW", block_swap=False):
         from musubi_tuner import qwen_image_21_train as train
         from musubi_tuner.dataset.cache_io import save_latent_cache_qwen_image_21, save_text_encoder_output_cache_qwen_image_21
         from musubi_tuner.dataset.image_video_dataset import ItemInfo
@@ -758,41 +767,46 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             dataset_config.write_text(
                 f'[general]\nresolution = 32\nbatch_size = 1\ncaption_extension = ".txt"\n'
                 f'[[datasets]]\nimage_directory = "{images.as_posix()}"\ncache_directory = "{cache.as_posix()}"\n'
+                f"num_repeats = {4 if block_swap else 1}\n"
             )
             config = {**TINY_CONFIG, "in_channels": 64, "out_channels": 64, "context_in_dim": 4096}
+            if block_swap:
+                config["num_layers"] = 3
             model = QwenImage21Transformer2DModel(**config)
             original = {key: value.clone() for key, value in model.state_dict().items()}
             save_file(original, str(path / "dit.safetensors"))
             (path / "config.json").write_text(json.dumps(config))
-            args = train.setup_parser().parse_args(
-                [
-                    "--dit",
-                    str(path / "dit.safetensors"),
-                    "--dataset_config",
-                    str(dataset_config),
-                    "--output_dir",
-                    str(path / "output"),
-                    "--output_name",
-                    "full",
-                    "--sdpa",
-                    "--mixed_precision",
-                    "no",
-                    "--optimizer_type",
-                    "AdamW",
-                    "--learning_rate",
-                    "0.001",
-                    "--max_train_steps",
-                    "1",
-                    "--max_data_loader_n_workers",
-                    "0",
-                    "--gradient_checkpointing",
-                    "--save_state_on_train_end",
-                    "--mem_eff_save",
-                    "--compile",
-                    "--compile_backend",
-                    "eager",
-                ]
-            )
+            options = [
+                "--dit",
+                str(path / "dit.safetensors"),
+                "--dataset_config",
+                str(dataset_config),
+                "--output_dir",
+                str(path / "output"),
+                "--output_name",
+                "full",
+                "--sdpa",
+                "--mixed_precision",
+                "no",
+                "--optimizer_type",
+                optimizer_type,
+                "--learning_rate",
+                "0.001",
+                "--max_train_steps",
+                "2" if block_swap else "1",
+                "--max_data_loader_n_workers",
+                "0",
+                "--gradient_checkpointing",
+                "--save_state_on_train_end",
+                "--mem_eff_save",
+            ]
+            if block_swap:
+                options += ["--blocks_to_swap", "1", "--gradient_accumulation_steps", "2", "--block_swap_optimizer_patch_params"]
+            else:
+                options += ["--compile", "--compile_backend", "eager"]
+            if optimizer_type == "Adafactor":
+                options += ["--optimizer_args", "relative_step=False", "scale_parameter=False", "warmup_init=False"]
+            args = train.setup_parser().parse_args(options)
             dataset = load_datasets(args)[0]
             item = ItemInfo(str(image), "edit", (32, 32), (32, 32))
             item.latent_cache_path = dataset.get_latent_cache_path(item)
@@ -802,7 +816,21 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             save_text_encoder_output_cache_qwen_image_21(
                 item, torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]), hashes
             )
-            train.QwenImage21Trainer().train(args)
+            if block_swap:
+                import os
+                import subprocess
+
+                # Isolate Accelerate state and CUDA workers from the other training tests.
+                result = subprocess.run(
+                    [sys.executable, "-m", "musubi_tuner.qwen_image_21_train", *options],
+                    env={**os.environ, "OMP_NUM_THREADS": "2", "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            else:
+                train.QwenImage21Trainer().train(args)
             checkpoint = path / "output" / "full.safetensors"
             result = load_file(str(checkpoint))
             self.assertEqual(set(result), set(original))
@@ -814,6 +842,11 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             reloaded = load_model(str(checkpoint), dtype=torch.float32)
             for key, value in reloaded.state_dict().items():
                 torch.testing.assert_close(value, result[key])
+            if block_swap:
+                state = torch.load(path / "output" / "full-state" / "optimizer.bin", map_location="cpu", weights_only=True)
+                self.assertTrue(state["state"])
+                self.assertTrue(all(int(value["step"]) == 2 for value in state["state"].values()))
+                return
             args.resume = str(path / "output" / "full-state")
             args.output_name = "resumed"
             train.QwenImage21Trainer().train(args)
@@ -1078,6 +1111,94 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             torch.testing.assert_close(actual, expected)
             actual.sum().backward()
         self.assertTrue(all(t.grad is not None for t in tensors))
+
+    def test_single_step_sampling(self):
+        from musubi_tuner.qwen_image_21 import qwen_image_21_sampling as sampling
+
+        prompt = {
+            "reference_images": [],
+            "positive": (torch.ones(3, 4096), torch.empty(0, dtype=torch.int64), torch.empty(0, 2)),
+        }
+        for shift in (None, 3.0):
+            with self.subTest(shift=shift):
+                model = Mock(side_effect=lambda **kwargs: torch.full_like(kwargs["hidden_states"], 0.25))
+                output = sampling.sample_image(
+                    model,
+                    Mock(),
+                    prompt,
+                    torch.device("cpu"),
+                    torch.float32,
+                    32,
+                    32,
+                    1,
+                    torch.Generator().manual_seed(42),
+                    discrete_flow_shift=shift,
+                    return_latents=True,
+                )
+                noise = torch.randn((1, 4, 64), generator=torch.Generator().manual_seed(42))
+                expected = (noise - 0.25).transpose(1, 2).reshape(1, 64, 1, 2, 2)
+                self.assertTrue(torch.isfinite(output).all())
+                torch.testing.assert_close(output, expected)
+                self.assertEqual(model.call_count, 1)
+                self.assertEqual(sampling.qwen_image_utils.get_scheduler(shift).shift_terminal, 0.02)
+
+    def test_attention_matches_value_dtype(self):
+        from musubi_tuner.qwen_image_21.qwen_image_21_model import Attention, rotary_embedding
+
+        layer = Attention(16, 2, 8, 1e-6).to(torch.bfloat16)
+        x = torch.randn(1, 8, 16, dtype=torch.bfloat16)
+        rope = rotary_embedding(torch.zeros(1, 8, 3), (2, 2, 4))
+        segments = [[(0, 3, True), (3, 8, False)]]
+        with torch.no_grad():
+            expected = layer(x, rope, segments)
+            norm_q, norm_k = layer.norm_q.forward, layer.norm_k.forward
+            with (
+                patch.object(layer.norm_q, "forward", side_effect=lambda q: norm_q(q).float()),
+                patch.object(layer.norm_k, "forward", side_effect=lambda k: norm_k(k).float()),
+            ):
+                actual = layer(x, rope, segments)
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        torch.testing.assert_close(actual, expected)
+
+    @unittest.skipUnless(torch.cuda.is_available() and find_spec("sageattention"), "CUDA and SageAttention required")
+    def test_sage_attention_under_bfloat16_autocast(self):
+        from musubi_tuner.qwen_image_21.qwen_image_21_model import Attention, rotary_embedding
+
+        torch.manual_seed(123)
+        layer = Attention(256, 2, 128, 1e-6).cuda().to(torch.bfloat16).eval()
+        x = torch.randn(1, 80, 256, device="cuda", dtype=torch.bfloat16)
+        rope = rotary_embedding(torch.zeros(1, 80, 3, device="cuda"), (16, 56, 56))
+        segments = [[(0, 16, True), (16, 80, False)]]
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            expected = layer(x, rope, segments)
+            layer.attn_mode = "sageattn"
+            actual = layer(x, rope, segments)
+        self.assertTrue(torch.isfinite(actual).all())
+        self.assertEqual(actual.dtype, expected.dtype)
+        relative_rmse = (actual.float() - expected.float()).square().mean().sqrt() / expected.float().square().mean().sqrt()
+        self.assertLess(relative_rmse, 0.03)
+
+    def test_block_swap_waits_before_reset(self):
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                model = tiny()
+                model.blocks_to_swap = 1
+                offloader = Mock(spec=["wait_for_block", "prepare_block_devices_before_forward"])
+                events = []
+                if not streaming:
+                    offloader.futures = {0: Mock(), 1: Mock()}
+
+                    def wait(index):
+                        offloader.futures.pop(index)
+                        events.append(("wait", index))
+
+                    offloader.wait_for_block.side_effect = wait
+                offloader.prepare_block_devices_before_forward.side_effect = lambda blocks: events.append(("prepare", len(blocks)))
+                model.offloader = offloader
+                model.prepare_block_swap_before_forward()
+                self.assertEqual(events, [("prepare", 2)] if streaming else [("wait", 0), ("wait", 1), ("prepare", 2)])
+                if streaming:
+                    offloader.wait_for_block.assert_not_called()
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required for CPU offload regression")
     def test_checkpoint_and_input_offload_backward(self):

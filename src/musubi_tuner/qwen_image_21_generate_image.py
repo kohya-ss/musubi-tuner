@@ -289,8 +289,7 @@ def generate(args: argparse.Namespace, shared_models: dict | None = None) -> lis
     if shared_models is not None:
         if args.blocks_to_swap:
             # Finish pending transfers before moving the reused model to CPU.
-            for index in range(len(transformer.transformer_blocks)):
-                transformer.offloader.wait_for_block(index)
+            transformer.wait_for_pending_block_moves()
             synchronize_device(device)
         transformer.to("cpu")
         shared_models.update(vae=vae, transformer=transformer)

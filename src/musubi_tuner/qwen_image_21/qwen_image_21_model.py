@@ -171,6 +171,8 @@ class Attention(nn.Module):
         q = self.norm_q(self.to_q(x).unflatten(-1, (self.heads, -1)))
         k = self.norm_k(self.to_k(x).unflatten(-1, (self.heads, -1)))
         v = self.to_v(x).unflatten(-1, (self.heads, -1))
+        # RMSNorm may return FP32 under autocast; attention kernels require matching Q/K/V dtypes.
+        q, k = q.to(v.dtype), k.to(v.dtype)
         return self.to_out[0](segmented_attention(apply_rope(q, rope), apply_rope(k, rope), v, segments, self.attn_mode))
 
 
@@ -206,7 +208,6 @@ class FinalNorm(nn.Module):
 class QwenImage21Transformer2DModel(QwenImageTransformer2DModel):
     """Qwen-Image 2.1 single-stream transformer."""
 
-    # Checkpointing and block swap methods are inherited from Qwen-Image.
     def __init__(
         self,
         in_channels=64,
@@ -260,6 +261,18 @@ class QwenImage21Transformer2DModel(QwenImageTransformer2DModel):
         self.blocks_to_swap = None
         self.offloader = None
         self.img_in_txt_in_offloading = False
+
+    def wait_for_pending_block_moves(self):
+        """Wait for pending weight swaps without starting H2D-only loads."""
+        if self.blocks_to_swap:
+            # H2D-only streaming handles pending transfers during its own reset.
+            for block_idx in list(getattr(self.offloader, "futures", {})):
+                self.offloader.wait_for_block(block_idx)
+
+    def prepare_block_swap_before_forward(self):
+        # Finish the previous forward's transfers before resetting block devices.
+        self.wait_for_pending_block_moves()
+        super().prepare_block_swap_before_forward()
 
     def _gradient_checkpointing_func(self, block, *args):
         if self.activation_cpu_offloading:
