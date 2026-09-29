@@ -433,6 +433,74 @@ class QwenImage21IntegrationTests(unittest.TestCase):
 
 
 class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
+    def test_sampling_guidance_and_scheduler(self):
+        from contextlib import nullcontext
+
+        import numpy as np
+        from diffusers import FlowMatchEulerDiscreteScheduler
+
+        from musubi_tuner import qwen_image_21_train_network as train
+
+        trainer = train.QwenImage21NetworkTrainer()
+        trainer.handle_model_specific_args(SimpleNamespace(sample_prompts=None))
+        self.assertIsNone(trainer.default_discrete_flow_shift)
+        self.assertTrue(train.setup_parser().parse_args([]).split_attn)
+        prompt = {
+            "reference_images": [],
+            "positive": (torch.full((1, 4096), 2.0), torch.empty(0), torch.empty(0)),
+            "negative": (torch.ones(1, 4096), torch.empty(0), torch.empty(0)),
+        }
+        accelerator = SimpleNamespace(device=torch.device("cpu"), autocast=nullcontext)
+        for shift, cfg_scale, has_negative, expected, calls in [
+            (None, None, True, 2.0, 4),
+            (None, 2.0, False, 2.0, 4),
+            (None, 1.0, True, 2.0, 4),
+            (3.0, 2.0, True, 3.0, 8),
+        ]:
+            with self.subTest(shift=shift, cfg_scale=cfg_scale, has_negative=has_negative):
+                scheduler = train.qwen_image_utils.get_scheduler(shift)
+                model = Mock(
+                    side_effect=lambda **kwargs: torch.ones_like(kwargs["hidden_states"]) * kwargs["encoder_hidden_states"].mean()
+                )
+                with (
+                    patch.object(train.qwen_image_utils, "get_scheduler", return_value=scheduler),
+                    patch.object(scheduler, "step", wraps=scheduler.step) as step,
+                    patch.object(train.qwen_image_21_utils, "decode_latents", return_value=torch.zeros(1, 4, 32, 32)),
+                ):
+                    trainer.do_inference(
+                        accelerator,
+                        None,
+                        prompt,
+                        Mock(),
+                        torch.float32,
+                        model,
+                        shift,
+                        4,
+                        32,
+                        32,
+                        1,
+                        torch.Generator().manual_seed(42),
+                        has_negative,
+                        1.0,
+                        cfg_scale,
+                    )
+                self.assertEqual(model.call_count, calls)
+                for call in step.call_args_list:
+                    torch.testing.assert_close(call.args[0], torch.full_like(call.args[0], expected))
+                reference = FlowMatchEulerDiscreteScheduler(
+                    shift=1.0 if shift is None else shift,
+                    use_dynamic_shifting=shift is None,
+                    base_image_seq_len=256,
+                    max_image_seq_len=8192,
+                    base_shift=0.5,
+                    max_shift=0.9,
+                    shift_terminal=0.02,
+                )
+                mu = 0.5 + (4 - 256) * (0.9 - 0.5) / (8192 - 256)
+                reference.set_timesteps(4, device="cpu", sigmas=np.linspace(1.0, 0.25, 4), mu=mu)
+                torch.testing.assert_close(scheduler.timesteps, reference.timesteps)
+                torch.testing.assert_close(scheduler.sigmas, reference.sigmas)
+
     def test_lora_diffusers_conversion(self):
         from musubi_tuner.convert_lora import convert_from_diffusers, convert_to_diffusers
 

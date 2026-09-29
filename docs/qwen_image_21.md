@@ -58,6 +58,8 @@ Use the same dataset configuration for latent and text encoder caching. After ch
 
 RGB images receive an opaque alpha channel for the VAE. Transparent regions in control images are composited over white for the text encoder.
 
+The cache scripts encode one item at a time. `--batch_size` controls the batch passed to the cache callback, not the model's forward batch size.
+
 <details>
 <summary>日本語</summary>
 
@@ -68,6 +70,8 @@ RGB images receive an opaque alpha channel for the VAE. Transparent regions in c
 latentとテキストエンコーダーのキャッシュには同じデータセット設定を使用してください。制御画像やクロップ設定を変更した場合は、`--skip_existing`を使用せずに両方のキャッシュを再生成してください。
 
 RGB画像にはVAE用の不透明なアルファチャンネルが追加されます。テキストエンコーダーでは、制御画像の透明部分を白背景に合成します。
+
+キャッシュスクリプトは1項目ずつエンコードします。`--batch_size`はキャッシュ処理に渡すバッチを制御し、モデルのforwardのバッチサイズは変更しません。
 
 </details>
 
@@ -140,6 +144,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 - Use `--blocks_to_swap` to reduce VRAM usage. The number must be less than 32 for the default model. See the [block swap documentation](./block_swap.md).
 - `--fp8_base` and `--fp8_scaled` can reduce DiT memory usage. Specify both options for scaled FP8.
 - `--sdpa` uses PyTorch scaled dot product attention. SageAttention is not supported for training.
+- Attention is always split by sample and text/image segment. `--split_attn` is enabled by default and does not need to be specified.
 - Resolution-dependent timestep sampling, such as `qwen_shift`, uses the number of target latent tokens (`H * W`).
 
 <details>
@@ -151,6 +156,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 \
 - VRAM使用量を減らすには`--blocks_to_swap`を指定してください。標準モデルでは32未満の値を指定します。[ブロックスワップのドキュメント](./block_swap.md)も参照してください。
 - `--fp8_base`と`--fp8_scaled`でDiTのメモリ使用量を減らせます。scaled FP8を使用する場合は両方を指定してください。
 - `--sdpa`はPyTorchのscaled dot product attentionを使用します。SageAttentionは学習には対応していません。
+- Attentionは常にサンプルおよびテキスト・画像の区間ごとに分割されます。`--split_attn`は既定で有効なため、指定する必要はありません。
 - `qwen_shift`などの解像度に依存するタイムステップサンプリングでは、学習対象画像のlatentトークン数（`H * W`）を使用します。
 
 </details>
@@ -162,10 +168,12 @@ To generate sample images, add `--sample_prompts path/to/prompts.txt` and `--sam
 See [Sampling during training](./sampling_during_training.md) for the prompt format. Use repeated `--ci` options for multiple control images:
 
 ```text
-A cat holding a sign --w 1024 --h 1024 --s 30 --d 42 --fs 3.0 --l 4.0 --ci path/to/control0.png --ci path/to/control1.png
+A cat holding a sign --w 1024 --h 1024 --s 40 --d 42 --ci path/to/control0.png --ci path/to/control1.png
 ```
 
-`--l` sets the CFG scale (default: 4.0). RGBA sample images are composited over white when saved.
+`--l` sets the CFG scale (default: 1.0, no CFG). To enable CFG, specify a value greater than 1 and a negative prompt with `--n`. Unlike earlier Qwen-Image models, Qwen-Image 2.1 does not apply norm rescaling after CFG.
+
+Sampling uses resolution-dependent dynamic shifting by default. `--fs` overrides it with a fixed flow shift. This is separate from `--discrete_flow_shift` in the training command. RGBA sample images are composited over white when saved.
 
 <details>
 <summary>日本語</summary>
@@ -174,6 +182,8 @@ A cat holding a sign --w 1024 --h 1024 --s 30 --d 42 --fs 3.0 --l 4.0 --ci path/
 
 プロンプトの形式は[学習中のサンプル画像生成](./sampling_during_training.md)を参照してください。複数の制御画像を使用する場合は、上記の例のように`--ci`を繰り返して指定します。
 
-`--l`でCFGスケールを指定します（既定値: 4.0）。RGBAのサンプル画像は、保存時に白背景に合成されます。
+`--l`でCFGスケールを指定します（既定値: 1.0、CFGなし）。CFGを有効にするには、1より大きい値と`--n`によるネガティブプロンプトを指定してください。従来のQwen-Imageとは異なり、Qwen-Image 2.1ではCFG後のノルム補正を行いません。
+
+サンプリングでは既定で解像度に応じた動的シフトを使用します。`--fs`を指定すると固定のflow shiftで上書きします。学習コマンドの`--discrete_flow_shift`とは別の設定です。RGBAのサンプル画像は、保存時に白背景に合成されます。
 
 </details>

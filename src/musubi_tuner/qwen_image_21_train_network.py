@@ -3,8 +3,8 @@
 import argparse
 import gc
 
+import numpy as np
 import torch
-from diffusers import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 from safetensors.torch import load_file
 from torch.nn import functional as F
@@ -12,6 +12,7 @@ from torch.nn import functional as F
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21, ARCHITECTURE_QWEN_IMAGE_21_FULL
 from musubi_tuner.dataset.bucket import BucketSelector
 from musubi_tuner.dataset.media_utils import resize_image_to_bucket
+from musubi_tuner.qwen_image import qwen_image_utils
 from musubi_tuner.qwen_image_21 import qwen_image_21_model
 from musubi_tuner.qwen_image_21 import qwen_image_21_utils
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
@@ -78,7 +79,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         self._i2v_training = False
         self._control_training = False
         self.default_guidance_scale = 1.0
-        self.default_discrete_flow_shift = 3.0
+        self.default_discrete_flow_shift = None
         if args.sample_prompts and (not args.text_encoder or not args.vae):
             raise ValueError("Sampling requires --text_encoder and --vae")
 
@@ -151,7 +152,10 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
                     size = BucketSelector.calculate_bucket_resolution(source.size, (1024, 1024), architecture=self.architecture)
                     images.append(resize_image_to_bucket(source, size))
             prompt["reference_images"] = images
-            for name, caption in [("positive", prompt.get("prompt", "")), ("negative", prompt.get("negative_prompt", " "))]:
+            captions = [("positive", prompt.get("prompt", ""))]
+            if prompt.get("negative_prompt") is not None and (prompt.get("cfg_scale") or 1.0) > 1.0:
+                captions.append(("negative", prompt["negative_prompt"]))
+            for name, caption in captions:
                 prompt[name] = tuple(t.cpu() for t in qwen_image_21_utils.encode_prompt(processor, encoder, caption, images))
         del processor, encoder
         gc.collect()
@@ -186,9 +190,14 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in refs] + [(1, height // 16, width // 16)]]
         refs = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in refs]
         latents = torch.randn((1, height // 16 * (width // 16), 64), generator=generator, device=device, dtype=dit_dtype)
-        scheduler = FlowMatchEulerDiscreteScheduler(shift=discrete_flow_shift or 3.0)
-        scheduler.set_timesteps(sample_steps, device=device)
-        cfg = 4.0 if cfg_scale is None else cfg_scale
+        # Qwen-Image 2.1 uses the same scheduler configuration as Qwen-Image.
+        scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
+        sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
+        mu = qwen_image_utils.calculate_shift_qwen_image(latents.shape[1])
+        scheduler.set_timesteps(sample_steps, device=device, sigmas=sigmas, mu=mu)
+        scheduler.set_begin_index(0)
+        cfg_scale = 1.0 if cfg_scale is None else cfg_scale
+        do_cfg = do_classifier_free_guidance and cfg_scale > 1.0
 
         def predict(name, timestep):
             embed, slots, _ = sample_parameter[name]
@@ -205,11 +214,10 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
             for timestep in scheduler.timesteps:
                 transformer.prepare_block_swap_before_forward()
                 pred = predict("positive", timestep)
-                if cfg > 1:
+                if do_cfg:
                     transformer.prepare_block_swap_before_forward()
                     negative = predict("negative", timestep)
-                    guided = negative + cfg * (pred - negative)
-                    pred = guided * (pred.norm(dim=-1, keepdim=True) / guided.norm(dim=-1, keepdim=True).clamp_min(1e-6))
+                    pred = negative + cfg_scale * (pred - negative)
                 latents = scheduler.step(pred, timestep, latents, return_dict=False)[0]
             vae.to(device)
             pixels = qwen_image_21_utils.decode_latents(vae, qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16))
@@ -227,7 +235,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dit_config", help="Optional Diffusers transformer config.json")
     parser.add_argument("--text_encoder", help="Qwen3-VL-8B directory or BF16/FP32 safetensors file, needed only for sampling")
     parser.add_argument("--vae_tiling", action="store_true", help="Enable spatial tiling for the Qwen-Image 2.1 VAE")
-    parser.set_defaults(network_module="networks.lora_qwen_image_21", dit_dtype="bfloat16", vae_dtype="bfloat16")
+    parser.set_defaults(network_module="networks.lora_qwen_image_21", dit_dtype="bfloat16", vae_dtype="bfloat16", split_attn=True)
     return parser
 
 
