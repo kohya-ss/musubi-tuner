@@ -1,4 +1,5 @@
 import argparse
+import copy
 import gc
 import logging
 import random
@@ -38,7 +39,10 @@ def setup_parser() -> argparse.ArgumentParser:
         "--exclude_patterns", type=str, nargs="*", default=None, help="LoRA module exclude patterns, one per weight"
     )
     parser.add_argument("--lycoris", action="store_true", help="Use LyCORIS for inference")
-    parser.add_argument("--prompt", type=str, required=True, help="Prompt for generation")
+    parser.add_argument("--prompt", type=str, default=None, help="Prompt for generation")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--from_file", type=str, default=None, help="Read prompts from a text file")
+    modes.add_argument("--interactive", action="store_true", help="Read prompts from the console")
     parser.add_argument("--negative_prompt", type=str, default=None, help="Negative prompt for CFG")
     parser.add_argument("--control_image_path", type=str, nargs="+", default=None, help="Ordered control image paths")
     parser.add_argument("--image_size", type=int, nargs=2, default=[1024, 1024], help="Image size: height width")
@@ -123,10 +127,51 @@ def load_dit_model(args: argparse.Namespace, device: torch.device, dtype: torch.
     return transformer
 
 
-def generate(args: argparse.Namespace) -> list[str]:
+def parse_prompt_line(line: str) -> dict:
+    """Parse a prompt and the short options used by Qwen-Image inference."""
+    parts = (" " + line.strip()).split(" --")
+    overrides = {"prompt": parts[0].strip()} if parts[0].strip() else {}
+    options = {
+        "w": ("image_size_width", int),
+        "h": ("image_size_height", int),
+        "d": ("seed", int),
+        "s": ("infer_steps", int),
+        "g": ("guidance_scale", float),
+        "l": ("guidance_scale", float),
+        "fs": ("flow_shift", float),
+        "n": ("negative_prompt", str),
+    }
+    for part in parts[1:]:
+        option, _, value = part.strip().partition(" ")
+        if option == "ci":
+            overrides.setdefault("control_image_path", []).append(value.strip())
+        elif option in options:
+            name, convert = options[option]
+            overrides[name] = convert(value.strip())
+        elif option:
+            raise ValueError(f"Unknown prompt option: --{option}")
+    return overrides
+
+
+def apply_overrides(args: argparse.Namespace, overrides: dict) -> argparse.Namespace:
+    """Apply prompt options without changing the command-line defaults."""
+    args = copy.deepcopy(args)
+    for key, value in overrides.items():
+        if key == "image_size_width":
+            args.image_size[1] = value
+        elif key == "image_size_height":
+            args.image_size[0] = value
+        else:
+            setattr(args, key, value)
+    return args
+
+
+def generate(args: argparse.Namespace, shared_models: dict | None = None) -> list[str]:
     """Load the models and save a generated RGBA image."""
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = getattr(torch, args.dtype)
+    if args.prompt is None:
+        raise ValueError("A prompt is required for generation")
     if args.infer_steps < 1 or min(args.image_size) < 32 or any(size % 32 for size in args.image_size):
         raise ValueError("Image dimensions must be positive multiples of 32 and --infer_steps must be positive")
     if args.flow_shift is not None and args.flow_shift <= 0:
@@ -153,14 +198,30 @@ def generate(args: argparse.Namespace) -> list[str]:
         "control_image_path": args.control_image_path,
     }
     te_device = torch.device("cpu") if args.text_encoder_cpu else device
-    processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, te_device, dtype, args.fp8_vl)
+    if shared_models is not None and "encoder" in shared_models:
+        processor, encoder = shared_models["processor"], shared_models["encoder"]
+        encoder.to(te_device)
+    else:
+        processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, te_device, dtype, args.fp8_vl)
     prompt = qwen_image_21_sampling.encode_sample_prompts(processor, encoder, [prompt])[0]
+    if shared_models is not None:
+        encoder.to("cpu")
+        shared_models.update(processor=processor, encoder=encoder)
     del processor, encoder
     gc.collect()
     clean_memory_on_device(device)
 
-    vae = qwen_image_21_utils.load_vae(args.vae, "cpu", dtype, args.vae_tiling)
-    transformer = load_dit_model(args, device, dtype, multipliers)
+    vae = shared_models.get("vae") if shared_models is not None else None
+    if vae is None:
+        vae = qwen_image_21_utils.load_vae(args.vae, "cpu", dtype, args.vae_tiling)
+    transformer = shared_models.get("transformer") if shared_models is not None else None
+    if transformer is None:
+        transformer = load_dit_model(args, device, dtype, multipliers)
+    elif args.blocks_to_swap:
+        transformer.move_to_device_except_swap_blocks(device)
+        transformer.switch_block_swap_for_inference()
+    else:
+        transformer.to(device)
 
     height, width = args.image_size
     with torch.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32):
@@ -179,7 +240,11 @@ def generate(args: argparse.Namespace) -> list[str]:
             do_classifier_free_guidance=args.negative_prompt is not None,
         )
     vae.to("cpu")
-    name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{seed}"
+    if shared_models is not None:
+        transformer.to("cpu")
+        shared_models.update(vae=vae, transformer=transformer)
+        clean_memory_on_device(device)
+    name = f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}_{seed}"
     paths = save_images_grid(pixels.unsqueeze(2), args.save_path, name, create_subdir=False)
     for path in paths:
         logger.info(f"Saved image to {path}")
@@ -188,7 +253,26 @@ def generate(args: argparse.Namespace) -> list[str]:
 
 def main():
     args = setup_parser().parse_args()
-    generate(args)
+    if args.from_file:
+        with open(args.from_file, encoding="utf-8") as file:
+            prompts = [parse_prompt_line(line) for line in file if line.strip() and not line.lstrip().startswith("#")]
+        shared_models = {}
+        for index, prompt in enumerate(prompts):
+            logger.info(f"Generating image {index + 1}/{len(prompts)}")
+            generate(apply_overrides(args, prompt), shared_models)
+    elif args.interactive:
+        shared_models = {}
+        while True:
+            try:
+                line = input("Enter prompt (q to quit): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if line.lower() in ("q", "quit", "exit"):
+                break
+            if line:
+                generate(apply_overrides(args, parse_prompt_line(line)), shared_models)
+    else:
+        generate(args)
 
 
 if __name__ == "__main__":

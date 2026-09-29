@@ -552,15 +552,20 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             )
             encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]))
             with (
-                patch.object(generate.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())),
+                patch.object(generate.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())) as load_encoder,
                 patch.object(generate.qwen_image_21_utils, "encode_prompt", return_value=encoded),
                 patch.object(generate.qwen_image_21_sampling.BucketSelector, "calculate_bucket_resolution", return_value=(32, 32)),
+                patch.object(generate, "load_dit_model", wraps=generate.load_dit_model) as load_dit,
             ):
-                output = generate.generate(args)[0]
+                shared_models = {}
+                output = generate.generate(args, shared_models)[0]
                 with Image.open(output) as image:
                     self.assertEqual(image.mode, "RGBA")
                     self.assertEqual(image.size, (32, 32))
                     pixels = np.array(image)
+                self.assertNotEqual(output, generate.generate(args, shared_models)[0])
+                self.assertEqual(load_encoder.call_count, 1)
+                self.assertEqual(load_dit.call_count, 1)
             self.assertTrue(((pixels[..., 3] > 0) & (pixels[..., 3] < 255)).any())
 
     def check_filtered_adapter_merge(self, lycoris):
@@ -607,6 +612,44 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
 
     def test_inference_lora_filtering(self):
         self.check_filtered_adapter_merge(False)
+
+    def test_file_and_interactive_prompts(self):
+        from musubi_tuner import qwen_image_21_generate_image as generate
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "prompts.txt"
+            path.write_text("# comment\n\nedit --w 64 --ci first.png --ci second.png --l 2 --n blur\ntext --d 7\n")
+            argv = [
+                "generate",
+                "--dit",
+                "unused",
+                "--vae",
+                "unused",
+                "--text_encoder",
+                "unused",
+                "--save_path",
+                temp,
+                "--image_size",
+                "32",
+                "32",
+            ]
+            with patch.object(sys, "argv", argv + ["--from_file", str(path)]), patch.object(generate, "generate") as run:
+                generate.main()
+            first, second = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(first.image_size, [32, 64])
+            self.assertEqual(first.control_image_path, ["first.png", "second.png"])
+            self.assertEqual((first.guidance_scale, first.negative_prompt), (2, "blur"))
+            self.assertEqual(second.image_size, [32, 32])
+            self.assertIsNone(second.control_image_path)
+            self.assertEqual(second.seed, 7)
+            with (
+                patch.object(sys, "argv", argv + ["--interactive"]),
+                patch("builtins.input", side_effect=["text --s 3 --fs 2", "q"]),
+                patch.object(generate, "generate") as run,
+            ):
+                generate.main()
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual((run.call_args.args[0].infer_steps, run.call_args.args[0].flow_shift), (3, 2))
 
     def test_inference_compiled_model(self):
         from musubi_tuner import qwen_image_21_generate_image as generate

@@ -231,3 +231,23 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 - 出力PNGはアルファチャンネルを保持します。
 
 </details>
+
+### Batch and interactive inference / バッチ・対話推論
+
+Use `--from_file path/to/prompts.txt` instead of `--prompt` to process one prompt per line. Blank lines and lines starting with `#` are ignored. Each line can override `--w`, `--h`, `--d`, `--s`, `--l` (or `--g`), `--fs`, `--n`, and repeated `--ci` options:
+
+```text
+A cat holding a sign --w 1024 --h 1024 --d 42
+Change the background to a garden --ci path/to/control.png --d 43
+```
+
+Use `--interactive` to enter prompts with the same format in the console. Enter `q`, `quit`, or `exit` to finish. Both modes reuse the loaded models. Options omitted from a line use the command-line defaults.
+
+<details>
+<summary>日本語</summary>
+
+`--prompt`の代わりに`--from_file path/to/prompts.txt`を指定すると、1行につき1つのプロンプトを処理します。空行と`#`で始まる行は無視されます。各行で`--w`、`--h`、`--d`、`--s`、`--l`（または`--g`）、`--fs`、`--n`、複数の`--ci`を指定できます。
+
+`--interactive`では同じ形式のプロンプトをコンソールから入力できます。`q`、`quit`、`exit`で終了します。どちらのモードも読み込み済みのモデルを再利用します。各行で省略したオプションにはコマンドラインの設定が使われます。
+
+</details>
