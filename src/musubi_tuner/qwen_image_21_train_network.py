@@ -4,18 +4,12 @@ import argparse
 import gc
 import logging
 
-import numpy as np
 import torch
-from PIL import Image
 from safetensors.torch import load_file
 from torch.nn import functional as F
-from tqdm import tqdm
 
 from musubi_tuner.dataset.architectures import ARCHITECTURE_QWEN_IMAGE_21, ARCHITECTURE_QWEN_IMAGE_21_FULL
-from musubi_tuner.dataset.bucket import BucketSelector
-from musubi_tuner.dataset.media_utils import resize_image_to_bucket
-from musubi_tuner.qwen_image import qwen_image_utils
-from musubi_tuner.qwen_image_21 import qwen_image_21_model
+from musubi_tuner.qwen_image_21 import qwen_image_21_model, qwen_image_21_sampling
 from musubi_tuner.qwen_image_21 import qwen_image_21_utils
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
@@ -151,20 +145,7 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         processor, encoder = qwen_image_21_utils.load_text_encoder(args.text_encoder, device=accelerator.device, fp8_vl=args.fp8_vl)
         prompts = load_prompts(sample_prompts)
         logger.info("Encoding with VLM")
-        for prompt in prompts:
-            images = []
-            for path in prompt.get("control_image_path", []):
-                with Image.open(path) as source:
-                    source = source.convert("RGBA")
-                    size = BucketSelector.calculate_bucket_resolution(source.size, (1024, 1024), architecture=self.architecture)
-                    images.append(resize_image_to_bucket(source, size))
-            prompt["reference_images"] = images
-            captions = [("positive", prompt.get("prompt", ""))]
-            if prompt.get("negative_prompt") is not None and (prompt.get("cfg_scale") or 1.0) > 1.0:
-                captions.append(("negative", prompt["negative_prompt"]))
-            for name, caption in captions:
-                logger.info(f"cache Text Encoder outputs for prompt: {caption} with image: {prompt.get('control_image_path')}")
-                prompt[name] = tuple(t.cpu() for t in qwen_image_21_utils.encode_prompt(processor, encoder, caption, images))
+        prompts = qwen_image_21_sampling.encode_sample_prompts(processor, encoder, prompts)
         del processor, encoder
         gc.collect()
         clean_memory_on_device(accelerator.device)
@@ -190,54 +171,22 @@ class QwenImage21NetworkTrainer(NetworkTrainer):
         image_path=None,
         control_video_path=None,
     ):
-        width, height = max(32, width // 32 * 32), max(32, height // 32 * 32)
-        device = accelerator.device
-        vae.to(device)
-        if sample_parameter["reference_images"]:
-            logger.info("Encoding control images with VAE")
-        refs = [qwen_image_21_utils.encode_image(vae, image) for image in sample_parameter["reference_images"]]
-        vae.to("cpu")
-        shapes = [[(1, ref.shape[-2], ref.shape[-1]) for ref in refs] + [(1, height // 16, width // 16)]]
-        refs = [qwen_image_21_utils.pack_latents(ref).to(device=device, dtype=dit_dtype) for ref in refs]
-        latents = torch.randn((1, height // 16 * (width // 16), 64), generator=generator, device=device, dtype=dit_dtype)
-        # Qwen-Image 2.1 uses the same scheduler configuration as Qwen-Image.
-        scheduler = qwen_image_utils.get_scheduler(discrete_flow_shift)
-        sigmas = np.linspace(1.0, 1 / sample_steps, sample_steps)
-        mu = qwen_image_utils.calculate_shift_qwen_image(latents.shape[1])
-        scheduler.set_timesteps(sample_steps, device=device, sigmas=sigmas, mu=mu)
-        scheduler.set_begin_index(0)
-        cfg_scale = 1.0 if cfg_scale is None else cfg_scale
-        do_cfg = do_classifier_free_guidance and cfg_scale > 1.0
-
-        def predict(name, timestep):
-            embed, slots, _ = sample_parameter[name]
-            return transformer(
-                hidden_states=latents,
-                encoder_hidden_states=embed[None].to(device=device, dtype=dit_dtype),
-                timestep=timestep.expand(1).to(dit_dtype) / 1000,
-                img_shapes=shapes,
-                reference_latents=refs,
-                image_slots=[slots.tolist()],
+        with accelerator.autocast():
+            pixels = qwen_image_21_sampling.sample_image(
+                transformer,
+                vae,
+                sample_parameter,
+                accelerator.device,
+                dit_dtype,
+                width,
+                height,
+                sample_steps,
+                generator,
+                discrete_flow_shift,
+                cfg_scale,
+                do_classifier_free_guidance,
             )
-
-        with torch.no_grad(), accelerator.autocast(), tqdm(total=sample_steps, desc="Denoising steps") as pbar:
-            for timestep in scheduler.timesteps:
-                transformer.prepare_block_swap_before_forward()
-                pred = predict("positive", timestep)
-                if do_cfg:
-                    transformer.prepare_block_swap_before_forward()
-                    negative = predict("negative", timestep)
-                    pred = negative + cfg_scale * (pred - negative)
-                latents = scheduler.step(pred, timestep, latents, return_dict=False)[0]
-                pbar.update()
-            vae.to(device)
-            logger.info(f"Decoding image from latents: {latents.shape}")
-            pixels = qwen_image_21_utils.decode_latents(vae, qwen_image_21_utils.unpack_latents(latents, height // 16, width // 16))
-        logger.info("Decoding complete")
-        # The sample writer expects RGB [B, C, F, H, W]. Composite RGBA over white.
-        if pixels.shape[1] == 4:
-            pixels = pixels[:, :3] * pixels[:, 3:4] + 1 - pixels[:, 3:4]
-        return pixels.float().cpu().unsqueeze(2)
+        return pixels.unsqueeze(2)
 
 
 def setup_parser() -> argparse.ArgumentParser:

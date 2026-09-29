@@ -331,9 +331,16 @@ class QwenImage21IntegrationTests(unittest.TestCase):
             4.0,
             control_video_path=None,
         )
-        self.assertEqual(pixels.shape, (1, 3, 1, 32, 32))
+        self.assertEqual(pixels.shape, (1, 4, 1, 32, 32))
         self.assertTrue(torch.isfinite(pixels).all())
         self.assertTrue(((pixels >= 0) & (pixels <= 1)).all())
+        from musubi_tuner.hv_generate_video import save_images_grid
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = save_images_grid(pixels, temp, "sample", create_subdir=False)[0]
+            with Image.open(path) as image:
+                self.assertEqual(image.mode, "RGBA")
+                np.testing.assert_array_equal(np.asarray(image.getchannel("A")), (pixels[0, 3, 0].numpy() * 255).astype(np.uint8))
 
     def test_real_qwen3vl_text_and_reference_encoding(self):
         from PIL import Image
@@ -476,12 +483,12 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             (3.0, 2.0, True, 3.0, 8),
         ]:
             with self.subTest(shift=shift, cfg_scale=cfg_scale, has_negative=has_negative):
-                scheduler = train.qwen_image_utils.get_scheduler(shift)
+                scheduler = train.qwen_image_21_sampling.qwen_image_utils.get_scheduler(shift)
                 model = Mock(
                     side_effect=lambda **kwargs: torch.ones_like(kwargs["hidden_states"]) * kwargs["encoder_hidden_states"].mean()
                 )
                 with (
-                    patch.object(train.qwen_image_utils, "get_scheduler", return_value=scheduler),
+                    patch.object(train.qwen_image_21_sampling.qwen_image_utils, "get_scheduler", return_value=scheduler),
                     patch.object(scheduler, "step", wraps=scheduler.step) as step,
                     patch.object(train.qwen_image_21_utils, "decode_latents", return_value=torch.zeros(1, 4, 32, 32)),
                 ):
@@ -627,12 +634,12 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             path = Path(temp) / "ref.png"
             Image.new("RGBA", (32, 64), "red").save(path)
             args = SimpleNamespace(text_encoder="unused", fp8_vl=False)
-            prompts = [{"prompt": "edit", "control_image_path": [str(path)]}]
+            prompts = [{"prompt": "edit", "control_image_path": [str(path)]} for _ in range(2)]
             encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[90, 44]]))
             with (
                 patch.object(train, "load_prompts", return_value=prompts),
                 patch.object(train.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())),
-                patch.object(train.qwen_image_21_utils, "encode_prompt", return_value=encoded),
+                patch.object(train.qwen_image_21_utils, "encode_prompt", return_value=encoded) as encode,
             ):
                 result = train.QwenImage21NetworkTrainer().process_sample_prompts(
                     args, SimpleNamespace(device=torch.device("cpu")), "unused"
@@ -641,6 +648,24 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             self.assertEqual(width % 32, 0)
             self.assertEqual(height % 32, 0)
             self.assertGreater(height, width)
+            self.assertEqual(encode.call_count, 1)
+            self.assertIs(result[0]["positive"], result[1]["positive"])
+            self.assertIs(result[0]["reference_images"][0], result[1]["reference_images"][0])
+
+    def test_sample_prompt_cache_preserves_reference_order(self):
+        from musubi_tuner.qwen_image_21 import qwen_image_21_sampling as sampling
+
+        with tempfile.TemporaryDirectory() as temp:
+            paths = [str(Path(temp) / name) for name in ["red.png", "blue.png"]]
+            for path, color in zip(paths, ["red", "blue"]):
+                Image.new("RGBA", (32, 32), color).save(path)
+            prompts = [{"prompt": "edit", "control_image_path": order} for order in [paths, paths, paths[::-1]]]
+            encoded = (torch.randn(3, 4096), torch.tensor([1, 2]), torch.tensor([[64, 64], [64, 64]]))
+            with patch.object(sampling.qwen_image_21_utils, "encode_prompt", return_value=encoded) as encode:
+                result = sampling.encode_sample_prompts(Mock(), Mock(), prompts)
+            self.assertEqual(encode.call_count, 2)
+            self.assertIs(result[0]["positive"], result[1]["positive"])
+            self.assertIsNot(result[0]["positive"], result[2]["positive"])
 
     def test_sage_grad_enabled_uses_differentiable_sdpa(self):
         from musubi_tuner.qwen_image_21 import qwen_image_21_model as model
