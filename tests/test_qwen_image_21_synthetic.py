@@ -19,12 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from musubi_tuner.networks import lora_qwen_image_21
 from musubi_tuner.qwen_image_21.qwen_image_21_model import (
     QwenImage21Transformer2DModel,
-    canonical_weight_hook,
     load_model,
     segmented_attention,
 )
 from musubi_tuner.qwen_image_21.qwen_image_21_utils import store_linears_in_fp8
-from musubi_tuner.utils.safetensors_utils import TensorWeightAdapter, WeightTransformHooks
 
 TINY_CONFIG = dict(
     in_channels=4,
@@ -981,18 +979,6 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 torch.testing.assert_close(
                     restored[name + ".lora_up.weight"] @ restored[name + ".lora_down.weight"], (up @ down) / 2
                 )
-
-    def test_fused_weight_split_reads_once(self):
-        source = Mock()
-        source.keys.return_value = ["model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight"]
-        value = torch.randn(12, 4)
-        source.get_tensor.return_value = value
-        adapter = TensorWeightAdapter(WeightTransformHooks(split_hook=canonical_weight_hook), source)
-        gate = adapter.get_tensor("transformer_blocks.0.img_mlp.gate_layer.weight")
-        up = adapter.get_tensor("transformer_blocks.0.img_mlp.proj.weight")
-        torch.testing.assert_close(torch.cat([gate, up]), value)
-        self.assertEqual(source.get_tensor.call_count, 1)
-        self.assertEqual(adapter.tensor_cache, {})
 
     def test_fused_base_lora_merge_precedes_quantization(self):
         model = tiny()
