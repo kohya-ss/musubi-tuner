@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from functools import partial
 from importlib.util import find_spec
 from pathlib import Path
 from types import SimpleNamespace
@@ -242,7 +243,7 @@ class QwenImage21IntegrationTests(unittest.TestCase):
             latent = utils.encode_image(vae, image)
             self.assertEqual(tuple(latent.shape), (1, 64, 1, 2, 2))
             mean, std = utils.latent_stats(vae, latent)
-            raw = vae.encode(pixels).latent_dist.mode()
+            raw = vae.encode(pixels)["latent_dist"].mode()
             torch.testing.assert_close(latent * std + mean, raw, atol=1e-6, rtol=1e-5)
             decoded = utils.decode_latents(vae, latent)
             self.assertEqual(tuple(decoded.shape), (1, 4, 32, 32))
@@ -508,7 +509,8 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             save_file(model.state_dict(), str(path / "dit.safetensors"))
             (path / "config.json").write_text(json.dumps(config))
             vae = AutoencoderKLQwenImage21(base_dim=4, decoder_base_dim=4, num_res_blocks=1).eval()
-            vae.save_pretrained(path / "vae")
+            (path / "vae").mkdir()
+            save_file(vae.state_dict(), str(path / "vae" / "diffusion_pytorch_model.safetensors"))
             network = lora_qwen_image_21.create_arch_network(1.0, 2, 2, None, None, model)
             network.apply_to(None, model, apply_text_encoder=False, apply_unet=True)
             with torch.no_grad():
@@ -551,6 +553,10 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             encoded = (torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]))
             args.output_type = "latent_images"
             with (
+                patch(
+                    "musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl.AutoencoderKLQwenImage21",
+                    partial(AutoencoderKLQwenImage21, base_dim=4, decoder_base_dim=4, num_res_blocks=1),
+                ),
                 patch.object(generate.qwen_image_21_utils, "load_text_encoder", return_value=(Mock(), Mock())) as load_encoder,
                 patch.object(generate.qwen_image_21_utils, "encode_prompt", return_value=encoded),
                 patch.object(generate.qwen_image_21_sampling.BucketSelector, "calculate_bucket_resolution", return_value=(32, 32)),
@@ -587,6 +593,10 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 ]
             )
             with (
+                patch(
+                    "musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl.AutoencoderKLQwenImage21",
+                    partial(AutoencoderKLQwenImage21, base_dim=4, decoder_base_dim=4, num_res_blocks=1),
+                ),
                 patch.object(generate, "load_dit_model", side_effect=AssertionError("decode must not load DiT")),
                 patch.object(
                     generate.qwen_image_21_utils, "load_text_encoder", side_effect=AssertionError("decode must not load TE")

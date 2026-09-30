@@ -83,22 +83,18 @@ def load_vae(
     dtype: torch.dtype = torch.bfloat16,
     tiling: bool = False,
 ) -> "AutoencoderKLQwenImage21":
-    """Load a local Qwen-Image 2.1 VAE directory or Diffusers-format checkpoint."""
+    """Load local safetensors weights using the embedded Qwen-Image 2.1 VAE configuration."""
+    from accelerate import init_empty_weights
+
     from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
 
     path = Path(path)
     if path.is_dir():
-        vae = AutoencoderKLQwenImage21.from_pretrained(str(path), torch_dtype=dtype, local_files_only=True)
-    else:
-        from accelerate import init_empty_weights
-
-        config = path.parent / "config.json"
-        with init_empty_weights():
-            vae = AutoencoderKLQwenImage21.from_config(str(config)) if config.is_file() else AutoencoderKLQwenImage21()
-        sd = load_file(str(path))
-        vae.load_state_dict(sd, strict=True, assign=True)
-    if vae.config.z_dim != LATENT_CHANNELS or vae.spatial_compression_ratio != VAE_SCALE_FACTOR:
-        raise ValueError("Expected the 64-channel, 16x Qwen-Image 2.1 VAE")
+        path = path / "diffusion_pytorch_model.safetensors"
+    with init_empty_weights():
+        vae = AutoencoderKLQwenImage21()
+    logger.info("Loading Qwen-Image 2.1 VAE from %s", path)
+    vae.load_state_dict(load_file(str(path)), strict=True, assign=True)
     vae.eval().requires_grad_(False).to(device=device, dtype=dtype)
     if tiling:
         vae.enable_tiling()
@@ -107,8 +103,8 @@ def load_vae(
 
 def latent_stats(vae: "AutoencoderKLQwenImage21", latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Return latent mean and standard deviation as [1, C, 1, 1, 1] tensors."""
-    mean = latents.new_tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
-    std = latents.new_tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
+    mean = latents.new_tensor(vae.latents_mean).view(1, -1, 1, 1, 1)
+    std = latents.new_tensor(vae.latents_std).view(1, -1, 1, 1, 1)
     return mean, std
 
 
@@ -132,12 +128,12 @@ def encode_images(vae: "AutoencoderKLQwenImage21", images: list[ImageInput]) -> 
     """Encode equal-sized images together and return latents in input order."""
     groups = {}
     for index, image in enumerate(images):
-        pixels = image_tensor(image, vae.config.in_channels)
+        pixels = image_tensor(image, vae.in_channels)
         groups.setdefault(pixels.shape[-2:], []).append((index, pixels))
     results = [None] * len(images)
     for group in groups.values():
         pixels = torch.cat([pixels for _, pixels in group]).to(device=vae.device, dtype=vae.dtype)
-        latents = vae.encode(pixels).latent_dist.mode()
+        latents = vae.encode(pixels)["latent_dist"].mode()
         mean, std = latent_stats(vae, latents)
         for (index, _), latent in zip(group, (latents - mean) / std):
             results[index] = latent
@@ -149,7 +145,7 @@ def decode_latents(vae: "AutoencoderKLQwenImage21", latents: torch.Tensor) -> to
     """Decode normalized latents to [B, C, H, W] pixels in [0, 1]."""
     latents = latents.to(device=vae.device, dtype=vae.dtype)
     mean, std = latent_stats(vae, latents)
-    return (vae.decode(latents * std + mean).sample[:, :, 0].float() / 2 + 0.5).clamp(0, 1)
+    return (vae.decode(latents * std + mean)["sample"][:, :, 0].float() / 2 + 0.5).clamp(0, 1)
 
 
 def _load_single_file_text_encoder(path, dtype):

@@ -1,4 +1,5 @@
-# Adapted from Diffusers autoencoder_kl_qwenimage21.py.
+# Copied and modified from Diffusers autoencoder_kl_qwenimage21.py.
+
 # Copyright 2026 The Qwen Team and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,24 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Dict, List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from diffusers.configuration_utils import ConfigMixin, register_to_config
-from diffusers.loaders import FromOriginalModelMixin
-from diffusers.models.activations import get_activation
-from diffusers.models.autoencoders.vae import DecoderOutput, DiagonalGaussianDistribution
-from diffusers.models.modeling_outputs import AutoencoderKLOutput
-from diffusers.models.modeling_utils import ModelMixin
-from diffusers.utils import logging
-from diffusers.utils.accelerate_utils import apply_forward_hook
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+from musubi_tuner.qwen_image.qwen_image_autoencoder_kl import DiagonalGaussianDistribution
+from musubi_tuner.qwen_image.qwen_image_modules import get_activation
 
 CACHE_T = 2
 
 
 class QwenImage21AvgDown3D(nn.Module):
+    """Downsample by folding spatial and temporal dimensions into channels and averaging channel groups."""
+
     def __init__(
         self,
         in_channels,
@@ -57,39 +55,40 @@ class QwenImage21AvgDown3D(nn.Module):
         pad_t = (self.factor_t - x.shape[2] % self.factor_t) % self.factor_t
         pad = (0, 0, 0, 0, pad_t, 0)
         x = F.pad(x, pad)
-        B, C, T, H, W = x.shape
+        b, c, t, h, w = x.shape
         x = x.view(
-            B,
-            C,
-            T // self.factor_t,
+            b,
+            c,
+            t // self.factor_t,
             self.factor_t,
-            H // self.factor_s,
+            h // self.factor_s,
             self.factor_s,
-            W // self.factor_s,
+            w // self.factor_s,
             self.factor_s,
         )
         x = x.permute(0, 1, 3, 5, 7, 2, 4, 6).contiguous()
         x = x.view(
-            B,
-            C * self.factor,
-            T // self.factor_t,
-            H // self.factor_s,
-            W // self.factor_s,
+            b,
+            c * self.factor,
+            t // self.factor_t,
+            h // self.factor_s,
+            w // self.factor_s,
         )
         x = x.view(
-            B,
+            b,
             self.out_channels,
             self.group_size,
-            T // self.factor_t,
-            H // self.factor_s,
-            W // self.factor_s,
+            t // self.factor_t,
+            h // self.factor_s,
+            w // self.factor_s,
         )
         x = x.mean(dim=2)
         return x
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.DupUp3D with DupUp3D->QwenImage21DupUp3D
 class QwenImage21DupUp3D(nn.Module):
+    """Upsample by repeating channels and unfolding them into spatial and temporal dimensions."""
+
     def __init__(
         self,
         in_channels: int,
@@ -134,27 +133,15 @@ class QwenImage21DupUp3D(nn.Module):
 
 
 class QwenImage21CausalConv3d(nn.Conv2d):
-    r"""
-    A custom 3D causal convolution layer with feature caching support.
-
-    This layer extends the standard Conv3D layer by ensuring causality in the time dimension and handling feature
-    caching for efficient inference.
-
-    Args:
-        in_channels (int): Number of channels in the input image
-        out_channels (int): Number of channels produced by the convolution
-        kernel_size (int or tuple): Size of the convolving kernel
-        stride (int or tuple, optional): Stride of the convolution. Default: 1
-        padding (int or tuple, optional): Zero-padding added to all three sides of the input. Default: 0
-    """
+    """Conv2d for [B, C, 1, H, W] inputs. Temporal feature caches are not supported."""
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int | tuple[int | int | int],
-        stride: int | tuple[int | int | int] = 1,
-        padding: int | tuple[int | int | int] = 0,
+        kernel_size: Union[int, Tuple[int, int]],
+        stride: Union[int, Tuple[int, int]] = 1,
+        padding: Union[int, Tuple[int, int]] = 0,
     ) -> None:
         super().__init__(
             in_channels=in_channels,
@@ -164,7 +151,6 @@ class QwenImage21CausalConv3d(nn.Conv2d):
             padding=padding,
         )
 
-        # Set up causal padding
         self._padding = (self.padding[1], self.padding[1], self.padding[0], self.padding[0])
         self.padding = (0, 0)
 
@@ -175,25 +161,15 @@ class QwenImage21CausalConv3d(nn.Conv2d):
                 "This convolution is the image specialization of Wan's causal 3D one: it folds the single frame away "
                 "and has no temporal context to prepend, so it cannot take a feature cache."
             )
-        x = x.squeeze(2)  # Remove the temporal dimension
+        x = x.squeeze(2)
         x = F.pad(x, padding)
         x = super().forward(x)
-        x = x.unsqueeze(2)  # Add the temporal dimension back
+        x = x.unsqueeze(2)
         return x
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.WanRMS_norm with Wan->QwenImage21
 class QwenImage21RMS_norm(nn.Module):
-    r"""
-    A custom RMS normalization layer.
-
-    Args:
-        dim (int): The number of dimensions to normalize over.
-        channel_first (bool, optional): Whether the input tensor has channels as the first dimension.
-            Default is True.
-        images (bool, optional): Whether the input represents image data. Default is True.
-        bias (bool, optional): Whether to include a learnable bias term. Default is False.
-    """
+    """RMS normalization with optional channel-first layout."""
 
     def __init__(self, dim: int, channel_first: bool = True, images: bool = True, bias: bool = False) -> None:
         super().__init__()
@@ -212,46 +188,24 @@ class QwenImage21RMS_norm(nn.Module):
         return normalized * self.scale * self.gamma + self.bias
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.WanUpsample with Wan->QwenImage21
 class QwenImage21Upsample(nn.Upsample):
-    r"""
-    Perform upsampling while ensuring the output tensor has the same data type as the input.
-
-    Args:
-        x (torch.Tensor): Input tensor to be upsampled.
-
-    Returns:
-        torch.Tensor: Upsampled tensor with the same data type as the input.
-    """
+    """Upsample while preserving the input dtype."""
 
     def forward(self, x):
         return super().forward(x.float()).type_as(x)
 
 
 class QwenImage21Resample(nn.Module):
-    r"""
-    A custom resampling module for 2D and 3D data.
+    """Resampling layer with the upstream 2d/3d modes specialized to image convolutions."""
 
-    Args:
-        dim (int): The number of input/output channels.
-        mode (str): The resampling mode. Must be one of:
-            - 'none': No resampling (identity operation).
-            - 'upsample2d': 2D upsampling with nearest-exact interpolation and convolution.
-            - 'upsample3d': 3D upsampling with nearest-exact interpolation, convolution, and causal 3D convolution.
-            - 'downsample2d': 2D downsampling with zero-padding and convolution.
-            - 'downsample3d': 3D downsampling with zero-padding, convolution, and causal 3D convolution.
-    """
-
-    def __init__(self, dim: int, mode: str, upsample_out_dim: int = None) -> None:
+    def __init__(self, dim: int, mode: str, upsample_out_dim: Optional[int] = None) -> None:
         super().__init__()
         self.dim = dim
         self.mode = mode
 
-        # default to dim //2
         if upsample_out_dim is None:
             upsample_out_dim = dim // 2
 
-        # layers
         if mode == "upsample2d":
             self.resample = nn.Sequential(
                 QwenImage21Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
@@ -286,7 +240,7 @@ class QwenImage21Resample(nn.Module):
                 else:
                     cache_x = x[:, :, -CACHE_T:, :, :].clone()
                     if cache_x.shape[2] < 2 and feat_cache[idx] is not None and feat_cache[idx] != "Rep":
-                        # cache last frame of last two chunk
+                        # prepend the last cached frame
                         cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
                     if cache_x.shape[2] < 2 and feat_cache[idx] is not None and feat_cache[idx] == "Rep":
                         cache_x = torch.cat([torch.zeros_like(cache_x).to(cache_x.device), cache_x], dim=2)
@@ -320,14 +274,7 @@ class QwenImage21Resample(nn.Module):
 
 
 class QwenImage21ResidualBlock(nn.Module):
-    r"""
-    A custom residual block module.
-
-    Args:
-        in_dim (int): Number of input channels.
-        out_dim (int): Number of output channels.
-        dropout (float, optional): Dropout rate for the dropout layer. Default is 0.0.
-    """
+    """Residual block with normalization, SiLU activation, and image convolutions."""
 
     def __init__(
         self,
@@ -340,7 +287,6 @@ class QwenImage21ResidualBlock(nn.Module):
         self.out_dim = out_dim
         self.nonlinearity = get_activation("silu")
 
-        # layers
         self.norm1 = QwenImage21RMS_norm(in_dim, images=False)
         self.conv1 = QwenImage21CausalConv3d(in_dim, out_dim, 3, padding=1)
         self.norm2 = QwenImage21RMS_norm(out_dim, images=False)
@@ -351,10 +297,8 @@ class QwenImage21ResidualBlock(nn.Module):
     def forward(self, x, feat_cache=None, feat_idx=None):
         if feat_idx is None:
             feat_idx = [0]
-        # Apply shortcut connection
         h = self.conv_shortcut(x)
 
-        # First normalization and activation
         x = self.norm1(x)
         x = self.nonlinearity(x)
 
@@ -370,11 +314,9 @@ class QwenImage21ResidualBlock(nn.Module):
         else:
             x = self.conv1(x)
 
-        # Second normalization and activation
         x = self.norm2(x)
         x = self.nonlinearity(x)
 
-        # Dropout
         x = self.dropout(x)
 
         if feat_cache is not None:
@@ -389,24 +331,16 @@ class QwenImage21ResidualBlock(nn.Module):
         else:
             x = self.conv2(x)
 
-        # Add residual connection
         return x + h
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.WanAttentionBlock with Wan->QwenImage21
 class QwenImage21AttentionBlock(nn.Module):
-    r"""
-    Causal self-attention with a single head.
-
-    Args:
-        dim (int): The number of channels in the input tensor.
-    """
+    """Spatial self-attention with a single head."""
 
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
 
-        # layers
         self.norm = QwenImage21RMS_norm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
@@ -418,21 +352,18 @@ class QwenImage21AttentionBlock(nn.Module):
         x = x.permute(0, 2, 1, 3, 4).reshape(batch_size * time, channels, height, width)
         x = self.norm(x)
 
-        # compute query, key, value
         qkv = self.to_qkv(x)
         qkv = qkv.reshape(batch_size * time, 1, channels * 3, -1)
         qkv = qkv.permute(0, 1, 3, 2).contiguous()
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # apply attention
         x = F.scaled_dot_product_attention(q, k, v)
 
         x = x.squeeze(1).permute(0, 2, 1).reshape(batch_size * time, channels, height, width)
 
-        # output projection
         x = self.proj(x)
 
-        # Reshape back: [(b*t), c, h, w] -> [b, c, t, h, w]
+        # restore the frame dimension
         x = x.view(batch_size, time, channels, height, width)
         x = x.permute(0, 2, 1, 3, 4)
 
@@ -440,19 +371,12 @@ class QwenImage21AttentionBlock(nn.Module):
 
 
 class QwenImage21MidBlock(nn.Module):
-    """
-    Middle block for QwenVAE encoder and decoder.
-
-    Args:
-        dim (int): Number of input/output channels.
-        dropout (float): Dropout rate.
-    """
+    """Middle block for the Qwen-Image 2.1 encoder and decoder."""
 
     def __init__(self, dim: int, dropout: float = 0.0, num_layers: int = 1):
         super().__init__()
         self.dim = dim
 
-        # Create the components
         resnets = [QwenImage21ResidualBlock(dim, dim, dropout)]
         attentions = []
         for _ in range(num_layers):
@@ -466,10 +390,8 @@ class QwenImage21MidBlock(nn.Module):
     def forward(self, x, feat_cache=None, feat_idx=None):
         if feat_idx is None:
             feat_idx = [0]
-        # First residual block
         x = self.resnets[0](x, feat_cache=feat_cache, feat_idx=feat_idx)
 
-        # Process through attention and residual blocks
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             if attn is not None:
                 x = attn(x)
@@ -480,10 +402,11 @@ class QwenImage21MidBlock(nn.Module):
 
 
 class QwenImage21ResidualDownBlock(nn.Module):
+    """Residual downsampling block for the Qwen-Image 2.1 encoder."""
+
     def __init__(self, in_dim, out_dim, dropout, num_res_blocks, temperal_downsample=False, down_flag=False):
         super().__init__()
 
-        # Shortcut path with downsample
         self.avg_shortcut = QwenImage21AvgDown3D(
             in_dim,
             out_dim,
@@ -491,14 +414,12 @@ class QwenImage21ResidualDownBlock(nn.Module):
             factor_s=2 if down_flag else 1,
         )
 
-        # Main path with residual blocks and downsample
         resnets = []
         for _ in range(num_res_blocks):
             resnets.append(QwenImage21ResidualBlock(in_dim, out_dim, dropout))
             in_dim = out_dim
         self.resnets = nn.ModuleList(resnets)
 
-        # Add the final downsample block
         if down_flag:
             mode = "downsample3d" if temperal_downsample else "downsample2d"
             self.downsampler = QwenImage21Resample(out_dim, mode=mode)
@@ -518,18 +439,7 @@ class QwenImage21ResidualDownBlock(nn.Module):
 
 
 class QwenImage21Encoder3d(nn.Module):
-    r"""
-    A 3D encoder module.
-
-    Args:
-        dim (int): The base number of channels in the first layer.
-        z_dim (int): The dimensionality of the latent space.
-        dim_mult (list of int): Multipliers for the number of channels in each block.
-        num_res_blocks (int): Number of residual blocks in each block.
-        attn_scales (list of float): Scales at which to apply attention mechanisms.
-        temperal_downsample (list of bool): Whether to downsample temporally in each block.
-        dropout (float): Dropout rate for the dropout layers.
-    """
+    """Qwen-Image 2.1 encoder for inputs with a singleton frame dimension."""
 
     def __init__(
         self,
@@ -552,17 +462,13 @@ class QwenImage21Encoder3d(nn.Module):
         self.temperal_downsample = temperal_downsample
         self.nonlinearity = get_activation("silu")
 
-        # dimensions
         dims = [dim * u for u in [1] + dim_mult]
         scale = 1.0
 
-        # init block
         self.conv_in = QwenImage21CausalConv3d(in_channels, dims[0], 3, padding=1)
 
-        # downsample blocks
         self.down_blocks = nn.ModuleList([])
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            # residual (+attention) blocks
             if is_residual:
                 self.down_blocks.append(
                     QwenImage21ResidualDownBlock(
@@ -581,16 +487,13 @@ class QwenImage21Encoder3d(nn.Module):
                         self.down_blocks.append(QwenImage21AttentionBlock(out_dim))
                     in_dim = out_dim
 
-                # downsample block
                 if i != len(dim_mult) - 1:
                     mode = "downsample3d" if temperal_downsample[i] else "downsample2d"
                     self.down_blocks.append(QwenImage21Resample(out_dim, mode=mode))
                     scale /= 2.0
 
-        # middle blocks
         self.mid_block = QwenImage21MidBlock(out_dim, dropout, num_layers=1)
 
-        # output blocks
         self.norm_out = QwenImage21RMS_norm(out_dim, images=False)
         self.conv_out = QwenImage21CausalConv3d(out_dim, z_dim, 3, padding=1)
 
@@ -603,7 +506,7 @@ class QwenImage21Encoder3d(nn.Module):
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
             if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                # cache last frame of last two chunk
+                # prepend the last cached frame
                 cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
             x = self.conv_in(x, feat_cache[idx])
             feat_cache[idx] = cache_x
@@ -611,24 +514,21 @@ class QwenImage21Encoder3d(nn.Module):
         else:
             x = self.conv_in(x)
 
-        ## downsamples
         for layer in self.down_blocks:
             if feat_cache is not None:
                 x = layer(x, feat_cache=feat_cache, feat_idx=feat_idx)
             else:
                 x = layer(x)
 
-        ## middle
         x = self.mid_block(x, feat_cache=feat_cache, feat_idx=feat_idx)
 
-        ## head
         x = self.norm_out(x)
         x = self.nonlinearity(x)
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
             if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                # cache last frame of last two chunk
+                # prepend the last cached frame
                 cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
             x = self.conv_out(x, feat_cache[idx])
             feat_cache[idx] = cache_x
@@ -640,17 +540,7 @@ class QwenImage21Encoder3d(nn.Module):
 
 
 class QwenImage21ResidualUpBlock(nn.Module):
-    """
-    A block that handles upsampling for the QwenVAE decoder.
-
-    Args:
-        in_dim (int): Input dimension
-        out_dim (int): Output dimension
-        num_res_blocks (int): Number of residual blocks
-        dropout (float): Dropout rate
-        temperal_upsample (bool): Whether to upsample on temporal dimension
-        up_flag (bool): Whether to upsample or not
-    """
+    """Residual upsampling block for the Qwen-Image 2.1 decoder."""
 
     def __init__(
         self,
@@ -675,7 +565,6 @@ class QwenImage21ResidualUpBlock(nn.Module):
         else:
             self.avg_shortcut = None
 
-        # create residual blocks
         resnets = []
         current_dim = in_dim
         for _ in range(num_res_blocks + 1):
@@ -684,7 +573,6 @@ class QwenImage21ResidualUpBlock(nn.Module):
 
         self.resnets = nn.ModuleList(resnets)
 
-        # Add upsampling layer if needed
         if up_flag:
             upsample_mode = "upsample3d" if temperal_upsample else "upsample2d"
             self.upsampler = QwenImage21Resample(out_dim, mode=upsample_mode, upsample_out_dim=out_dim)
@@ -728,16 +616,7 @@ class QwenImage21ResidualUpBlock(nn.Module):
 
 
 class QwenImage21UpBlock(nn.Module):
-    """
-    A block that handles upsampling for the QwenVAE decoder.
-
-    Args:
-        in_dim (int): Input dimension
-        out_dim (int): Output dimension
-        num_res_blocks (int): Number of residual blocks
-        dropout (float): Dropout rate
-        upsample_mode (str, optional): Mode for upsampling ('upsample2d' or 'upsample3d')
-    """
+    """Upsampling block for the Qwen-Image 2.1 decoder."""
 
     def __init__(
         self,
@@ -745,15 +624,13 @@ class QwenImage21UpBlock(nn.Module):
         out_dim: int,
         num_res_blocks: int,
         dropout: float = 0.0,
-        upsample_mode: str | None = None,
+        upsample_mode: Optional[str] = None,
     ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-        # Create layers list
         resnets = []
-        # Add residual blocks and attention if needed
         current_dim = in_dim
         for _ in range(num_res_blocks + 1):
             resnets.append(QwenImage21ResidualBlock(current_dim, out_dim, dropout))
@@ -761,7 +638,6 @@ class QwenImage21UpBlock(nn.Module):
 
         self.resnets = nn.ModuleList(resnets)
 
-        # Add upsampling layer if needed
         self.upsamplers = None
         if upsample_mode is not None:
             self.upsamplers = nn.ModuleList([QwenImage21Resample(out_dim, mode=upsample_mode)])
@@ -797,18 +673,7 @@ class QwenImage21UpBlock(nn.Module):
 
 
 class QwenImage21Decoder3d(nn.Module):
-    r"""
-    A 3D decoder module.
-
-    Args:
-        dim (int): The base number of channels in the first layer.
-        z_dim (int): The dimensionality of the latent space.
-        dim_mult (list of int): Multipliers for the number of channels in each block.
-        num_res_blocks (int): Number of residual blocks in each block.
-        attn_scales (list of float): Scales at which to apply attention mechanisms.
-        temperal_upsample (list of bool): Whether to upsample temporally in each block.
-        dropout (float): Dropout rate for the dropout layers.
-    """
+    """Qwen-Image 2.1 decoder for latents with a singleton frame dimension."""
 
     def __init__(
         self,
@@ -832,31 +697,23 @@ class QwenImage21Decoder3d(nn.Module):
 
         self.nonlinearity = get_activation("silu")
 
-        # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
 
-        # init block
         self.conv_in = QwenImage21CausalConv3d(z_dim, dims[0], 3, padding=1)
 
-        # middle blocks
         self.mid_block = QwenImage21MidBlock(dims[0], dropout, num_layers=1)
 
-        # upsample blocks
         self.up_blocks = nn.ModuleList([])
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            # residual (+attention) blocks
             if i > 0 and not is_residual:
                 in_dim = in_dim // 2
 
-            # determine if we need upsampling
             up_flag = i != len(dim_mult) - 1
-            # determine upsampling mode, if not upsampling, set to None
             upsample_mode = None
             if up_flag and temperal_upsample[i]:
                 upsample_mode = "upsample3d"
             elif up_flag:
                 upsample_mode = "upsample2d"
-            # Create and add the upsampling block
             if is_residual:
                 up_block = QwenImage21ResidualUpBlock(
                     in_dim=in_dim,
@@ -876,7 +733,6 @@ class QwenImage21Decoder3d(nn.Module):
                 )
             self.up_blocks.append(up_block)
 
-        # output blocks
         self.norm_out = QwenImage21RMS_norm(out_dim, images=False)
         self.conv_out = QwenImage21CausalConv3d(out_dim, out_channels, 3, padding=1)
 
@@ -885,12 +741,11 @@ class QwenImage21Decoder3d(nn.Module):
     def forward(self, x, feat_cache=None, feat_idx=None, first_chunk=False):
         if feat_idx is None:
             feat_idx = [0]
-        ## conv1
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
             if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                # cache last frame of last two chunk
+                # prepend the last cached frame
                 cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
             x = self.conv_in(x, feat_cache[idx])
             feat_cache[idx] = cache_x
@@ -898,21 +753,18 @@ class QwenImage21Decoder3d(nn.Module):
         else:
             x = self.conv_in(x)
 
-        ## middle
         x = self.mid_block(x, feat_cache=feat_cache, feat_idx=feat_idx)
 
-        ## upsamples
         for up_block in self.up_blocks:
             x = up_block(x, feat_cache=feat_cache, feat_idx=feat_idx, first_chunk=first_chunk)
 
-        ## head
         x = self.norm_out(x)
         x = self.nonlinearity(x)
         if feat_cache is not None:
             idx = feat_idx[0]
             cache_x = x[:, :, -CACHE_T:, :, :].clone()
             if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
-                # cache last frame of last two chunk
+                # prepend the last cached frame
                 cache_x = torch.cat([feat_cache[idx][:, :, -1, :, :].unsqueeze(2).to(cache_x.device), cache_x], dim=2)
             x = self.conv_out(x, feat_cache[idx])
             feat_cache[idx] = cache_x
@@ -922,78 +774,65 @@ class QwenImage21Decoder3d(nn.Module):
         return x
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.patchify with patchify->_patchify
 def _patchify(x, patch_size):
+    """Fold spatial patches into channels for a [B, C, T, H, W] tensor."""
     if patch_size == 1:
         return x
 
     if x.dim() != 5:
         raise ValueError(f"Invalid input shape: {x.shape}")
-    # x shape: [batch_size, channels, frames, height, width]
     batch_size, channels, frames, height, width = x.shape
 
-    # Ensure height and width are divisible by patch_size
     if height % patch_size != 0 or width % patch_size != 0:
         raise ValueError(f"Height ({height}) and width ({width}) must be divisible by patch_size ({patch_size})")
 
-    # Reshape to [batch_size, channels, frames, height//patch_size, patch_size, width//patch_size, patch_size]
     x = x.view(batch_size, channels, frames, height // patch_size, patch_size, width // patch_size, patch_size)
 
-    # Rearrange to [batch_size, channels * patch_size * patch_size, frames, height//patch_size, width//patch_size]
+    # fold patch width before patch height to match the weight layout
     x = x.permute(0, 1, 6, 4, 2, 3, 5).contiguous()
     x = x.view(batch_size, channels * patch_size * patch_size, frames, height // patch_size, width // patch_size)
 
     return x
 
 
-# Copied from diffusers.models.autoencoders.autoencoder_kl_wan.unpatchify with unpatchify->_unpatchify
 def _unpatchify(x, patch_size):
+    """Restore the spatial dimensions of a tensor produced by _patchify."""
     if patch_size == 1:
         return x
 
     if x.dim() != 5:
         raise ValueError(f"Invalid input shape: {x.shape}")
-    # x shape: [batch_size, (channels * patch_size * patch_size), frame, height, width]
     batch_size, c_patches, frames, height, width = x.shape
     channels = c_patches // (patch_size * patch_size)
 
-    # Reshape to [b, c, patch_size, patch_size, f, h, w]
     x = x.view(batch_size, channels, patch_size, patch_size, frames, height, width)
 
-    # Rearrange to [b, c, f, h * patch_size, w * patch_size]
+    # restore the patch axes to their spatial positions
     x = x.permute(0, 1, 4, 5, 3, 6, 2).contiguous()
     x = x.view(batch_size, channels, frames, height * patch_size, width * patch_size)
 
     return x
 
 
-class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
+class AutoencoderKLQwenImage21(nn.Module):
     r"""
-    A VAE model with KL loss for encoding videos into latents and decoding latent representations into videos.
-    Introduced in [Qwen Image 2].
+    VAE for encoding RGBA images into 64-channel latents and decoding them back to images.
 
-    This model inherits from [`ModelMixin`]. Check the superclass documentation for it's generic methods implemented
-    for all models (such as downloading or saving).
+    Defaults to the Qwen-Image 2.1 configuration with 96/144 encoder/decoder base channels,
+    residual resampling, and 16x spatial compression.
     """
 
-    _supports_gradient_checkpointing = False
-    _group_offload_block_modules = ["quant_conv", "post_quant_conv", "encoder", "decoder"]
-    # keys toignore when AlignDeviceHook moves inputs/outputs between devices
-    # these are shared mutable state modified in-place
-    _skip_keys = ["feat_cache", "feat_idx"]
-
-    @register_to_config
     def __init__(
         self,
         base_dim: int = 96,
-        decoder_base_dim: int | None = 144,
+        decoder_base_dim: Optional[int] = 144,
         z_dim: int = 64,
-        dim_mult: list[int] = [1, 2, 4, 8, 8],
+        dim_mult: List[int] = [1, 2, 4, 8, 8],
         num_res_blocks: int = 2,
-        attn_scales: list[float] = [],
-        temperal_downsample: list[bool] = [False, True, True, True],
+        attn_scales: List[float] = [],
+        temperal_downsample: List[bool] = [False, True, True, True],
         dropout: float = 0.0,
-        latents_mean: list[float] = [
+        latents_mean: List[float] = [
             0.5126,
             0.7721,
             -0.0631,
@@ -1059,7 +898,7 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             -0.1562,
             0.0304,
         ],
-        latents_std: list[float] = [
+        latents_std: List[float] = [
             3.2001,
             3.2936,
             3.4321,
@@ -1128,11 +967,16 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         is_residual: bool = True,
         in_channels: int = 4,
         out_channels: int = 4,
-        patch_size: int | None = None,
-        scale_factor_temporal: int | None = 8,
-        scale_factor_spatial: int | None = 16,
+        patch_size: Optional[int] = None,
+        scale_factor_temporal: Optional[int] = 8,
+        scale_factor_spatial: Optional[int] = 16,
     ) -> None:
         super().__init__()
+
+        self.patch_size = patch_size
+        self.in_channels = in_channels
+        self.latents_mean = latents_mean
+        self.latents_std = latents_std
 
         self.z_dim = z_dim
         self.temperal_downsample = temperal_downsample
@@ -1169,24 +1013,19 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         self.spatial_compression_ratio = scale_factor_spatial
 
-        # When decoding a batch of video latents at a time, one can save memory by slicing across the batch dimension
-        # to perform decoding of a single video latent at a time.
+        # process one image at a time to reduce memory usage
         self.use_slicing = False
 
-        # When decoding spatially large video latents, the memory requirement is very high. By breaking the video latent
-        # frames spatially into smaller tiles and performing multiple forward passes for decoding, and then blending the
-        # intermediate tiles together, the memory requirement can be lowered.
+        # process overlapping spatial tiles to reduce memory usage
         self.use_tiling = False
 
-        # The minimal tile height and width for spatial tiling to be used
         self.tile_sample_min_height = 256
         self.tile_sample_min_width = 256
 
-        # The minimal distance between two spatial tiles
         self.tile_sample_stride_height = 192
         self.tile_sample_stride_width = 192
 
-        # Precompute and cache conv counts for encoder and decoder for clear_cache speedup
+        # cache convolution counts for clear_cache
         self._cached_conv_counts = {
             "decoder": sum(isinstance(m, QwenImage21CausalConv3d) for m in self.decoder.modules())
             if self.decoder is not None
@@ -1196,30 +1035,29 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             else 0,
         }
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.enable_tiling
+    @property
+    def dtype(self):
+        return next(self.encoder.parameters()).dtype
+
+    @property
+    def device(self):
+        return next(self.encoder.parameters()).device
+
     def enable_tiling(
         self,
-        tile_sample_min_height: int | None = None,
-        tile_sample_min_width: int | None = None,
-        tile_sample_stride_height: float | None = None,
-        tile_sample_stride_width: float | None = None,
+        tile_sample_min_height: Optional[int] = None,
+        tile_sample_min_width: Optional[int] = None,
+        tile_sample_stride_height: Optional[float] = None,
+        tile_sample_stride_width: Optional[float] = None,
     ) -> None:
         r"""
-        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
-        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
-        processing larger images.
+        Enable tiled encoding and decoding to reduce memory usage.
 
         Args:
-            tile_sample_min_height (`int`, *optional*):
-                The minimum height required for a sample to be separated into tiles across the height dimension.
-            tile_sample_min_width (`int`, *optional*):
-                The minimum width required for a sample to be separated into tiles across the width dimension.
-            tile_sample_stride_height (`int`, *optional*):
-                The minimum amount of overlap between two consecutive vertical tiles. This is to ensure that there are
-                no tiling artifacts produced across the height dimension.
-            tile_sample_stride_width (`int`, *optional*):
-                The stride between two consecutive horizontal tiles. This is to ensure that there are no tiling
-                artifacts produced across the width dimension.
+            tile_sample_min_height (int, optional): Tile height in pixels.
+            tile_sample_min_width (int, optional): Tile width in pixels.
+            tile_sample_stride_height (int, optional): Vertical distance between tile starts in pixels.
+            tile_sample_stride_width (int, optional): Horizontal distance between tile starts in pixels.
         """
         self.use_tiling = True
         self.tile_sample_min_height = tile_sample_min_height or self.tile_sample_min_height
@@ -1227,24 +1065,20 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.tile_sample_stride_height = tile_sample_stride_height or self.tile_sample_stride_height
         self.tile_sample_stride_width = tile_sample_stride_width or self.tile_sample_stride_width
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.clear_cache
     def clear_cache(self):
-        # Use cached conv counts for decoder and encoder to avoid re-iterating modules each call
         self._conv_num = self._cached_conv_counts["decoder"]
         self._conv_idx = [0]
         self._feat_map = [None] * self._conv_num
-        # cache encode
         self._enc_conv_num = self._cached_conv_counts["encoder"]
         self._enc_conv_idx = [0]
         self._enc_feat_map = [None] * self._enc_conv_num
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan._encode with patchify->_patchify
     def _encode(self, x: torch.Tensor):
         _, _, num_frame, height, width = x.shape
 
         self.clear_cache()
-        if self.config.patch_size is not None:
-            x = _patchify(x, patch_size=self.config.patch_size)
+        if self.patch_size is not None:
+            x = _patchify(x, patch_size=self.patch_size)
 
         if self.use_tiling and (width > self.tile_sample_min_width or height > self.tile_sample_min_height):
             return self.tiled_encode(x)
@@ -1266,20 +1100,18 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         self.clear_cache()
         return enc
 
-    @apply_forward_hook
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.encode
-    def encode(self, x: torch.Tensor, return_dict: bool = True) -> AutoencoderKLOutput | tuple[DiagonalGaussianDistribution]:
+    def encode(
+        self, x: torch.Tensor, return_dict: bool = True
+    ) -> Union[Dict[str, DiagonalGaussianDistribution], Tuple[DiagonalGaussianDistribution]]:
         r"""
-        Encode a batch of images into latents.
+        Encode a batch of images into a latent distribution.
 
         Args:
-            x (`torch.Tensor`): Input batch of images.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a [`~models.autoencoder_kl.AutoencoderKLOutput`] instead of a plain tuple.
+            x (torch.Tensor): Images with shape [B, C, 1, H, W].
+            return_dict (bool, optional): Return a dictionary if True, otherwise a tuple.
 
         Returns:
-                The latent representations of the encoded videos. If `return_dict` is True, a
-                [`~models.autoencoder_kl.AutoencoderKLOutput`] is returned, otherwise a plain `tuple` is returned.
+            dict or tuple: Posterior distribution under "latent_dist", or a single-element tuple.
         """
         if self.use_slicing and x.shape[0] > 1:
             encoded_slices = [self._encode(x_slice) for x_slice in x.split(1)]
@@ -1290,9 +1122,8 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
 
         if not return_dict:
             return (posterior,)
-        return AutoencoderKLOutput(latent_dist=posterior)
+        return {"latent_dist": posterior}
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan._decode with unpatchify->_unpatchify
     def _decode(self, z: torch.Tensor, return_dict: bool = True):
         _, _, num_frame, height, width = z.shape
         tile_latent_min_height = self.tile_sample_min_height // self.spatial_compression_ratio
@@ -1311,8 +1142,8 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                 out_ = self.decoder(x[:, :, i : i + 1, :, :], feat_cache=self._feat_map, feat_idx=self._conv_idx)
                 out = torch.cat([out, out_], 2)
 
-        if self.config.patch_size is not None:
-            out = _unpatchify(out, patch_size=self.config.patch_size)
+        if self.patch_size is not None:
+            out = _unpatchify(out, patch_size=self.patch_size)
 
         out = torch.clamp(out, min=-1.0, max=1.0)
 
@@ -1320,65 +1151,57 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if not return_dict:
             return (out,)
 
-        return DecoderOutput(sample=out)
+        return {"sample": out}
 
-    @apply_forward_hook
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.decode
-    def decode(self, z: torch.Tensor, return_dict: bool = True) -> DecoderOutput | torch.Tensor:
+    def decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor]]:
         r"""
-        Decode a batch of images.
+        Decode a batch of latents into images.
 
         Args:
-            z (`torch.Tensor`): Input batch of latent vectors.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a [`~models.vae.DecoderOutput`] instead of a plain tuple.
+            z (torch.Tensor): Latents with shape [B, C, 1, H, W].
+            return_dict (bool, optional): Return a dictionary if True, otherwise a tuple.
 
         Returns:
-            [`~models.vae.DecoderOutput`] or `tuple`:
-                If return_dict is True, a [`~models.vae.DecoderOutput`] is returned, otherwise a plain `tuple` is
-                returned.
+            dict or tuple: Decoded images under "sample", or a single-element tuple.
         """
         if self.use_slicing and z.shape[0] > 1:
-            decoded_slices = [self._decode(z_slice).sample for z_slice in z.split(1)]
+            decoded_slices = [self._decode(z_slice)["sample"] for z_slice in z.split(1)]
             decoded = torch.cat(decoded_slices)
         else:
-            decoded = self._decode(z).sample
+            decoded = self._decode(z)["sample"]
 
         if not return_dict:
             return (decoded,)
-        return DecoderOutput(sample=decoded)
+        return {"sample": decoded}
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.blend_v
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
         blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)
         for y in range(blend_extent):
             b[:, :, :, y, :] = a[:, :, :, -blend_extent + y, :] * (1 - y / blend_extent) + b[:, :, :, y, :] * (y / blend_extent)
         return b
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.blend_h
     def blend_h(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
         blend_extent = min(a.shape[-1], b.shape[-1], blend_extent)
         for x in range(blend_extent):
             b[:, :, :, :, x] = a[:, :, :, :, -blend_extent + x] * (1 - x / blend_extent) + b[:, :, :, :, x] * (x / blend_extent)
         return b
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.tiled_encode
-    def tiled_encode(self, x: torch.Tensor) -> AutoencoderKLOutput:
-        r"""Encode a batch of images using a tiled encoder.
+    def tiled_encode(self, x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Encode overlapping image tiles and blend their latent parameters.
 
         Args:
-            x (`torch.Tensor`): Input batch of videos.
+            x (torch.Tensor): Images with shape [B, C, 1, H, W].
 
         Returns:
-            `torch.Tensor`:
-                The latent representation of the encoded videos.
+            torch.Tensor: Concatenated posterior mean and log-variance channels.
         """
 
         _, _, num_frames, height, width = x.shape
         encode_spatial_compression_ratio = self.spatial_compression_ratio
-        if self.config.patch_size is not None:
-            assert encode_spatial_compression_ratio % self.config.patch_size == 0
-            encode_spatial_compression_ratio = self.spatial_compression_ratio // self.config.patch_size
+        if self.patch_size is not None:
+            assert encode_spatial_compression_ratio % self.patch_size == 0
+            encode_spatial_compression_ratio = self.spatial_compression_ratio // self.patch_size
 
         latent_height = height // encode_spatial_compression_ratio
         latent_width = width // encode_spatial_compression_ratio
@@ -1391,8 +1214,6 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         blend_height = tile_latent_min_height - tile_latent_stride_height
         blend_width = tile_latent_min_width - tile_latent_stride_width
 
-        # Split x into overlapping tiles and encode them separately.
-        # The tiles have an overlap to avoid seams between tiles.
         rows = []
         for i in range(0, height, self.tile_sample_stride_height):
             row = []
@@ -1423,8 +1244,7 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         for i, row in enumerate(rows):
             result_row = []
             for j, tile in enumerate(row):
-                # blend the above tile and the left tile
-                # to the current tile and add the current tile to the result row
+                # blend with the tiles above and to the left
                 if i > 0:
                     tile = self.blend_v(rows[i - 1][j], tile, blend_height)
                 if j > 0:
@@ -1435,20 +1255,16 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         enc = torch.cat(result_rows, dim=3)[:, :, :, :latent_height, :latent_width]
         return enc
 
-    # Copied from diffusers.models.autoencoders.autoencoder_kl_wan.AutoencoderKLWan.tiled_decode with unpatchify->_unpatchify
-    def tiled_decode(self, z: torch.Tensor, return_dict: bool = True) -> DecoderOutput | torch.Tensor:
+    def tiled_decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor]]:
         r"""
-        Decode a batch of images using a tiled decoder.
+        Decode overlapping latent tiles and blend their image outputs.
 
         Args:
-            z (`torch.Tensor`): Input batch of latent vectors.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~models.vae.DecoderOutput`] instead of a plain tuple.
+            z (torch.Tensor): Latents with shape [B, C, 1, H, W].
+            return_dict (bool, optional): Return a dictionary if True, otherwise a tuple.
 
         Returns:
-            [`~models.vae.DecoderOutput`] or `tuple`:
-                If return_dict is True, a [`~models.vae.DecoderOutput`] is returned, otherwise a plain `tuple` is
-                returned.
+            dict or tuple: Decoded images under "sample", or a single-element tuple.
         """
         _, _, num_frames, height, width = z.shape
         sample_height = height * self.spatial_compression_ratio
@@ -1460,19 +1276,17 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         tile_latent_stride_width = self.tile_sample_stride_width // self.spatial_compression_ratio
         tile_sample_stride_height = self.tile_sample_stride_height
         tile_sample_stride_width = self.tile_sample_stride_width
-        if self.config.patch_size is not None:
-            sample_height = sample_height // self.config.patch_size
-            sample_width = sample_width // self.config.patch_size
-            tile_sample_stride_height = tile_sample_stride_height // self.config.patch_size
-            tile_sample_stride_width = tile_sample_stride_width // self.config.patch_size
-            blend_height = self.tile_sample_min_height // self.config.patch_size - tile_sample_stride_height
-            blend_width = self.tile_sample_min_width // self.config.patch_size - tile_sample_stride_width
+        if self.patch_size is not None:
+            sample_height = sample_height // self.patch_size
+            sample_width = sample_width // self.patch_size
+            tile_sample_stride_height = tile_sample_stride_height // self.patch_size
+            tile_sample_stride_width = tile_sample_stride_width // self.patch_size
+            blend_height = self.tile_sample_min_height // self.patch_size - tile_sample_stride_height
+            blend_width = self.tile_sample_min_width // self.patch_size - tile_sample_stride_width
         else:
             blend_height = self.tile_sample_min_height - tile_sample_stride_height
             blend_width = self.tile_sample_min_width - tile_sample_stride_width
 
-        # Split z into overlapping tiles and decode them separately.
-        # The tiles have an overlap to avoid seams between tiles.
         rows = []
         for i in range(0, height, tile_latent_stride_height):
             row = []
@@ -1493,8 +1307,7 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         for i, row in enumerate(rows):
             result_row = []
             for j, tile in enumerate(row):
-                # blend the above tile and the left tile
-                # to the current tile and add the current tile to the result row
+                # blend with the tiles above and to the left
                 if i > 0:
                     tile = self.blend_v(rows[i - 1][j], tile, blend_height)
                 if j > 0:
@@ -1503,38 +1316,36 @@ class AutoencoderKLQwenImage21(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             result_rows.append(torch.cat(result_row, dim=-1))
         dec = torch.cat(result_rows, dim=3)[:, :, :, :sample_height, :sample_width]
 
-        if self.config.patch_size is not None:
-            dec = _unpatchify(dec, patch_size=self.config.patch_size)
+        if self.patch_size is not None:
+            dec = _unpatchify(dec, patch_size=self.patch_size)
 
         dec = torch.clamp(dec, min=-1.0, max=1.0)
 
         if not return_dict:
             return (dec,)
-        return DecoderOutput(sample=dec)
+        return {"sample": dec}
 
     def forward(
         self,
         sample: torch.Tensor,
         sample_posterior: bool = False,
         return_dict: bool = True,
-        generator: torch.Generator | None = None,
-    ) -> DecoderOutput | torch.Tensor:
-        """
+        generator: Optional[torch.Generator] = None,
+    ) -> Union[Dict[str, torch.Tensor], Tuple[torch.Tensor]]:
+        r"""
+        Encode and reconstruct a batch of images.
+
         Args:
-            sample (`torch.Tensor`): Input sample.
-            sample_posterior (`bool`, *optional*, defaults to `False`):
-                Whether to sample from the posterior instead of taking its mode.
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`DecoderOutput`] instead of a plain tuple.
-            generator (`torch.Generator`, *optional*):
-                Generator used when `sample_posterior` is `True`.
+            sample (torch.Tensor): Images with shape [B, C, 1, H, W].
+            sample_posterior (bool, optional): Sample the posterior if True, otherwise use its mean.
+            return_dict (bool, optional): Return a dictionary if True, otherwise a tuple.
+            generator (torch.Generator, optional): Random generator for posterior sampling.
 
         Returns:
-            [`~models.autoencoders.vae.DecoderOutput`] or `tuple`:
-                [`~models.autoencoders.vae.DecoderOutput`] if `return_dict` is True, otherwise a plain `tuple`.
+            dict or tuple: Reconstructed images under "sample", or a single-element tuple.
         """
         x = sample
-        posterior = self.encode(x).latent_dist
+        posterior = self.encode(x)["latent_dist"]
 
         if sample_posterior:
             z = posterior.sample(generator=generator)
