@@ -973,14 +973,13 @@ class AutoencoderKLQwenImage21(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.patch_size = patch_size
-        self.in_channels = in_channels
-        self.latents_mean = latents_mean
-        self.latents_std = latents_std
-
         self.z_dim = z_dim
         self.temperal_downsample = temperal_downsample
         self.temperal_upsample = temperal_downsample[::-1]
+        self.latents_mean = latents_mean
+        self.latents_std = latents_std
+        self.in_channels = in_channels
+        self.patch_size = patch_size
 
         if decoder_base_dim is None:
             decoder_base_dim = base_dim
@@ -1037,11 +1036,11 @@ class AutoencoderKLQwenImage21(nn.Module):
 
     @property
     def dtype(self):
-        return next(self.encoder.parameters()).dtype
+        return self.encoder.parameters().__next__().dtype
 
     @property
     def device(self):
-        return next(self.encoder.parameters()).device
+        return self.encoder.parameters().__next__().device
 
     def enable_tiling(
         self,
@@ -1065,10 +1064,23 @@ class AutoencoderKLQwenImage21(nn.Module):
         self.tile_sample_stride_height = tile_sample_stride_height or self.tile_sample_stride_height
         self.tile_sample_stride_width = tile_sample_stride_width or self.tile_sample_stride_width
 
+    def disable_tiling(self) -> None:
+        """Disable tiled encoding and decoding."""
+        self.use_tiling = False
+
+    def enable_slicing(self) -> None:
+        """Process one image at a time to reduce memory usage."""
+        self.use_slicing = True
+
+    def disable_slicing(self) -> None:
+        """Process images as a batch."""
+        self.use_slicing = False
+
     def clear_cache(self):
         self._conv_num = self._cached_conv_counts["decoder"]
         self._conv_idx = [0]
         self._feat_map = [None] * self._conv_num
+
         self._enc_conv_num = self._cached_conv_counts["encoder"]
         self._enc_conv_idx = [0]
         self._enc_feat_map = [None] * self._enc_conv_num
@@ -1173,6 +1185,34 @@ class AutoencoderKLQwenImage21(nn.Module):
         if not return_dict:
             return (decoded,)
         return {"sample": decoded}
+
+    def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
+        """Decode normalized latents to RGBA pixels in [0, 1] with shape [B, C, H, W]."""
+        latents = latents.to(self.dtype)
+        latents_mean = latents.new_tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1)
+        latents_std = latents.new_tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1)
+        latents = latents * latents_std + latents_mean
+        image = self.decode(latents, return_dict=False)[0][:, :, 0]
+        return (image.float() / 2 + 0.5).clamp(0, 1)
+
+    def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
+        """
+        Encode pixels and normalize the latent distribution's mean.
+
+        Args:
+            pixels (torch.Tensor): Pixels in [-1, 1] with shape [B, C, H, W] or [B, C, 1, H, W].
+
+        Returns:
+            torch.Tensor: Normalized latents with shape [B, 64, 1, H // 16, W // 16].
+        """
+        if pixels.dim() == 4:
+            pixels = pixels.unsqueeze(2)
+        pixels = pixels.to(self.dtype)
+        posterior = self.encode(pixels, return_dict=False)[0]
+        latents = posterior.mode()
+        latents_mean = latents.new_tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1)
+        latents_std = latents.new_tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1)
+        return (latents - latents_mean) / latents_std
 
     def blend_v(self, a: torch.Tensor, b: torch.Tensor, blend_extent: int) -> torch.Tensor:
         blend_extent = min(a.shape[-2], b.shape[-2], blend_extent)

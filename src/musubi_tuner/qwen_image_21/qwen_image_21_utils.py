@@ -24,6 +24,7 @@ from musubi_tuner.qwen_image_21.qwen_image_21_text_encoder import (
     QWEN3_VL_8B_INSTRUCT_CONFIG,
     normalize_qwen3_vl_state_dict_for_base_model,
 )
+from musubi_tuner.utils.safetensors_utils import load_safetensors
 
 logger = logging.getLogger(__name__)
 
@@ -88,13 +89,16 @@ def load_vae(
 
     from musubi_tuner.qwen_image_21.qwen_image_21_autoencoder_kl import AutoencoderKLQwenImage21
 
-    path = Path(path)
-    if path.is_dir():
-        path = path / "diffusion_pytorch_model.safetensors"
+    vae_path = Path(path)
+    if vae_path.is_dir():
+        vae_path = vae_path / "diffusion_pytorch_model.safetensors"
+    logger.info("Initializing VAE")
     with init_empty_weights():
         vae = AutoencoderKLQwenImage21()
-    logger.info("Loading Qwen-Image 2.1 VAE from %s", path)
-    vae.load_state_dict(load_file(str(path)), strict=True, assign=True)
+    logger.info(f"Loading VAE from {vae_path}")
+    state_dict = load_safetensors(str(vae_path), device="cpu")
+    info = vae.load_state_dict(state_dict, strict=True, assign=True)
+    logger.info(f"Loaded VAE: {info}")
     vae.eval().requires_grad_(False).to(device=device, dtype=dtype)
     if tiling:
         vae.enable_tiling()
@@ -133,9 +137,8 @@ def encode_images(vae: "AutoencoderKLQwenImage21", images: list[ImageInput]) -> 
     results = [None] * len(images)
     for group in groups.values():
         pixels = torch.cat([pixels for _, pixels in group]).to(device=vae.device, dtype=vae.dtype)
-        latents = vae.encode(pixels)["latent_dist"].mode()
-        mean, std = latent_stats(vae, latents)
-        for (index, _), latent in zip(group, (latents - mean) / std):
+        latents = vae.encode_pixels_to_latents(pixels)
+        for (index, _), latent in zip(group, latents):
             results[index] = latent
     return results
 
@@ -144,8 +147,7 @@ def encode_images(vae: "AutoencoderKLQwenImage21", images: list[ImageInput]) -> 
 def decode_latents(vae: "AutoencoderKLQwenImage21", latents: torch.Tensor) -> torch.Tensor:
     """Decode normalized latents to [B, C, H, W] pixels in [0, 1]."""
     latents = latents.to(device=vae.device, dtype=vae.dtype)
-    mean, std = latent_stats(vae, latents)
-    return (vae.decode(latents * std + mean)["sample"][:, :, 0].float() / 2 + 0.5).clamp(0, 1)
+    return vae.decode_to_pixels(latents)
 
 
 def _load_single_file_text_encoder(path, dtype):
