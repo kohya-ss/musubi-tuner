@@ -557,6 +557,11 @@ class NetworkTrainer:
         a, b = self.timestep_range_pool.pop()
         return random.uniform(a, b)
 
+    def latent_tokens_for_timestep_sampling(self, latents: torch.Tensor) -> int:
+        """Return the image token count, defaulting to 2x2 latent patch packing."""
+        height, width = latents.shape[-2:]
+        return (height // 2) * (width // 2)
+
     def sample_timesteps(
         self,
         args: argparse.Namespace,
@@ -649,16 +654,17 @@ class NetworkTrainer:
                     else:
                         h, w = latents.shape[-2:]
                         # we are pre-packed so must adjust for packed size
+                        image_seq_len = self.latent_tokens_for_timestep_sampling(latents)
                         if args.timestep_sampling == "flux_shift":
-                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(image_seq_len)
                         elif args.timestep_sampling == "flux2_shift":
                             mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(h * w)
                         elif args.timestep_sampling == "qwen_shift":
-                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)(image_seq_len)
                         elif args.timestep_sampling == "krea2_shift":
                             # Matches krea2_sampling.timesteps at inference defaults (minres=256, maxres=1280):
                             # x1=(256//16)**2=256, x2=(1280//16)**2=6400, y1=0.5, y2=1.15.
-                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=6400, y2=1.15)((h // 2) * (w // 2))
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=6400, y2=1.15)(image_seq_len)
                         # def time_shift(mu: float, sigma: float, t: torch.Tensor):
                         #     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma) # sigma=1.0
                         shift = math.exp(mu)
@@ -689,11 +695,11 @@ class NetworkTrainer:
                     # Generate mid_shift samples for selected indices.
                     if mid_mask.any():
                         mid_count = mid_mask.sum().item()
-                        h, w = latents.shape[-2:]
+                        image_seq_len = self.latent_tokens_for_timestep_sampling(latents)
                         if args.timestep_sampling == "qinglong_flux":
-                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)((h // 2) * (w // 2))
+                            mu = train_utils.get_lin_function(y1=0.5, y2=1.15)(image_seq_len)
                         elif args.timestep_sampling == "qinglong_qwen":
-                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)((h // 2) * (w // 2))
+                            mu = train_utils.get_lin_function(x1=256, y1=0.5, x2=8192, y2=0.9)(image_seq_len)
                         shift = math.exp(mu)
                         logits_norm_mid = randn(mid_count, org_timesteps[mid_mask] if org_timesteps is not None else None)
                         logits_norm_mid = logits_norm_mid * args.sigmoid_scale
