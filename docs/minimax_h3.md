@@ -141,7 +141,7 @@ Choosing between them: the adapter is the cheapest (no extra forward) and the le
 | --- | --- | --- | --- | --- | --- | --- |
 | Video: style, motion, general concept | `video_directory` or video JSONL | FL2VA | `--task t2va` | `--task t2va` (+`--uncond_output` for GL) | `--task t2va` | Adapter or guidance loss |
 | Video: character identity, appearance kept out of captions | same | FL2VA | `--task fl2va` (endpoint teacher) or `--task t2va` (reference teacher) | `--task t2va --teacher_conditions first,last` or `ref` | `--task t2va` + [endpoint or reference teacher](#teacher-matching) | Teacher matching (`ref`: identity + voice; `first,last`: identity, base audio kept). Alternative: adapter or GL with a trigger word |
-| Video: FL2VA (first/last-frame conditioned) | `video_directory` | FL2VA | `--task fl2va` | `--task fl2va` | `--task fl2va` | Adapter or GL |
+| Video: FL2VA (first/last-frame conditioned) | `video_directory` or video JSONL | FL2VA | `--task fl2va` | `--task fl2va` | `--task fl2va` | Adapter or GL |
 | Video: Ref2VA (reference conditioned) | video JSONL with `references` | Ref2VA | `--task ref2va` | `--task ref2va` | `--task ref2va` | Adapter or GL |
 | Image: plain image LoRA | `image_directory` or image JSONL | FL2VA | `--task t2va --one_frame` | `--task t2va --one_frame` | `--task t2va --one_frame --video_only` | Adapter or GL |
 | Image: character identity, text-only at inference | image JSONL `references` or `control_directory` without `fp_1f_clean_indices` | FL2VA | `--task ref2va --one_frame` | `--task t2va --one_frame --teacher_conditions subject_ref` | `--task t2va --one_frame --video_only` + [subject-reference teacher](#teacher-matching) | Teacher matching (`subject_ref`). Alternative: plain image row with a trigger word |
@@ -206,7 +206,7 @@ Dataset configuration uses the common TOML schema (`docs/dataset_config.md`). H3
 
 </details>
 
-### Video directory (T2VA, FL2VA)
+### Video directory or video JSONL (T2VA, FL2VA)
 
 ```toml
 [general]
@@ -225,10 +225,21 @@ frame_extraction = "head"
 
 For a directory item such as `clip.mp4`, put the caption in `clip.txt`. FL2VA derives its first and last conditions from each selected target crop. Target audio is resolved in this order: exactly one same-stem audio sidecar such as `clip.wav`, then the video's embedded audio stream, then the silence placeholder.
 
+`video_jsonl_file` works the same way in place of `video_directory`; each line needs only the target and its caption, since FL2VA takes its conditions from the clip itself (there is no field for separate first/last images):
+
+```jsonl
+{"video_path": "/data/h3/videos/clip_001.mp4", "caption": "..."}
+{"video_path": "/data/h3/videos/clip_002.mp4", "caption": "...", "audio_path": "/data/h3/audio/clip_002.wav"}
+```
+
+A JSONL `audio_path` takes precedence over the sidecar and embedded audio. `references` is Ref2VA-only (see the next section) and `control_path` is not used by H3 video datasets; both are rejected.
+
 <details>
 <summary>日本語</summary>
 
 ディレクトリ内の `clip.mp4` に対しては、キャプションを `clip.txt` に置きます。FL2VA は、選択された各ターゲットの切り出し範囲から最初と最後のフレームを条件として自動的に取り出します。対象音声は、同じベースファイル名で拡張子の異なる音声ファイル（`clip.wav` など。ちょうど 1 つであること）→ 動画に埋め込まれた音声トラック → 無音プレースホルダ、の順で解決されます。
+
+`video_directory` の代わりに `video_jsonl_file` も同じように使えます。FL2VA の条件はクリップ自体から取られるため、各行にはターゲットとキャプションだけがあれば十分です（最初と最後の画像を別に指定するフィールドはありません）。JSONL の `audio_path` は、同名の音声ファイルや埋め込み音声より優先されます。`references` は Ref2VA 専用（次の小節）で、`control_path` は H3 の動画データセットでは使わないため、どちらもエラーになります。
 
 </details>
 
