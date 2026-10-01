@@ -45,6 +45,7 @@ import logging
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
 from musubi_tuner.training.accelerator_setup import warn_if_tensorboard_unavailable
+from musubi_tuner.training.trainer_base import reduce_loss
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1098,7 +1099,8 @@ class FineTuningTrainer:
                     # # min snr gamma, scale v pred loss like noise pred, v pred like loss, debiased estimation etc.
                     # loss = self.post_process_loss(loss, args, timesteps, noise_scheduler)
 
-                    loss = loss.mean()  # 平均なのでbatch_sizeで割る必要なし
+                    # mean over all elements, minus any watermark-masked region
+                    loss = reduce_loss(loss, batch)  # 平均なのでbatch_sizeで割る必要なし
 
                     accelerator.backward(loss)
                     if accelerator.sync_gradients:

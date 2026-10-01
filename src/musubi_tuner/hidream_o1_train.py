@@ -22,6 +22,7 @@ from musubi_tuner.hv_train_network import (
     clean_memory_on_device,
     collator_class,
     compute_loss_weighting_for_sd3,
+    reduce_loss,
     prepare_accelerator,
     read_config_from_file,
     set_seed,
@@ -504,7 +505,7 @@ class HiDreamO1Trainer(HiDreamO1NetworkTrainer):
                     if weighting is not None:
                         loss = loss * weighting
 
-                    loss = loss.mean()
+                    loss = reduce_loss(loss, batch)  # mean over all elements, minus any watermark-masked region
                     loss, dino_logs = self.apply_dino_loss(
                         args, loss, model_pred, target, dit_output.extra["pixel_grid_hw"], global_step
                     )

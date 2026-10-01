@@ -25,6 +25,7 @@ from musubi_tuner.minimax_h3_train_network import (
     H3SamplingResources,
     MiniMaxH3NetworkTrainer,
     _base_sigma_from_uniform,
+    _dc_attenuated_prediction,
     _decomposed_flow_loss,
     _prediction_geometry_log,
     _sample_request,
@@ -3147,3 +3148,143 @@ def test_teacher_matching_bypasses_the_lora_on_a_real_network(monkeypatch):
     assert all(lora.enabled for lora in network.unet_loras)
     assert torch.isfinite(loss)
     assert metrics["teacher/base_sigma"] == pytest.approx(0.25)
+
+
+def _mask_weights():
+    """(B, 1, 1, H, W) weights: right half masked out, second sample at half weight."""
+    weights = torch.ones(2, 1, 1, 6, 6, dtype=torch.float64)
+    weights[1] = 0.5
+    weights[:, :, :, :, 3:] = 0.0
+    return weights
+
+
+def _mask_pair():
+    generator = torch.Generator().manual_seed(0)
+    shape = (2, 4, 2, 6, 6)
+    pred = torch.randn(shape, generator=generator, dtype=torch.float64)
+    target = torch.randn(shape, generator=generator, dtype=torch.float64)
+    return pred, target
+
+
+def _weighted_mse(pred, target, weights):
+    broadcast = weights.expand_as(pred)
+    return ((pred - target) ** 2 * broadcast).sum() / broadcast.sum()
+
+
+def test_decomposed_flow_loss_with_unit_weights_matches_the_unweighted_value():
+    pred, target = _mask_pair()
+    unweighted = _decomposed_flow_loss(pred, target, 1.0, 1.0)
+    unit = _decomposed_flow_loss(pred, target, 1.0, 1.0, torch.ones_like(_mask_weights()))
+    torch.testing.assert_close(unit, unweighted)
+
+
+def test_decomposed_flow_loss_with_weights_equals_the_weighted_mse():
+    # the docstring's "at unit mag/dir the value equals the MSE" promise, in the mask metric
+    pred, target = _mask_pair()
+    weights = _mask_weights()
+    torch.testing.assert_close(_decomposed_flow_loss(pred, target, 1.0, 1.0, weights), _weighted_mse(pred, target, weights))
+
+
+def test_decomposed_flow_loss_ignores_the_masked_region_in_value_and_gradient():
+    pred, target = _mask_pair()
+    weights = _mask_weights()
+    broken = pred.clone()
+    broken[:, :, :, :, 3:] += 1e4  # arbitrary damage, entirely inside the mask
+
+    for mag, direction in ((1.0, 1.0), (0.5, 1.0), (0.0, 1.0), (1.0, 0.0)):
+        clean_input = pred.clone().requires_grad_(True)
+        _decomposed_flow_loss(clean_input, target, mag, direction, weights).backward()
+        broken_input = broken.clone().requires_grad_(True)
+        _decomposed_flow_loss(broken_input, target, mag, direction, weights).backward()
+
+        torch.testing.assert_close(clean_input.grad[..., :3], broken_input.grad[..., :3])
+        assert clean_input.grad[..., 3:].abs().max().item() == 0.0
+
+
+def test_decomposed_flow_loss_keeps_its_gradient_geometry_in_the_mask_metric():
+    pred, target = _mask_pair()
+    weights = _mask_weights()
+
+    # direction-only stays orthogonal to the prediction under the plain dot product: the sqrt(w)
+    # factors cancel between the chain rule and the inner product
+    rotational = pred.clone().requires_grad_(True)
+    _decomposed_flow_loss(rotational, target, 0.0, 1.0, weights).backward()
+    grad = rotational.grad.flatten()
+    radial_unit = pred.flatten() / pred.flatten().norm()
+    assert abs(torch.dot(grad, radial_unit).item()) < 1e-10 * grad.norm().item()
+
+    # magnitude-only is radial in the mask metric, i.e. parallel to w*pred rather than to pred
+    radial = pred.clone().requires_grad_(True)
+    _decomposed_flow_loss(radial, target, 1.0, 0.0, weights).backward()
+    grad = radial.grad.flatten()
+    weighted_unit = (weights.expand_as(pred) * pred).flatten()
+    weighted_unit = weighted_unit / weighted_unit.norm()
+    tangential = grad - torch.dot(grad, weighted_unit) * weighted_unit
+    assert tangential.norm().item() < 1e-10 * grad.norm().item()
+
+
+def test_dc_attenuated_prediction_splits_the_weighted_mse_without_a_cross_term():
+    # mse_w(pred', target) == mse_ac_w + dc_weight * mse_dc_w, with the DC taken in the same
+    # inner product the loss is measured in — otherwise the split leaves a cross term
+    pred, target = _mask_pair()
+    weights = _mask_weights()
+    broadcast = weights.expand_as(pred)
+    residual = pred - target
+    dims = tuple(range(2, residual.ndim))
+    dc = (broadcast * residual).sum(dims, keepdim=True) / broadcast.sum(dims, keepdim=True)
+    mse_dc = (broadcast * dc.expand_as(residual) ** 2).sum() / broadcast.sum()
+    mse_ac = (broadcast * (residual - dc) ** 2).sum() / broadcast.sum()
+
+    for dc_weight in (1.0, 0.25, 0.0):
+        attenuated = _dc_attenuated_prediction(pred, target, dc_weight, weights)
+        torch.testing.assert_close(_weighted_mse(attenuated, target, weights), mse_ac + dc_weight * mse_dc)
+
+
+def _masked_video_output(*, teacher_conditioned=True, audio_weight=1.0):
+    """Video pred whose whole error sits in the right half, which the mask excludes."""
+    pred = torch.zeros(1, 2, 1, 4, 4)
+    pred[..., 2:] = 9.0
+    return DiTOutput(
+        pred=pred,
+        target=torch.zeros(1, 2, 1, 4, 4),
+        extra={
+            "audio_pred": torch.tensor([[0.0, 2.0]]),
+            "audio_target": torch.tensor([[2.0, 2.0]]),
+            "audio_loss_weight": torch.tensor([audio_weight], dtype=torch.float32),
+            "teacher_conditioned": teacher_conditioned,
+        },
+    )
+
+
+def _wmask_batch():
+    mask = torch.ones(1, 8, 8)
+    mask[:, :, 4:] = 0.0  # right half of the frame is watermark
+    return {"watermark_mask": mask}
+
+
+@pytest.mark.parametrize("teacher_matching", [False, True])
+def test_compute_loss_excludes_the_watermark_region_from_the_video_term(teacher_matching):
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args(h3_teacher_matching=teacher_matching)
+
+    masked, _ = trainer.compute_loss(args, _masked_video_output(), None, None, torch.bfloat16, torch.float32, 0, _wmask_batch())
+    unmasked, _ = trainer.compute_loss(args, _masked_video_output(), None, None, torch.bfloat16, torch.float32, 0, None)
+
+    # the only video error lies under the mask, so the video term vanishes and just audio is left
+    assert masked.item() == pytest.approx(2.0)
+    assert unmasked.item() > masked.item()
+
+
+def test_compute_loss_does_not_apply_the_video_mask_to_the_audio_term():
+    # audio latents are (B, C, T, bins): 4-D like an image loss, but the last two axes are not
+    # height and width, so a pixel-space mask must never reach them
+    trainer = MiniMaxH3NetworkTrainer()
+    args = _trainer_args()
+
+    masked, metrics = trainer.compute_loss(
+        args, _masked_video_output(), None, None, torch.bfloat16, torch.float32, 0, _wmask_batch()
+    )
+    _, plain_metrics = trainer.compute_loss(args, _masked_video_output(), None, None, torch.bfloat16, torch.float32, 0, None)
+
+    assert metrics["loss/audio"] == pytest.approx(plain_metrics["loss/audio"])
+    assert metrics["loss/video"] == pytest.approx(0.0)

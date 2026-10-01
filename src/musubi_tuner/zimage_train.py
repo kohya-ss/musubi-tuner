@@ -24,6 +24,7 @@ from musubi_tuner.hv_train_network import (
     SS_METADATA_MINIMUM_KEYS,
     collator_class,
     compute_loss_weighting_for_sd3,
+    reduce_loss,
     clean_memory_on_device,
     prepare_accelerator,
     setup_parser_common,
@@ -541,7 +542,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                     if weighting is not None:
                         loss = loss * weighting
 
-                    loss = loss.mean()  # mean loss over all elements in batch
+                    loss = reduce_loss(loss, batch)  # mean over all elements, minus any watermark-masked region
 
                     accelerator.backward(loss)
 

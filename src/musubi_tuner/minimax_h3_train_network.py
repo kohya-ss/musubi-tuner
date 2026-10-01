@@ -6,7 +6,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import torch
 from accelerate import Accelerator
@@ -85,7 +85,13 @@ from musubi_tuner.networks import lora_minimax_h3
 from musubi_tuner.training.audio_loss import add_audio_train_args, effective_audio_loss_weights
 from musubi_tuner.training.parser_common import read_config_from_file, setup_parser_common
 from musubi_tuner.training.sampling_prompts import load_prompts
-from musubi_tuner.training.trainer_base import DiTOutput, NetworkTrainer, wandb_tracker_and_module
+from musubi_tuner.training.trainer_base import (
+    DiTOutput,
+    NetworkTrainer,
+    apply_loss_weights,
+    wandb_tracker_and_module,
+    watermark_mask_weights,
+)
 from musubi_tuner.utils.device_utils import clean_memory_on_device, synchronize_device
 from musubi_tuner.utils import model_utils
 
@@ -517,19 +523,39 @@ def _base_sigma_from_uniform(
     return torch.where(u < focus_prob, focused, passthrough)
 
 
-def _dc_attenuated_prediction(pred: torch.Tensor, target: torch.Tensor, dc_weight: float) -> torch.Tensor:
+def _dc_attenuated_prediction(
+    pred: torch.Tensor, target: torch.Tensor, dc_weight: float, weights: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Scale the residual's per-channel DC so that mse(pred', target) = mse_ac + dc_weight*mse_dc.
 
     The DC of the residual is a global color/tone cast (the style axis); attenuating it in the
     loss stops the coherent palette absorption without touching the spatially structured AC
     content. Implemented as a linear map of the residual, so gradients stay exact.
+
+    With per-element ``weights`` (a watermark loss mask) the DC becomes the weighted mean, which
+    is what keeps the identity exact under the weighted MSE: the AC remainder is orthogonal to
+    the DC in the *same* inner product the loss is measured in, so the split still has no cross
+    term. Taking the unweighted mean here would leave the masked region's cast in the DC and
+    then attenuate it out of the region that is actually trained.
     """
     residual = pred - target
-    residual_dc = residual.mean(dim=tuple(range(2, residual.ndim)), keepdim=True)
+    dims = tuple(range(2, residual.ndim))
+    if weights is None:
+        residual_dc = residual.mean(dim=dims, keepdim=True)
+    else:
+        broadcast = weights.expand_as(residual)
+        weighted_sum = (broadcast * residual).sum(dim=dims, keepdim=True)
+        residual_dc = weighted_sum / broadcast.sum(dim=dims, keepdim=True).clamp(min=1e-8)
     return pred - (1.0 - dc_weight**0.5) * residual_dc
 
 
-def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: float, dir_weight: float) -> torch.Tensor:
+def _decomposed_flow_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mag_weight: float,
+    dir_weight: float,
+    weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """Magnitude/direction split of the MSE with the norm-shrinkage coupling removed.
 
     Exact identity: ||p - t||^2 = (||p|| - ||t||)^2 + 2*||p||*||t||*(1 - cos). In plain MSE the
@@ -539,7 +565,27 @@ def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: 
     rotational, so the magnitude optimum becomes E[||t||] (full per-sample commitment) instead
     of ||E[t]||. At unit weights the loss VALUE still equals the MSE exactly (detaching changes
     gradients only), so loss curves stay comparable across the switch.
+
+    Per-element ``weights`` (a watermark loss mask) carry the whole decomposition over to the
+    weighted inner product <a,b>_w = sum(w*a*b): the identity holds verbatim there, and scaling
+    both vectors by sqrt(w) makes every norm and dot product below the weighted one, so the
+    arithmetic is untouched. Only the denominator changes, from the element count to the summed
+    weight — the same normalization ``apply_loss_weights`` uses, so all-ones weights reproduce
+    the unweighted value and masked ones stay on the same scale.
+
+    The gradient geometry carries over into that metric rather than the Euclidean one. The
+    direction-only gradient stays orthogonal to the prediction under the plain dot product (the
+    sqrt(w) factors cancel between the chain rule and the inner product), while the
+    magnitude-only gradient comes out parallel to w*pred instead of to pred — radial in the mask
+    metric, which is what keeps it from pushing on masked elements at all.
     """
+    if weights is None:
+        denominator = pred.numel()
+    else:
+        scale = weights.sqrt().expand_as(pred)
+        denominator = weights.expand_as(pred).sum().clamp(min=1e-8)
+        pred = pred * scale
+        target = target * scale
     pred_flat = pred.flatten()
     target_flat = target.flatten()
     pred_norm = pred_flat.norm()
@@ -548,7 +594,7 @@ def _decomposed_flow_loss(pred: torch.Tensor, target: torch.Tensor, mag_weight: 
     cos = torch.dot(pred_flat, target_flat) / (pred_norm * target_norm + eps)
     magnitude_term = (pred_norm - target_norm).pow(2)
     direction_term = 2.0 * pred_norm.detach() * target_norm * (1.0 - cos)
-    return (mag_weight * magnitude_term + dir_weight * direction_term) / pred_flat.numel()
+    return (mag_weight * magnitude_term + dir_weight * direction_term) / denominator
 
 
 def _preservation_density_compensation(
@@ -1624,7 +1670,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             teacher_visual_conditions=teacher_visual_conditions,
             teacher_audio_conditions=teacher_audio_conditions,
         )
-        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
+        return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step, batch)
 
     def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
         """The video half of the H3 noising: one base sigma per item, mapped from a raw uniform
@@ -1662,6 +1708,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         dit_dtype: torch.dtype,
         network_dtype: torch.dtype,
         global_step: int,
+        batch: Optional[dict[str, torch.Tensor]] = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         del timesteps, noise_scheduler, dit_dtype, global_step
         teacher_matching = bool(args.h3_teacher_matching)
@@ -1669,20 +1716,27 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
         dc_weight = float(args.h3_teacher_loss_dc_weight)
         mag_weight = float(args.h3_teacher_loss_mag_weight)
 
-        def flow_loss(pred: torch.Tensor, target: torch.Tensor, *, attenuate_dc: bool) -> torch.Tensor:
+        def flow_loss(
+            pred: torch.Tensor, target: torch.Tensor, *, attenuate_dc: bool, weights: Optional[torch.Tensor] = None
+        ) -> torch.Tensor:
             if not teacher_matching:
-                return torch.nn.functional.mse_loss(pred, target, reduction="mean")
+                return apply_loss_weights(torch.nn.functional.mse_loss(pred, target, reduction="none"), weights)
             # the DC attenuation applies only to conditioned teaching steps: on preservation
             # steps the DC penalty is exactly what pulls palette drift back to the base
             if attenuate_dc and conditioned and dc_weight != 1.0:
-                pred = _dc_attenuated_prediction(pred, target, dc_weight)
+                pred = _dc_attenuated_prediction(pred, target, dc_weight, weights)
             # the magnitude down-weight is likewise education-only: on anchor steps the
             # magnitude term is what pulls learned de-amplification back to the base norm
             # (measured on a one-frame TM A/B: ungated mag 0.25 sank the anchor norm ratio)
-            return _decomposed_flow_loss(pred, target, mag_weight if conditioned else 1.0, 1.0)
+            return _decomposed_flow_loss(pred, target, mag_weight if conditioned else 1.0, 1.0, weights)
 
         # the DC attenuation targets the video palette axis; the audio anchor keeps its full DC
-        video_loss = flow_loss(output.pred.to(network_dtype), output.target.to(network_dtype), attenuate_dc=True)
+        video_pred = output.pred.to(network_dtype)
+        # Only the video stream is masked. Audio latents are (B, C, T, bins): also 4-D, but their
+        # last two axes are not height and width, so a pixel-space mask has nothing to say about
+        # them — watermark_mask_weights is deliberately given the video prediction alone.
+        video_weights = watermark_mask_weights(video_pred, batch)
+        video_loss = flow_loss(video_pred, output.target.to(network_dtype), attenuate_dc=True, weights=video_weights)
         weight = float(output.extra["audio_loss_weight"].item())
         if weight == 0.0:
             audio_loss = video_loss.detach().new_zeros(())

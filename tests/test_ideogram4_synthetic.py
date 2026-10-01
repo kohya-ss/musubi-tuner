@@ -579,6 +579,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         fake_trainer.DiTOutput = DiTOutput
         fake_trainer.NetworkTrainer = NetworkTrainer
+        # mirrors trainer_base.reduce_loss for a batch without a watermark mask
+        fake_trainer.reduce_loss = lambda loss, batch=None: loss.mean()
 
         try:
             sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
@@ -717,6 +719,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         fake_trainer.DiTOutput = DiTOutput
         fake_trainer.NetworkTrainer = NetworkTrainer
+        # mirrors trainer_base.reduce_loss for a batch without a watermark mask
+        fake_trainer.reduce_loss = lambda loss, batch=None: loss.mean()
 
         try:
             sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
@@ -800,6 +804,8 @@ class Ideogram4InputAndCacheTests(unittest.TestCase):
 
         fake_trainer.DiTOutput = DiTOutput
         fake_trainer.NetworkTrainer = NetworkTrainer
+        # mirrors trainer_base.reduce_loss for a batch without a watermark mask
+        fake_trainer.reduce_loss = lambda loss, batch=None: loss.mean()
 
         try:
             sys.modules["musubi_tuner.dataset.image_video_dataset"] = fake_image_video
