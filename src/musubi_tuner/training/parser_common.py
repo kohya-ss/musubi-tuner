@@ -305,7 +305,7 @@ def _add_sampling_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_optimizer_args(parser: argparse.ArgumentParser) -> None:
+def add_optimizer_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--optimizer_type",
         type=str,
@@ -329,7 +329,7 @@ def _add_optimizer_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
+def add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--lr_scheduler",
         type=str,
@@ -772,8 +772,8 @@ def setup_parser_common() -> argparse.ArgumentParser:
     _add_logging_args(parser)
     _add_ddp_args(parser)
     _add_sampling_args(parser)
-    _add_optimizer_args(parser)
-    _add_lr_scheduler_args(parser)
+    add_optimizer_args(parser)
+    add_lr_scheduler_args(parser)
     _add_memory_args(parser)
     _add_timestep_args(parser)
     _add_network_args(parser)

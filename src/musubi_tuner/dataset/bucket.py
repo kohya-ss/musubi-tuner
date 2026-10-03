@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
 from safetensors.torch import load_file
 
 from musubi_tuner.dataset.architectures import (
+    ARCHITECTURE_DLSSNR,
     ARCHITECTURE_FRAMEPACK,
     ARCHITECTURE_FLUX_2_DEV,
     ARCHITECTURE_FLUX_2_KLEIN_4B,
@@ -30,9 +31,6 @@ from musubi_tuner.dataset.architectures import (
 from musubi_tuner.dataset.media_utils import divisible_by
 from musubi_tuner.utils.model_utils import remove_dtype_suffix
 
-if TYPE_CHECKING:
-    from musubi_tuner.dataset.image_video_dataset import ItemInfo
-
 import logging
 
 logger = logging.getLogger(__name__)
@@ -53,6 +51,7 @@ class BucketSelector:
     RESOLUTION_STEPS_IDEOGRAM4 = 16
     RESOLUTION_STEPS_KREA2 = 16  # latent f8 (VAE compression 8) x patch 2 = align 16
     RESOLUTION_STEPS_MINIMAX_H3 = 32
+    RESOLUTION_STEPS_DLSSNR = 16
 
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
@@ -72,6 +71,7 @@ class BucketSelector:
         ARCHITECTURE_IDEOGRAM4: RESOLUTION_STEPS_IDEOGRAM4,
         ARCHITECTURE_KREA2: RESOLUTION_STEPS_KREA2,
         ARCHITECTURE_MINIMAX_H3: RESOLUTION_STEPS_MINIMAX_H3,
+        ARCHITECTURE_DLSSNR: RESOLUTION_STEPS_DLSSNR,
     }
 
     def __init__(
@@ -103,6 +103,11 @@ class BucketSelector:
 
             self.bucket_resolutions = list(set(self.bucket_resolutions))
             self.bucket_resolutions.sort()
+            if architecture == ARCHITECTURE_DLSSNR:
+                # NR's valid rectangle needs axes >= 33; the first aligned size is 48.
+                self.bucket_resolutions = [(w, h) for w, h in self.bucket_resolutions if min(w, h) >= 48]
+                if not self.bucket_resolutions:
+                    raise ValueError("resolution is too small for the DLSS-NR minimum 48-pixel bucket axes")
 
         # calculate aspect ratio to find the nearest resolution
         self.aspect_ratios = np.array([w / h for w, h in self.bucket_resolutions])
@@ -170,7 +175,7 @@ class BucketSelector:
 
 class BucketBatchManager:
     def __init__(
-        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+        self, bucketed_item_info: dict[tuple[Any], list[Any]], batch_size: int, num_timestep_buckets: Optional[int] = None
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
@@ -239,15 +244,19 @@ class BucketBatchManager:
     def __len__(self):
         return len(self.bucket_batch_indices)
 
-    def __getitem__(self, idx):
+    def get_batch_items(self, idx):
+        """Select a same-bucket batch without requiring diffusion cache files."""
         bucket_reso, batch_idx = self.bucket_batch_indices[idx]
         bucket = self.buckets[bucket_reso]
         start = batch_idx * self.batch_size
         end = min(start + self.batch_size, len(bucket))
+        return bucket[start:end]
 
+    def __getitem__(self, idx):
+        items = self.get_batch_items(idx)
         batch_tensor_data = {}
         varlen_keys = set()
-        for item_info in bucket[start:end]:
+        for item_info in items:
             sd_latent = load_file(item_info.latent_cache_path)
             sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
@@ -279,7 +288,7 @@ class BucketBatchManager:
                 batch_tensor_data[key] = torch.stack(batch_tensor_data[key])
 
         if self.timestep_pool is not None:
-            batch_tensor_data["timesteps"] = self.timestep_pool[idx][: end - start]  # use the pre-generated timesteps
+            batch_tensor_data["timesteps"] = self.timestep_pool[idx][: len(items)]  # use the pre-generated timesteps
         else:
             batch_tensor_data["timesteps"] = None
 
