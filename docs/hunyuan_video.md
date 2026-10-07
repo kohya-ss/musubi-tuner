@@ -253,7 +253,7 @@ Use `--sdpa` for PyTorch's scaled dot product attention. Use `--flash_attn` for 
 
 ### Timestep Sampling
 You can also specify the range of timesteps 
-with `--min_timestep` and `--max_timestep`. See [advanced configuration](../advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
+with `--min_timestep` and `--max_timestep`. See [advanced configuration](./advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定) for details.
 
 `--show_timesteps` can be set to `image` (requires `matplotlib`) or `console` to display timestep distribution and loss weighting during training. (When using `flux_shift` and `qwen_shift`, the distribution will be for images with a resolution of 1024x1024.)
 
@@ -261,11 +261,11 @@ with `--min_timestep` and `--max_timestep`. See [advanced configuration](../adva
 
 The format of LoRA trained is the same as `sd-scripts`.
 
-You can record logs during training. Refer to [Save and view logs in TensorBoard format](../advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
+You can record logs during training. Refer to [Save and view logs in TensorBoard format](./advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照).
 
-For PyTorch Dynamo optimization, refer to [this document](../advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化).
+For PyTorch Dynamo optimization, refer to [this document](./advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化).
 
-For sample image generation during training, refer to [this document](../sampling_during_training.md). For advanced configuration, refer to [this document](../advanced_config.md).
+For sample image generation during training, refer to [this document](./sampling_during_training.md). For advanced configuration, refer to [this document](./advanced_config.md).
 
 <details>
 <summary>日本語</summary>
@@ -316,7 +316,7 @@ block swapのオプション（`--use_pinned_memory_for_block_swap`、およびL
 
 **タイムステップサンプリング**
 
-`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](../advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
+`--min_timestep`と`--max_timestep`を指定すると、学習時のタイムステップの範囲を指定できます。詳細は[高度な設定](./advanced_config.md#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)を参照してください。
 
 `--show_timesteps`に`image`（`matplotlib`が必要）または`console`を指定すると、学習時のtimestepsの分布とtimestepsごとのloss weightingが確認できます。（`flux_shift`と`qwen_shift`を使用する場合は画像の解像度が1024x1024の場合の分布になります。）
 
@@ -324,11 +324,11 @@ block swapのオプション（`--use_pinned_memory_for_block_swap`、およびL
 
 学習されるLoRAの形式は、`sd-scripts`と同じです。
 
-学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](../advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
+学習時のログの記録が可能です。[TensorBoard形式のログの保存と参照](./advanced_config.md#save-and-view-logs-in-tensorboard-format--tensorboard形式のログの保存と参照)を参照してください。
 
-PyTorch Dynamoによる最適化を行う場合は、[こちら](../advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
+PyTorch Dynamoによる最適化を行う場合は、[こちら](./advanced_config.md#pytorch-dynamo-optimization-for-model-training--モデルの学習におけるpytorch-dynamoの最適化)を参照してください。
 
-学習中のサンプル画像生成については、[こちらのドキュメント](../sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](../advanced_config.md)を参照してください。
+学習中のサンプル画像生成については、[こちらのドキュメント](./sampling_during_training.md)を参照してください。その他の高度な設定については[こちらのドキュメント](./advanced_config.md)を参照してください。
 
 </details>
 
