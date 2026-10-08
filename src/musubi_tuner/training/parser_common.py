@@ -619,7 +619,13 @@ def _add_save_load_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="base name of trained model file / 学習後のモデルの拡張子を除くファイル名",
     )
-    parser.add_argument("--resume", type=str, default=None, help="saved state to resume training / 学習再開するモデルのstate")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="saved state directory to resume training seamlessly; keep the original schedule, dataset, seed, "
+        "gradient accumulation, and process count / 学習再開するモデルのstateディレクトリ",
+    )
 
     parser.add_argument(
         "--save_every_n_epochs",
