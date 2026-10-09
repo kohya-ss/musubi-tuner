@@ -54,6 +54,23 @@ CONVROT_GROUPSIZE = 256
 COMFY_QUANT_FORMAT_INT8 = "int8_tensorwise"
 
 
+# Replace int8 convrot kernel with cuBLAS version, if enabled (almost twice as fast on RTX 3090 vs. triton
+# and avoids the large autotune overhead on first epoch for each different caption length).
+if HAS_TRITON and os.environ.get("CONVROT_CUBLAS") == "1":
+    logger.info("Using INT8 convrot cuBLAS")
+    from musubi_tuner.modules.cublas_int8 import int8_linear_cublas as int8_linear, int8_grad_input_rot_cublas as int8_grad_input_rot
+
+else:
+    def int8_grad_input_rot(g2d, wq, w_scale, out_dtype, groupsize=256):
+        # fold per-channel weight scale into g, then reuse the fused Triton GEMM
+        # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
+        # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
+        g_scaled = g2d * w_scale.reshape(1, -1).to(g2d.dtype)
+        one = torch.ones(1, device=g2d.device, dtype=torch.float32)
+        gx_rot = int8_linear(g_scaled, wq.t().contiguous(), one, None, out_dtype, False, groupsize)
+        return gx_rot
+
+
 def _is_power_of_4(value: int) -> bool:
     return value >= 4 and (value & (value - 1)) == 0 and math.log(value, 4) % 1 == 0
 
@@ -357,12 +374,7 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
             if ctx.bwd_mode == "int8":
                 if not g2d.is_cuda:
                     raise RuntimeError("ConvRot INT8 backward mode 'int8' requires CUDA tensors")
-                # fold per-channel weight scale into g, then reuse the fused Triton GEMM
-                # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
-                # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
-                g_scaled = g2d * w_scale.reshape(1, -1).to(g2d.dtype)
-                one = torch.ones(1, device=g2d.device, dtype=torch.float32)
-                gx_rot = int8_linear(g_scaled, wq.t().contiguous(), one, None, grad_out.dtype, False, gs)
+                gx_rot = int8_grad_input_rot(g2d, wq, w_scale, grad_out.dtype, gs)
             else:
                 # transient bf16 dequant of the rotated weight (stays in rotated basis)
                 w_rot = wq.to(grad_out.dtype) * w_scale.reshape(-1, 1).to(grad_out.dtype)
