@@ -58,7 +58,7 @@ COMFY_QUANT_FORMAT_INT8 = "int8_tensorwise"
 # and avoids the large autotune overhead on first epoch for each different caption length).
 if HAS_TRITON and os.environ.get("CONVROT_CUBLAS") == "1":
     logger.info("Using INT8 convrot cuBLAS")
-    from musubi_tuner.modules.cublas_int8 import (
+    from musubi_tuner.modules.convrot_int8_cublas import (
         int8_linear_cublas as int8_linear,  # Shadows the import above
         int8_grad_input_rot_cublas as _int8_grad_input_rot
     )
