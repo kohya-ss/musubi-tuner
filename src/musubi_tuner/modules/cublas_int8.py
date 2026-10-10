@@ -13,7 +13,7 @@ Two entry points:
 
 * `int8_grad_input_rot_cublas`: input gradient of such a layer, in the rotated (ConvRot) basis:
 
-      grad_x_rot = quantize_rowwise(g * w_scale) @ wq
+      grad_x_rot = quantize_rowwise(g * weight_scale) @ weight
 
   The caller rotates the result back to the original basis.
 
@@ -33,6 +33,8 @@ Shapes `torch._int_mm` cannot handle (rows <= 16, dimensions not a multiple of 8
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from itertools import pairwise
 
 import torch
 import triton
@@ -48,42 +50,84 @@ _EPILOGUE_BLOCK_N = 1024
 
 @triton.jit
 def _dequant_epilogue_kernel(
-    acc_ptr,  # int32 [m, n] accumulator from torch._int_mm
-    xs_ptr,  # fp32 [m] (or [m, 1]) per-row activation scale
-    ws_ptr,  # fp32 [n] per-channel weight scale, or [1] scalar (unused if not HAS_WS)
-    bias_ptr,  # [n] bias, any float dtype (unused if not HAS_BIAS)
-    out_ptr,  # bf16/fp16/fp32 [m, n]
-    n_cols,
-    stride_acc,
-    stride_out,
-    HAS_WS: tl.constexpr,
-    PER_CHANNEL: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-    BLOCK_N: tl.constexpr,
+    acc_ptr,    # int32 [m, n] raw accumulator from torch._int_mm; rows are `stride_acc` apart, columns contiguous
+    xs_ptr,     # fp32 [m] (or [m, 1]) per-row activation scale from the row-wise quantizer
+    ws_ptr,     # fp32 [n] per-channel weight scale, or [1] scalar (only read if HAS_WS)
+    bias_ptr,   # [n] bias, any float dtype (only read if HAS_BIAS)
+    out_ptr,    # bf16/fp16/fp32 [m, n] result; rows are `stride_out` apart, columns contiguous (may be a row slice)
+    n_cols,     # n: number of valid columns; the mask disables the padding lanes of the last column block
+    stride_acc, # row stride of acc, in elements
+    stride_out, # row stride of out, in elements
+    HAS_WS: tl.constexpr,       # multiply by the weight scale (False in the backward: it is already folded into the gradient)
+    PER_CHANNEL: tl.constexpr,  # weight scale is a vector over columns (True) or a single scalar (False); needs HAS_WS
+    HAS_BIAS: tl.constexpr,     # add the bias
+    BLOCK_N: tl.constexpr,      # columns handled per program
 ):
+    """Dequantization epilogue of an INT8 GEMM: out[r, c] = acc[r, c] * xs[r] [* ws[c]] [+ bias[c]].
+
+    `torch._int_mm` returns the raw int32 products. They still have to be scaled back to real values with the per-row
+    activation scale and the weight scale, optionally biased, and converted to the output dtype. The Triton GEMM
+    does this inside the matmul; with cuBLAS it is a separate pass. Doing it in one kernel avoids the chain of
+    elementwise torch ops (fp32 temporaries, several passes over the data).
+
+    One program handles BLOCK_N columns of one row (grid: rows x column blocks). The kernel is memory-bound
+    (reads 4 bytes, writes 2 bytes per element). The constexpr flags are resolved at compile time, so each
+    parameter combination is its own specialization without runtime branches.
+    """
     row = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    cols = (tl.program_id(1) * BLOCK_N) + tl.arange(0, BLOCK_N)
     mask = cols < n_cols
 
-    acc = tl.load(acc_ptr + row * stride_acc + cols, mask=mask, other=0).to(tl.float32)
+    acc_offsets = (row * stride_acc) + cols
+    acc = tl.load(acc_ptr + acc_offsets, mask=mask, other=0).to(tl.float32)
+
+    # Apply row activation scale
     y = acc * tl.load(xs_ptr + row)
+
+    # Apply weight scale
     if HAS_WS:
         if PER_CHANNEL:
-            y = y * tl.load(ws_ptr + cols, mask=mask, other=0.0)
+            y *= tl.load(ws_ptr + cols, mask=mask, other=0.0)
         else:
-            y = y * tl.load(ws_ptr)
+            y *= tl.load(ws_ptr)
+
+    # Apply bias
     if HAS_BIAS:
-        y = y + tl.load(bias_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    tl.store(out_ptr + row * stride_out + cols, y.to(out_ptr.dtype.element_ty), mask=mask)
+        y += tl.load(bias_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+
+    out_offsets = (row * stride_out) + cols
+    tl.store(out_ptr + out_offsets, y.to(out_ptr.dtype.element_ty), mask=mask)
 
 
-def _dequant_epilogue(acc, xs, ws, per_channel, bias, out):
-    """out = acc * xs [* ws] [+ bias], one pass over the int32 accumulator. `ws=None` skips the weight scale."""
+def _dequant_epilogue(
+    acc: torch.Tensor,
+    xs: torch.Tensor,
+    ws: torch.Tensor | None,
+    per_channel: bool,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+):
+    """Dequantize the int32 accumulator of `torch._int_mm` into `out`: out = acc * xs [* ws] [+ bias].
+
+    Launches `_dequant_epilogue_kernel` in one pass over the accumulator, writing into the preallocated `out`
+    (rows must be contiguous, but `out` can be a row slice of a larger tensor, which is how the chunked GEMM loops use it).
+
+    Used by `int8_linear_cublas` (forward: per-channel or scalar weight scale, optional bias), and by
+    `int8_grad_input_rot_cublas` (backward: `ws=None`, because the weight scale is already folded into the gradient
+                                  before it is quantized).
+
+    acc:  int32 [m, n]
+    xs:   fp32 per-row scale [m] or [m, 1]
+    ws:   fp32 [n] (per_channel=True) or [1] (per_channel=False), or None to skip the weight scale
+    bias: [n] or None
+    out:  [m, n] in the output dtype.
+    """
     m, n = acc.shape
     grid = (m, triton.cdiv(n, _EPILOGUE_BLOCK_N))
     _dequant_epilogue_kernel[grid](
         acc,
         xs,
+        # Unused pointers still need a valid tensor; the constexpr flags below remove the corresponding loads
         ws if ws is not None else acc,
         bias if bias is not None else acc,
         out,
@@ -98,29 +142,27 @@ def _dequant_epilogue(acc, xs, ws, per_channel, bias, out):
     )
 
 
-def _prep_scale(weight_scale, device) -> tuple[torch.Tensor, bool]:
-    """Returns the weight scale as fp32 and whether it is per-channel (vector) or a scalar."""
-    if not isinstance(weight_scale, torch.Tensor):
-        return torch.tensor([float(weight_scale)], device=device, dtype=torch.float32), False
-    if weight_scale.numel() == 1:
-        return weight_scale.reshape(1).to(torch.float32), False
-    return weight_scale.reshape(-1).to(torch.float32).contiguous(), True
-
-
-def _chunk_bounds(m: int, chunk: int) -> list[tuple[int, int]]:
+def _chunk_bounds(m: int, chunk: int) -> Iterator[tuple[int, int]]:
     """Row ranges of at most `chunk` rows; a tail of <= 16 rows is merged into the previous chunk (_int_mm needs > 16)."""
     if chunk <= 0 or m <= chunk:
-        return [(0, m)]
-    bounds = list(range(0, m, chunk)) + [m]
-    if m - bounds[-2] <= 16:
-        del bounds[-2]
-    return list(zip(bounds[:-1], bounds[1:]))
+        yield (0, m)
+        return
+
+    num_full_chunks, remainder = divmod(m, chunk)
+    if 0 < remainder <= 16:
+        num_full_chunks -= 1
+        remainder += chunk
+
+    yield from pairwise(i * chunk for i in range(num_full_chunks + 1))  # Include right bound (+1)
+
+    if remainder > 0:
+        yield (num_full_chunks * chunk, m)
 
 
 def int8_linear_cublas(
     x: torch.Tensor,
     weight: torch.Tensor,
-    weight_scale,
+    weight_scale: torch.Tensor,
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype = torch.bfloat16,
     convrot: bool = False,
@@ -128,11 +170,13 @@ def int8_linear_cublas(
 ) -> torch.Tensor:
     """INT8 linear layer using cuBLAS. Same signature and semantics as `convrot_int8_kernels.int8_linear`.
 
-    x: [..., K] activations, weight: [N, K] int8, weight_scale: per-channel [N] / [N, 1] or scalar (fp32).
+    x:              [..., K] activations
+    weight:         [N, K] int8
+    weight_scale:   per-channel [N] / [N, 1] or scalar [1].
     """
     orig_shape = x.shape
-    x2d = x.reshape(-1, orig_shape[-1])
-    m, k = x2d.shape
+    x_2d = x.reshape(-1, orig_shape[-1])
+    m, k = x_2d.shape
     n = weight.shape[0]
 
     # torch._int_mm needs rows > 16 and dimensions that are multiples of 8
@@ -141,13 +185,16 @@ def int8_linear_cublas(
 
     if convrot:
         h = K._build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
-        x2d = K._rotate_activation(x2d, h, convrot_groupsize)
-        x8, xs = K.triton_quantize_rowwise(x2d)  # int8 [m, k], fp32 [m, 1]
-        del x2d  # free the rotated copy before the GEMM; the caller's x is untouched
+        x_rotated = K._rotate_activation(x_2d, h, convrot_groupsize)
+        x_int8, x_scale = K.triton_quantize_rowwise(x_rotated)  # int8 [m, k], fp32 [m, 1]
+        del h, x_rotated  # free both transient tensors before the GEMM
     else:
-        x8, xs = K.triton_quantize_rowwise(x2d)
+        x_int8, x_scale = K.triton_quantize_rowwise(x_2d)
 
-    ws, per_channel = _prep_scale(weight_scale, x.device)
+    is_per_channel = weight_scale.numel() > 1
+    ws = weight_scale.to(torch.float32, memory_format=torch.contiguous_format)
+    ws = ws.flatten() if is_per_channel else ws.reshape(1)
+
     wt = weight.t()  # [k, n] column-major view of the row-major [n, k] weight, the layout cuBLAS wants
 
     if bias is not None:
@@ -155,71 +202,115 @@ def int8_linear_cublas(
 
     out = torch.empty((m, n), device=x.device, dtype=out_dtype)
     for r0, r1 in _chunk_bounds(m, CHUNK_ROWS):
-        acc = torch._int_mm(x8[r0:r1], wt)  # int32 [rows, n], freed after each chunk
-        _dequant_epilogue(acc, xs[r0:r1], ws, per_channel, bias, out[r0:r1])
-        del acc
+        acc = torch._int_mm(x_int8[r0:r1], wt)  # int32 [rows, n]
+        _dequant_epilogue(acc, x_scale[r0:r1], ws, is_per_channel, bias, out[r0:r1])
+        del acc  # free it explicitly so it's gone while the next _int_mm runs - don't wait for the assignment to free it
 
     return out.reshape(*orig_shape[:-1], n)
 
 
+# Why the backward has its own quantizer instead of reusing int8_linear_cublas:
+# The int8 input gradient needs (g * w_scale) quantized row-wise. Computing it as a separate torch op materializes
+# a full bf16 copy of the gradient (428 MiB for a 6144->16384 layer at batch size 3), and that copy stays alive
+# for the whole call because the caller holds the reference, so int8_linear_cublas cannot free it.
+# This kernel applies the per-column scale in fp32 registers while quantizing each row, so the copy never exists.
+# It also gave two other benefits:
+# - It saved about one elementwise pass, which showed up as a ~5% backward speedup.
+# - The scale product is no longer rounded to bf16 before quantization, which lowered the backward error slightly.
 @triton.jit
-def _quantize_rowwise_colscale_kernel(x_ptr, cs_ptr, y_ptr, s_ptr, n_cols, BLOCK: tl.constexpr):
+def _quantize_rowwise_colscale_kernel(
+    x_ptr,      # [m, n] values to quantize, any float dtype (e.g. the bf16 output gradient), contiguous
+    cs_ptr,     # fp32 [n] per-column scale, multiplied into x in fp32 before quantizing (the weight scale)
+    out_y_ptr,  # int8 [m, n] quantized output
+    out_s_ptr,  # fp32 [m] (or [m, 1]) per-row dequantization scale: max(|x * cs|) / 127 of each row
+    n_cols,     # n, the row length; the mask disables the padding lanes when BLOCK is larger than n
+    BLOCK: tl.constexpr,  # power of two >= n_cols; one program holds a whole row, as the row maximum is needed first
+):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
+    offsets = (row * n_cols) + cols
+
+    # Padding lanes (cols >= n_cols) load as 0 with the mask, so they don't affect the row maximum below
     mask = cols < n_cols
-    x = tl.load(x_ptr + row * n_cols + cols, mask=mask, other=0.0).to(tl.float32)
-    v = x * tl.load(cs_ptr + cols, mask=mask, other=0.0)
-    scale = tl.maximum(tl.max(tl.abs(v), axis=0) / 127.0, 1e-30)
-    q = tl.clamp(libdevice.rint(v / scale), -128.0, 127.0).to(tl.int32)
-    tl.store(y_ptr + row * n_cols + cols, q.to(tl.int8), mask=mask)
-    tl.store(s_ptr + row, scale)
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+
+    # Fold the per-column weight scale into the gradient in fp32 registers
+    xs = x * tl.load(cs_ptr + cols, mask=mask, other=0.0)
+
+    # The row's largest magnitude, scalar
+    absmax = tl.max(tl.abs(xs), axis=0)
+
+    # The stored dequantization scale (resolution): Real value of one int8 step for this row.
+    # Floor to avoid 0 / 0 = NaN for all-zero rows.
+    step = tl.maximum(absmax / 127.0, 1e-30)
+
+    # Scale the row, mapping 'absmax' to +/-127, then round to nearest int (exact halves round to even).
+    # Max rounding error: step/2
+    q = libdevice.rint(xs / step)
+
+    # Saturate to the int8 range. Normally a no-op: values are within +/-127, so -128 is never produced.
+    q = tl.clamp(q, -128.0, 127.0)
+
+    tl.store(out_y_ptr + offsets, q.to(tl.int8), mask=mask)
+    tl.store(out_s_ptr + row, step)
 
 
-def _quantize_rowwise_colscale(x2d: torch.Tensor, col_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Row-wise INT8 quantization of x2d * col_scale (scale applied in fp32, no intermediate copy).
+def _quantize_rowwise_colscale(x_2d: torch.Tensor, col_scale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Row-wise INT8 quantization of x_2d * col_scale, fused into one kernel.
+
+    The product is formed in fp32 registers and never written to memory, unlike `x_2d * col_scale` followed by a
+    separate quantizer, which allocates an extra full-size bf16 tensor. One program handles a whole row, because the
+    quantization scale needs the row's absolute maximum before any element can be quantized.
 
     Returns int8 [m, n] and fp32 [m, 1] row scales.
     """
-    m, n = x2d.shape
-    x2d = x2d.contiguous()
-    y = torch.empty((m, n), device=x2d.device, dtype=torch.int8)
-    s = torch.empty((m, 1), device=x2d.device, dtype=torch.float32)
+    m, n = x_2d.shape
+    x_2d = x_2d.contiguous()
+    y = torch.empty((m, n), device=x_2d.device, dtype=torch.int8)
+    s = torch.empty((m, 1), device=x_2d.device, dtype=torch.float32)
     block = max(triton.next_power_of_2(n), 128)
-    _quantize_rowwise_colscale_kernel[(m,)](x2d, col_scale, y, s, n, BLOCK=block, num_warps=8 if block >= 8192 else 4)
+    _quantize_rowwise_colscale_kernel[(m,)](x_2d, col_scale, y, s, n, BLOCK=block, num_warps=8 if block >= 8192 else 4)
     return y, s
 
 
 def int8_grad_input_rot_cublas(
-    g2d: torch.Tensor,
-    wq: torch.Tensor,
-    w_scale: torch.Tensor,
+    g_2d: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
-    groupsize: int = 256,
 ) -> torch.Tensor:
-    """Input gradient of a ConvRot INT8 linear layer, in the rotated basis: (g * w_scale) @ wq.
+    """Input gradient of a ConvRot INT8 linear layer, in the rotated basis: (g * weight_scale) @ weight.
 
-    g2d: [m, n] output gradient, wq: [n, k] int8 weight, w_scale: [n, 1] or [n] fp32.
+    g_2d:           [m, n] output gradient
+    weight:         [n, k] int8
+    weight_scale:   per-channel [n, 1] or [n] fp32
+
     Returns [m, k]; the caller rotates it back to the original basis.
     """
-    m, n = g2d.shape
-    k = wq.shape[1]
-    cs = w_scale.reshape(-1).to(torch.float32).contiguous()
+    m, n = g_2d.shape
+    k = weight.shape[1]
+    col_scale = weight_scale.reshape(-1).to(torch.float32).contiguous()
 
+    # torch._int_mm wants the weights as a column-major [n, k] operand:
+    # Make a row-major [k, n] copy to make it contiguous over n, then view it transposed below.
+    # Passing 'weight' directly is accepted and gives the same result, but is 1.5-2.5x slower in the backward
+    # (RTX 4090, 4352 tokens), so the copy (1 byte/param, transient, freed on return) is worth it.
+    w_kn = weight.t().contiguous()
+
+    # torch._int_mm needs rows > 16 and dimensions that are multiples of 8
     if m <= 16 or n % 8 != 0 or k % 8 != 0:
-        one = torch.ones(1, device=g2d.device, dtype=torch.float32)
-        g_scaled = g2d * cs.reshape(1, -1).to(g2d.dtype)
-        return K.int8_linear(g_scaled, wq.t().contiguous(), one, None, out_dtype, False, groupsize)
+        one = torch.ones(1, device=g_2d.device, dtype=torch.float32)
+        g_scaled = g_2d * col_scale.reshape(1, -1).to(g_2d.dtype)
+        # convrot defaults to False: g is not rotated; the result is in the rotated K basis, the caller rotates it back
+        return K.int8_linear(g_scaled, w_kn, one, None, out_dtype)
 
-    g8, gs = _quantize_rowwise_colscale(g2d, cs)
+    w_col_major = w_kn.t()  # [n, k] view of the [k, n] copy: transposing twice is intended
+    g_int8, gs = _quantize_rowwise_colscale(g_2d, col_scale)
 
-    # The GEMM needs wq as a column-major [n, k] operand, i.e. a row-major [k, n] copy viewed transposed.
-    # Transient (1 byte/param), freed after the GEMMs.
-    wt = wq.t().contiguous()
-
-    out = torch.empty((m, k), device=g2d.device, dtype=out_dtype)
+    out = torch.empty((m, k), device=g_2d.device, dtype=out_dtype)
     for r0, r1 in _chunk_bounds(m, CHUNK_ROWS):
-        acc = torch._int_mm(g8[r0:r1], wt.t())  # int32 [rows, k], freed after each chunk (the double-transpose is intended)
+        acc = torch._int_mm(g_int8[r0:r1], w_col_major)  # int32 [rows, k]
         _dequant_epilogue(acc, gs[r0:r1], None, False, None, out[r0:r1])
-        del acc
+        del acc  # free it explicitly so it's gone while the next _int_mm runs - don't wait for the assignment to free it
 
     return out
