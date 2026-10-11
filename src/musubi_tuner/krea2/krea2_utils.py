@@ -60,6 +60,8 @@ def load_krea2_dit(
     lora_multipliers: Optional[list] = None,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
+    convrot_int8_backend: str = "triton",
+    convrot_int8_chunk_size: int = 0,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -120,12 +122,21 @@ def load_krea2_dit(
         if fp8_scaled:
             apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)
         elif convrot_int8:
-            apply_convrot_int8_monkey_patch(dit, sd, bwd_mode=convrot_int8_bwd, groupsize_map=quantizer.module_groupsizes)
+            apply_convrot_int8_monkey_patch(
+                model=dit,
+                optimized_state_dict=sd,
+                bwd_mode=convrot_int8_bwd,
+                groupsize_map=quantizer.module_groupsizes,
+                backend=convrot_int8_backend,
+                chunk_size=convrot_int8_chunk_size,
+            )
+
             # int8 tensors cannot be wrapped as Parameters with requires_grad=True (only
             # floating dtypes can require grad), and load_state_dict(assign=True) re-wraps
             # incoming tensors with the meta params' requires_grad (default True). The base
             # is frozen right after load anyway, so drop requires_grad first.
             dit.requires_grad_(False)
+
         if loading_device.type != "cpu":
             for key in sd.keys():
                 sd[key] = sd[key].to(loading_device)

@@ -54,31 +54,6 @@ CONVROT_GROUPSIZE = 256
 COMFY_QUANT_FORMAT_INT8 = "int8_tensorwise"
 
 
-# Replace int8 convrot kernel with cuBLAS version, if enabled (almost twice as fast on RTX 3090 vs. triton
-# and avoids the large autotune overhead on first epoch for each different caption length).
-if HAS_TRITON and os.environ.get("CONVROT_CUBLAS") == "1":
-    logger.info("Using INT8 convrot cuBLAS")
-    from musubi_tuner.modules.convrot_int8_cublas import (
-        int8_linear_cublas as int8_linear,  # Shadows the import above
-        int8_grad_input_rot_cublas as _int8_grad_input_rot
-    )
-
-else:
-    def _int8_grad_input_rot(
-        g_2d: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out_dtype: torch.dtype,
-    ) -> torch.Tensor:
-        # fold per-channel weight scale into g, then reuse the fused Triton GEMM
-        # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
-        # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
-        g_scaled = g_2d * weight_scale.reshape(1, -1).to(g_2d.dtype)
-        one = torch.ones(1, device=g_2d.device, dtype=torch.float32)
-        gx_rot = int8_linear(g_scaled, weight.t().contiguous(), one, None, out_dtype)
-        return gx_rot
-
-
 def _is_power_of_4(value: int) -> bool:
     return value >= 4 and (value & (value - 1)) == 0 and math.log(value, 4) % 1 == 0
 
@@ -340,10 +315,22 @@ class ConvRotInt8Quantizer:
         return state_dict
 
 
+class CublasCtx:
+    def __init__(self, chunk_size: int):
+        chunk_msg = f"with chunk size {chunk_size}" if chunk_size > 0 else "without chunking"
+        logger.info(f"Using cuBLASLt IMMA kernel for ConvRot INT8 {chunk_msg}")
+        self.chunk_size = chunk_size
+
+        import musubi_tuner.modules.convrot_int8_cublas as cublas
+        self.supports_shape = cublas.supports_shape
+        self.int8_linear = cublas.int8_linear_cublas
+        self.int8_grad_input_rot = cublas.int8_grad_input_rot_cublas
+
+
 class ConvRotInt8LinearFn(torch.autograd.Function):
     @staticmethod
     @torch.amp.custom_fwd(device_type="cuda")
-    def forward(ctx, x, wq, w_scale, bias, groupsize, bwd_mode):
+    def forward(ctx, x, wq, w_scale, bias, groupsize, bwd_mode, cublas: CublasCtx | None):
         # x: [..., K] bf16/fp16, wq: [N, K] int8 (rotated basis), w_scale: [N, 1] fp32
         # F.linear casts its inputs to the autocast dtype under autocast; the fused kernel
         # bypasses F.linear, so replicate that here. In K2 the fp32 modulation adds promote
@@ -354,7 +341,10 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
             if bias is not None:
                 bias = bias.to(cast_dtype)
         if HAS_TRITON and x.is_cuda:
-            out = int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize)
+            if cublas and cublas.supports_shape(x, wq):
+                out = cublas.int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize, cublas.chunk_size)
+            else:
+                out = int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize)
         else:
             # eager fallback: rotation + transient dequantized matmul, no activation quantization
             h = _build_hadamard(groupsize, device=x.device, dtype=x.dtype)
@@ -366,6 +356,7 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
         ctx.save_for_backward(wq, w_scale)
         ctx.groupsize = groupsize
         ctx.bwd_mode = bwd_mode
+        ctx.cublas = cublas
         ctx.bias_needs_grad = bias is not None and bias.requires_grad
         return out
 
@@ -382,7 +373,18 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
             if ctx.bwd_mode == "int8":
                 if not g2d.is_cuda:
                     raise RuntimeError("ConvRot INT8 backward mode 'int8' requires CUDA tensors")
-                gx_rot = _int8_grad_input_rot(g2d, wq, w_scale, grad_out.dtype)
+
+                cublas: CublasCtx | None = ctx.cublas
+                if cublas and cublas.supports_shape(g2d, wq):
+                    gx_rot = cublas.int8_grad_input_rot(g2d, wq, w_scale, grad_out.dtype, cublas.chunk_size)
+                else:
+                    # fold per-channel weight scale into g, then reuse the fused Triton GEMM
+                    # (row-wise quant of g + int8 GEMM + dequant epilogue in one pipeline).
+                    # transient int8 transpose of wq: [K, N], ~1 byte/param, freed after mm
+                    g_scaled = g2d * w_scale.reshape(1, -1).to(g2d.dtype)
+                    one = torch.ones(1, device=g2d.device, dtype=torch.float32)
+                    gx_rot = int8_linear(g_scaled, wq.t().contiguous(), one, None, grad_out.dtype)
+
             else:
                 # transient bf16 dequant of the rotated weight (stays in rotated basis)
                 w_rot = wq.to(grad_out.dtype) * w_scale.reshape(-1, 1).to(grad_out.dtype)
@@ -391,18 +393,36 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
             grad_x = _rotate_activation(gx_rot, h, gs).reshape(*grad_out.shape[:-1], wq.shape[1])
 
         grad_bias = g2d.sum(dim=0) if ctx.bias_needs_grad else None
-        return grad_x, None, None, grad_bias, None, None
+        return grad_x, None, None, grad_bias, None, None, None
 
 
 def convrot_int8_linear_forward_patch(self: nn.Linear, x):
-    return ConvRotInt8LinearFn.apply(x, self.weight, self.scale_weight, self.bias, self._convrot_groupsize, self._convrot_bwd_mode)
+    return ConvRotInt8LinearFn.apply(
+        x, self.weight, self.scale_weight, self.bias,
+        self._convrot_groupsize, self._convrot_bwd_mode, self._convrot_cublas
+    )
 
 
-def _validate_convrot_bwd_mode(bwd_mode: str) -> None:
+def _validate_convrot_args(bwd_mode: str, backend: str, chunk_size: int) -> None:
+    # bwd mode
     if bwd_mode not in ("bf16", "int8"):
         raise ValueError(f"Unsupported ConvRot INT8 backward mode: {bwd_mode}")
     if bwd_mode == "int8" and not HAS_TRITON:
         raise ValueError("ConvRot INT8 backward mode 'int8' requires triton. Install triton (triton-windows on Windows).")
+
+    # backend
+    if backend not in ("triton", "cublas"):
+        raise ValueError(f"Unsupported ConvRot INT8 backend: {backend}")
+    if backend == "cublas" and not HAS_TRITON:
+        raise ValueError("ConvRot INT8 backend 'cublas' requires triton. Install triton (triton-windows on Windows).")
+
+    # chunk size
+    if chunk_size != 0:
+        if chunk_size <= 16:
+            raise ValueError(f"Invalid ConvRot INT8 chunk size: {chunk_size} (must be 0 or greater than 16)")
+        if backend != "cublas":
+            logger.warning("Ignoring ConvRot INT8 chunk size setting: It is only applicable with the ConvRot INT8 cuBLAS backend.")
+
     if not HAS_TRITON:
         logger.warning(
             "triton is not available: ConvRot INT8 falls back to transient dequantization in forward."
@@ -411,9 +431,10 @@ def _validate_convrot_bwd_mode(bwd_mode: str) -> None:
         )
 
 
-def _patch_convrot_int8_linear(module: nn.Linear, groupsize: int, bwd_mode: str) -> None:
+def _patch_convrot_int8_linear(module: nn.Linear, groupsize: int, bwd_mode: str, cublas: CublasCtx | None) -> None:
     module._convrot_groupsize = groupsize
     module._convrot_bwd_mode = bwd_mode
+    module._convrot_cublas = cublas
     module.forward = convrot_int8_linear_forward_patch.__get__(module, type(module))
 
 
@@ -423,6 +444,8 @@ def apply_convrot_int8_monkey_patch(
     bwd_mode: str = "bf16",
     groupsize: int = CONVROT_GROUPSIZE,
     groupsize_map: Optional[Dict[str, int]] = None,
+    backend: str = "triton",
+    chunk_size: int = 0,
 ):
     """
     Apply monkey patching to a model using a ConvRot INT8 optimized state dict.
@@ -436,11 +459,15 @@ def apply_convrot_int8_monkey_patch(
         groupsize_map (Optional[Dict[str, int]]): per-module group sizes
             (``ConvRotInt8Quantizer.module_groupsizes``); needed when a checkpoint mixes
             group sizes (e.g. H3: 256 for attn/mlp, 64 for adaln_proj)
+        backend (str): "triton" or "cublas" for selecting the GEMM
+        chunk_size (int): number of rows per chunk fed into torch._int_mm with the
+            "cublas" backend (caps transient VRAM usage of the int32 accumulator).
 
     Returns:
         nn.Module: The patched model (same instance, modified in-place)
     """
-    _validate_convrot_bwd_mode(bwd_mode)
+    _validate_convrot_args(bwd_mode, backend, chunk_size)
+    cublas = CublasCtx(chunk_size) if backend == "cublas" else None
 
     scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
 
@@ -457,7 +484,7 @@ def apply_convrot_int8_monkey_patch(
             # register the scale_weight as a buffer to load the state_dict
             module.register_buffer("scale_weight", torch.ones(scale_shape_info[name], dtype=torch.float32))
             module_groupsize = groupsize_map.get(name, groupsize) if groupsize_map is not None else groupsize
-            _patch_convrot_int8_linear(module, module_groupsize, bwd_mode)
+            _patch_convrot_int8_linear(module, module_groupsize, bwd_mode, cublas)
 
             patched_paths.add(name)
 

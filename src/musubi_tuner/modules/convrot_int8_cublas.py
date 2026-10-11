@@ -32,7 +32,6 @@ Shapes `torch._int_mm` cannot handle (rows <= 16, dimensions not a multiple of 8
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from itertools import pairwise
 
@@ -43,9 +42,19 @@ from triton.language.extra import libdevice
 
 from musubi_tuner.modules import convrot_int8_kernels as K
 
-CHUNK_ROWS = int(os.environ.get("CONVROT_CUBLAS_CHUNK", "0"))
-
 _EPILOGUE_BLOCK_N = 1024
+
+
+def supports_shape(activation: torch.Tensor, weight: torch.Tensor) -> bool:
+    """True if torch._int_mm can run `activation @ weight` (forward) or `activation @ weight.T`-style contractions
+    with this weight (backward): needs more than 16 rows, and both weight dimensions multiples of 8.
+
+    activation: [..., K] (forward, x), or [m, N] (backward, g2d)
+    weight:     [N, K] int8.
+    """
+    n, k = weight.shape
+    rows = activation.numel() // activation.shape[-1]
+    return rows > 16 and n % 8 == 0 and k % 8 == 0
 
 
 @triton.jit
@@ -167,6 +176,7 @@ def int8_linear_cublas(
     out_dtype: torch.dtype = torch.bfloat16,
     convrot: bool = False,
     convrot_groupsize: int = 256,
+    chunk_size: int = 0,
 ) -> torch.Tensor:
     """INT8 linear layer using cuBLAS. Same signature and semantics as `convrot_int8_kernels.int8_linear`.
 
@@ -179,29 +189,26 @@ def int8_linear_cublas(
     m, k = x_2d.shape
     n = weight.shape[0]
 
-    # torch._int_mm needs rows > 16 and dimensions that are multiples of 8
-    if m <= 16 or k % 8 != 0 or n % 8 != 0:
-        return K.int8_linear(x, weight, weight_scale, bias, out_dtype, convrot, convrot_groupsize)
+    if weight_scale.numel() not in (1, n):
+        raise ValueError(f"weight_scale must be scalar or have {n} elements, got {tuple(weight_scale.shape)}")
 
     if convrot:
         h = K._build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
         x_rotated = K._rotate_activation(x_2d, h, convrot_groupsize)
         x_int8, x_scale = K.triton_quantize_rowwise(x_rotated)  # int8 [m, k], fp32 [m, 1]
-        del h, x_rotated  # free both transient tensors before the GEMM
+        del x_rotated  # free the transient tensor before the GEMM, 'h' is cached
     else:
         x_int8, x_scale = K.triton_quantize_rowwise(x_2d)
 
     is_per_channel = weight_scale.numel() > 1
-    ws = weight_scale.to(torch.float32, memory_format=torch.contiguous_format)
-    ws = ws.flatten() if is_per_channel else ws.reshape(1)
-
+    ws = weight_scale.reshape(-1).to(torch.float32).contiguous()
     wt = weight.t()  # [k, n] column-major view of the row-major [n, k] weight, the layout cuBLAS wants
 
     if bias is not None:
         bias = bias.contiguous()
 
     out = torch.empty((m, n), device=x.device, dtype=out_dtype)
-    for r0, r1 in _chunk_bounds(m, CHUNK_ROWS):
+    for r0, r1 in _chunk_bounds(m, chunk_size):
         acc = torch._int_mm(x_int8[r0:r1], wt)  # int32 [rows, n]
         _dequant_epilogue(acc, x_scale[r0:r1], ws, is_per_channel, bias, out[r0:r1])
         del acc  # free it explicitly so it's gone while the next _int_mm runs - don't wait for the assignment to free it
@@ -210,9 +217,8 @@ def int8_linear_cublas(
 
 
 # Why the backward has its own quantizer instead of reusing int8_linear_cublas:
-# The int8 input gradient needs (g * w_scale) quantized row-wise. Computing it as a separate torch op materializes
-# a full bf16 copy of the gradient (428 MiB for a 6144->16384 layer at batch size 3), and that copy stays alive
-# for the whole call because the caller holds the reference, so int8_linear_cublas cannot free it.
+# The int8 input gradient needs (g * w_scale) quantized row-wise. Computing it as a separate torch op materializes a full bf16 copy
+# of the gradient which stays alive for the whole call because the caller holds the reference, so int8_linear_cublas cannot free it.
 # This kernel applies the per-column scale in fp32 registers while quantizing each row, so the copy never exists.
 # It also gave two other benefits:
 # - It saved about one elementwise pass, which showed up as a ~5% backward speedup.
@@ -269,7 +275,8 @@ def _quantize_rowwise_colscale(x_2d: torch.Tensor, col_scale: torch.Tensor) -> t
     y = torch.empty((m, n), device=x_2d.device, dtype=torch.int8)
     s = torch.empty((m, 1), device=x_2d.device, dtype=torch.float32)
     block = max(triton.next_power_of_2(n), 128)
-    _quantize_rowwise_colscale_kernel[(m,)](x_2d, col_scale, y, s, n, BLOCK=block, num_warps=8 if block >= 8192 else 4)
+    warps = 8 if block >= 8192 else 4
+    _quantize_rowwise_colscale_kernel[(m,)](x_2d, col_scale, y, s, n, BLOCK=block, num_warps=warps)
     return y, s
 
 
@@ -278,6 +285,7 @@ def int8_grad_input_rot_cublas(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     out_dtype: torch.dtype,
+    chunk_size: int = 0,
 ) -> torch.Tensor:
     """Input gradient of a ConvRot INT8 linear layer, in the rotated basis: (g * weight_scale) @ weight.
 
@@ -289,27 +297,22 @@ def int8_grad_input_rot_cublas(
     """
     m, n = g_2d.shape
     k = weight.shape[1]
+
     col_scale = weight_scale.reshape(-1).to(torch.float32).contiguous()
+    if col_scale.numel() != n:
+        raise ValueError(f"weight_scale must have {n} elements, got {tuple(weight_scale.shape)}")
 
     # torch._int_mm wants the weights as a column-major [n, k] operand:
-    # Make a row-major [k, n] copy to make it contiguous over n, then view it transposed below.
+    # Make a row-major [k, n] copy to make it contiguous over n, then view it transposed.
     # Passing 'weight' directly is accepted and gives the same result, but is 1.5-2.5x slower in the backward
     # (RTX 4090, 4352 tokens), so the copy (1 byte/param, transient, freed on return) is worth it.
-    w_kn = weight.t().contiguous()
+    wt = weight.t().contiguous().t()  # [n, k] view of the [k, n] copy: transposing twice is intended
 
-    # torch._int_mm needs rows > 16 and dimensions that are multiples of 8
-    if m <= 16 or n % 8 != 0 or k % 8 != 0:
-        one = torch.ones(1, device=g_2d.device, dtype=torch.float32)
-        g_scaled = g_2d * col_scale.reshape(1, -1).to(g_2d.dtype)
-        # convrot defaults to False: g is not rotated; the result is in the rotated K basis, the caller rotates it back
-        return K.int8_linear(g_scaled, w_kn, one, None, out_dtype)
-
-    w_col_major = w_kn.t()  # [n, k] view of the [k, n] copy: transposing twice is intended
     g_int8, gs = _quantize_rowwise_colscale(g_2d, col_scale)
 
     out = torch.empty((m, k), device=g_2d.device, dtype=out_dtype)
-    for r0, r1 in _chunk_bounds(m, CHUNK_ROWS):
-        acc = torch._int_mm(g_int8[r0:r1], w_col_major)  # int32 [rows, k]
+    for r0, r1 in _chunk_bounds(m, chunk_size):
+        acc = torch._int_mm(g_int8[r0:r1], wt)  # int32 [rows, k]
         _dequant_epilogue(acc, gs[r0:r1], None, False, None, out[r0:r1])
         del acc  # free it explicitly so it's gone while the next _int_mm runs - don't wait for the assignment to free it
 

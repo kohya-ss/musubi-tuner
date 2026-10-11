@@ -448,6 +448,8 @@ class Krea2NetworkTrainer(NetworkTrainer):
             split_attn=split_attn,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
+            convrot_int8_backend=args.convrot_int8_backend,
+            convrot_int8_chunk_size=args.convrot_int8_chunk_size,
         )
         return model
 
@@ -559,6 +561,24 @@ def krea2_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPars
         choices=["bf16", "int8"],
         help="backward mode for --convrot_int8. bf16 (default): transient dequantized matmul, most accurate. "
         "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton).",
+    )
+    parser.add_argument(
+        "--convrot_int8_backend",
+        type=str,
+        default="triton",
+        choices=["triton", "cublas"],
+        help="backend for --convrot_int8 forward (and backward with --convrot_int8_bwd int8). triton (default): fused "
+        "int8 GEMM. cublas: cuBLASLt IMMA kernels via torch._int_mm; up to 2x faster linear layers on RTX 30/40 series GPUs and "
+        "avoids autotune warmup for each new caption length during the first epoch. Requires triton for quantization and a few"
+        "hundred MB additional transient VRAM depending on batch size and token count (see --convrot_int8_chunk_size).",
+    )
+    parser.add_argument(
+        "--convrot_int8_chunk_size",
+        type=int,
+        default=0,
+        help="cublas backend only: Maximum number of rows (batch size x tokens) processed per cuBLASLt call, which affects the "
+        "size of the resulting int32 accumulator. Set to 8192/4096/2048 to cap peak VRAM usage. The effect on training speed may "
+        "be negative or positive, depending on the hardware. 0 (default) disables chunking. Must be 0 or greater than 16.",
     )
     parser.add_argument(
         "--text_encoder",
