@@ -322,6 +322,10 @@ class CublasCtx:
         self.chunk_size = chunk_size
 
         import musubi_tuner.modules.convrot_int8_cublas as cublas
+        # Since torch._int_mm is a private function that could change,
+        # verify its availability and accuracy with the current device.
+        cublas.ensure_available()  # Raises on errors
+
         self.supports_shape = cublas.supports_shape
         self.int8_linear = cublas.int8_linear_cublas
         self.int8_grad_input_rot = cublas.int8_grad_input_rot_cublas

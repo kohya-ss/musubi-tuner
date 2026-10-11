@@ -27,12 +27,14 @@ processed at once to bound that buffer (results are identical, rows are independ
 be set with the environment variable CONVROT_CUBLAS_CHUNK or at runtime.
 
 Requires Triton (for the quantization and epilogue kernels) and a GPU supported by `torch._int_mm` (sm_75+).
-Shapes `torch._int_mm` cannot handle (rows <= 16, dimensions not a multiple of 8) fall back to the Triton path.
+Shapes `torch._int_mm` cannot handle (rows <= 16, dimensions not a multiple of 8) must fall back to the Triton path.
+The functions don't check the shape; a caller must check with `supports_shape()` before calling the functions.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from functools import lru_cache
 from itertools import pairwise
 
 import torch
@@ -43,6 +45,74 @@ from triton.language.extra import libdevice
 from musubi_tuner.modules import convrot_int8_kernels as K
 
 _EPILOGUE_BLOCK_N = 1024
+
+
+def ensure_available(device: torch.device | None = None):
+    """Raises RuntimeError unless the cuBLAS INT8 backend can run on `device` (default: the current CUDA device).
+
+    The backend is built on `torch._int_mm`, PyTorch's INT8 matrix multiplication (int8 x int8 -> int32, run on
+    NVIDIA tensor cores through cuBLASLt IMMA kernels). It is a private API: the leading underscore means PyTorch
+    gives no stability guarantee, so its signature, shape constraints or availability can change or disappear
+    between releases, and it may be missing or broken for some GPUs, CUDA builds or ROCm.
+
+    Rather than comparing version numbers, this runs a tiny GEMM once per device in both layouts used here and checks
+    the result exactly. That fails early with a clear message (use the Triton backend instead) and avoids a crash
+    or wrong results deep into training. The result is cached per device.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("ConvRot INT8 cuBLAS backend needs a CUDA GPU")
+
+    if device is not None and device.type != "cuda":
+        raise RuntimeError(f"ConvRot INT8 cuBLAS backend needs a CUDA device, got {device}")
+    if device is not None and device.index is not None:
+        dev_index = device.index
+        if dev_index >= torch.cuda.device_count():
+            raise RuntimeError(f"CUDA device {device} does not exist ({torch.cuda.device_count()} available)")
+    else:
+        dev_index = torch.cuda.current_device()
+
+    reason = _probe_int_mm(dev_index)
+    if reason is not None:
+        raise RuntimeError(f"{reason}.\nUse '--convrot_int8_backend triton' instead or try another torch version.")
+
+
+@lru_cache(maxsize=None)
+def _probe_int_mm(dev_index: int) -> str | None:
+    """Runs torch._int_mm once on a tiny problem in both production layouts.
+    Returns None if it works on this device, otherwise a human-readable reason.
+    Results are cached per device index.
+    """
+    if not hasattr(torch, "_int_mm"):
+        return f"torch {torch.__version__} has no torch._int_mm"
+
+    dev = torch.device("cuda", dev_index)
+    dev_name = torch.cuda.get_device_name(dev)
+
+    # m=17 is the minimum supports_shape() allows
+    # n and k are multiples of 8; n != k so a transposition mistake shows up as a wrong shape
+    m, n, k = 17, 32, 48
+    gen = torch.Generator().manual_seed(0)
+    act    = torch.randint(-127, 128, (m, k), dtype=torch.int8, generator=gen)  # forward input  [m, k]
+    grad   = torch.randint(-127, 128, (m, n), dtype=torch.int8, generator=gen)  # backward input [m, n]
+    weight = torch.randint(-127, 128, (n, k), dtype=torch.int8, generator=gen)  # weight [n, k]
+
+    try:
+        w = weight.to(dev)
+        fwd = torch._int_mm(act.to(dev), w.t())  # forward layout: transposed view of the row-major weight
+        bwd = torch._int_mm(grad.to(dev), w.t().contiguous().t())  # backward layout: [k, n] copy viewed as [n, k]
+        torch.cuda.synchronize(dev)
+    except Exception as e:  # unsupported GPU / CUDA build / ROCm: the exception type varies
+        return f"torch._int_mm failed on {dev_name}:\n{type(e).__name__}: {e}"
+
+    # Integer GEMM is exact: compare bit for bit against an int64 matmul on the CPU (|sum| < 2**31, no overflow).
+    for name, result, a, b in (("forward", fwd, act, weight.t()), ("backward", bwd, grad, weight)):
+        expected = a.to(torch.int64) @ b.to(torch.int64)
+        if result.dtype != torch.int32 or result.shape != expected.shape:
+            return f"torch._int_mm {name} returned {result.dtype} {tuple(result.shape)} on {dev_name}, " \
+                   f"expected int32 {tuple(expected.shape)}"
+        if not torch.equal(result.cpu(), expected.to(torch.int32)):
+            return f"torch._int_mm {name} returned unexpected values on {dev_name}"
+    return None
 
 
 def supports_shape(activation: torch.Tensor, weight: torch.Tensor) -> bool:
