@@ -19,7 +19,7 @@ import math
 import os
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Set, Union
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,7 @@ from tqdm import tqdm
 from musubi_tuner.modules.comfy_quant_utils import (
     COMFY_QUANT_SUFFIX,
     COMFY_WEIGHT_SCALE_SUFFIX,
+    classify_comfy_quant_spec,
     decode_comfy_quant_spec,
 )
 from musubi_tuner.modules.convrot_int8_kernels import (
@@ -159,6 +160,7 @@ class ConvRotInt8Quantizer:
         target_layer_keys: Optional[List[str]] = None,
         exclude_layer_keys: Optional[List[str]] = None,
         allowed_groupsizes: Sequence[int] = (CONVROT_GROUPSIZE,),
+        foreign_formats: Optional[Set[str]] = None,
     ):
         for groupsize in allowed_groupsizes:
             if not _is_power_of_4(groupsize):
@@ -167,6 +169,8 @@ class ConvRotInt8Quantizer:
         self.exclude_layer_keys = exclude_layer_keys
         self.allowed_groupsizes = tuple(allowed_groupsizes)
         self.module_groupsizes: Dict[str, int] = {}
+        self.foreign_formats = foreign_formats or set()
+        self._foreign_module_paths: Set[str] = set()
 
     def is_target_key(self, key: str) -> bool:
         is_target = (self.target_layer_keys is None or any(pattern in key for pattern in self.target_layer_keys)) and key.endswith(
@@ -206,6 +210,10 @@ class ConvRotInt8Quantizer:
                 for key in keys:
                     if key.endswith(COMFY_QUANT_SUFFIX):
                         module_path = key[: -len(COMFY_QUANT_SUFFIX)]
+                        spec_format = classify_comfy_quant_spec(decode_comfy_quant_spec(key, f.get_tensor(key)))
+                        if spec_format in self.foreign_formats:
+                            self._foreign_module_paths.add(module_path)
+                            continue
                         spec = parse_comfy_quant_spec(key, f.get_tensor(key))
                         prequantized_groupsizes[module_path] = spec["convrot_groupsize"]
                 if prequantized_groupsizes and weight_hook is not None:
@@ -223,6 +231,14 @@ class ConvRotInt8Quantizer:
                     value = f.get_tensor(key)
                     original_device = value.device  # usually cpu
                     passthrough_device = calc_device if (calc_device is not None and move_to_device) else original_device
+
+                    # Any tensor belonging to a module owned by a foreign quantizer format is skipped
+                    # outright, regardless of suffix (e.g. NVFP4's .weight_scale_2, .pre_quant_scale).
+                    # This must run before the specific suffix checks below so foreign tensors under
+                    # suffixes ConvRot doesn't otherwise recognize don't fall through to passthrough.
+                    module_path_generic = key.rsplit(".", 1)[0] if "." in key else key
+                    if module_path_generic in self._foreign_module_paths:
+                        continue
 
                     if key.endswith(COMFY_WEIGHT_SCALE_SUFFIX):
                         module_path = key[: -len(COMFY_WEIGHT_SCALE_SUFFIX)]
@@ -422,14 +438,15 @@ def apply_convrot_int8_monkey_patch(
     """
     _validate_convrot_bwd_mode(bwd_mode)
 
-    scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
+    if groupsize_map is not None:
+        patched_module_paths = set(groupsize_map)
+    else:
+        scale_keys = [k for k in optimized_state_dict.keys() if k.endswith(".scale_weight")]
+        patched_module_paths = {scale_key.rsplit(".scale_weight", 1)[0] for scale_key in scale_keys}
 
-    patched_module_paths = set()
-    scale_shape_info = {}
-    for scale_key in scale_keys:
-        module_path = scale_key.rsplit(".scale_weight", 1)[0]
-        patched_module_paths.add(module_path)
-        scale_shape_info[module_path] = optimized_state_dict[scale_key].shape
+    scale_shape_info = {
+        module_path: optimized_state_dict[f"{module_path}.scale_weight"].shape for module_path in patched_module_paths
+    }
 
     patched_paths = set()
     for name, module in model.named_modules():

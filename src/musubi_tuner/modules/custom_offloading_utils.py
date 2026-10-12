@@ -1,10 +1,10 @@
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 import gc
 import time
-from typing import Optional
+from typing import Callable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
@@ -80,6 +80,23 @@ def default_swap_tensor_selector(block: nn.Module) -> list[tuple[nn.Module, str]
     return jobs
 
 
+def _format_block_ranges(indices) -> str:
+    """Compact 'a-b, c, e-f' rendering of a sorted, possibly-noncontiguous block-index list."""
+    indices = sorted(indices)
+    if not indices:
+        return "(none)"
+    ranges = []
+    start = prev = indices[0]
+    for idx in indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+        start = prev = idx
+    ranges.append(f"{start}-{prev}" if start != prev else f"{start}")
+    return ", ".join(ranges)
+
+
 def attach_forward_streaming_hooks(offloader, blocks: list[nn.Module]) -> list:
     """Drive a block-swap offloader from forward hooks.
 
@@ -124,6 +141,12 @@ class BlockSwapConfig:
     h2d_only: bool = False  # frozen-base (LoRA / LoHa / LoKr) only: H2D-only streaming, no device->host copy
     ring_size: int = 2  # (h2d_only) number of GPU ring buffers for streamed blocks; 2 = double buffering
     debug: bool = False
+    # (h2d_only) overrides default_swap_tensor_selector -- required whenever a quantization scheme hangs
+    # a *second full-size* tensor off the module (e.g. NVFP4's columnwise backward copy): the default
+    # selector only tracks `.weight`, so any such extra buffer is dragged onto the device once (by the
+    # per-block `.to(device)` call the offloader itself issues) and never swapped back, silently pinning
+    # it resident for every block instead of only the streaming ring's worth.
+    swap_tensor_selector: Optional[Callable[[nn.Module], List[Tuple[nn.Module, str]]]] = None
 
     @classmethod
     def from_args(cls, args, device: torch.device, supports_backward: bool) -> "BlockSwapConfig":
@@ -176,6 +199,7 @@ def create_offloader(block_type: str, blocks: list[nn.Module], num_blocks: int, 
             ring_size=config.ring_size,
             use_pinned_memory=config.use_pinned_memory,
             debug=config.debug,
+            swap_tensor_selector=config.swap_tensor_selector,
         )
     return ModelOffloader(
         block_type,
@@ -828,8 +852,31 @@ class LoRAStreamOffloader:
 
         assert device.type == "cuda", "LoRAStreamOffloader currently supports CUDA only"
 
-        # ---- streaming placement: S evenly spaced block indices (midpoint formula -> distinct for S <= N) ----
-        stream_idx = sorted({((2 * i + 1) * num_blocks) // (2 * blocks_to_swap) for i in range(blocks_to_swap)})
+        self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
+
+        # ---- streaming eligibility: only blocks whose swap tensors share one (name, dtype, shape)
+        # signature can share the ring/master buffers below. A checkpoint that leaves some blocks
+        # structurally different (e.g. unquantized blocks alongside quantized ones) must exclude
+        # those from streaming -- a plain tensor shape/dtype comparison, no scheme-specific knowledge.
+        def _signature(block_idx: int) -> tuple:
+            return tuple((name, getattr(m, name).dtype, tuple(getattr(m, name).shape)) for m, name, _ in self._jobs(block_idx))
+
+        signatures = {b: _signature(b) for b in range(num_blocks)}
+        majority_signature = Counter(signatures.values()).most_common(1)[0][0]
+        eligible = sorted(b for b in range(num_blocks) if signatures[b] == majority_signature)
+        if blocks_to_swap > len(eligible):
+            ineligible = sorted(b for b in range(num_blocks) if signatures[b] != majority_signature)
+            raise ValueError(
+                f"Requested blocks_to_swap={blocks_to_swap}, but only {len(eligible)} of {num_blocks} blocks"
+                " share a uniform swap-tensor layout and are eligible to be streamed (the rest differ -- e.g."
+                " unquantized vs. pre-quantized blocks in a partially pre-quantized checkpoint)."
+                f" Eligible (majority layout): blocks {_format_block_ranges(eligible)}."
+                f" Ineligible (different layout, always GPU-resident): blocks {_format_block_ranges(ineligible)}."
+                f" Set --blocks_to_swap to at most {len(eligible)}."
+            )
+
+        # ---- streaming placement: S evenly spaced indices from the eligible pool (midpoint formula) ----
+        stream_idx = sorted({eligible[((2 * i + 1) * len(eligible)) // (2 * blocks_to_swap)] for i in range(blocks_to_swap)})
         self.stream_idx = stream_idx
         self.S = len(stream_idx)  # actual streaming count (>=1; dedup is a no-op unless S is close to N)
         self.rank = {b: k for k, b in enumerate(stream_idx)}  # block_idx -> position in stream_idx
@@ -837,7 +884,6 @@ class LoRAStreamOffloader:
         self.B = min(ring_size, self.S)  # clamp ring to number of streaming blocks
 
         # ---- finetuning guard: H2D-only must never lose weight updates ----
-        self._job_cache = {}  # block_idx -> [(module, attr_name, is_param) per swap tensor]
         for b in stream_idx:
             for m, name, is_param in self._jobs(b):
                 assert not (is_param and getattr(m, name).requires_grad), (

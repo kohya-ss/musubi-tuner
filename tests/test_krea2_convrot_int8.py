@@ -320,6 +320,7 @@ def _trainer_args(**overrides):
         fp8_scaled=False,
         convrot_int8=False,
         convrot_int8_bwd="bf16",
+        nvfp4=False,
         turbo_dit=None,
         turbo_dit_cache=False,
         blocks_to_swap=0,
