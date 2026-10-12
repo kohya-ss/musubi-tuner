@@ -127,6 +127,25 @@ def supports_shape(activation: torch.Tensor, weight: torch.Tensor) -> bool:
     return rows > 16 and n % 8 == 0 and k % 8 == 0
 
 
+def _chunk_bounds(m: int, chunk: int) -> Iterator[tuple[int, int]]:
+    """Splits `m` rows into ranges of at most `chunk` rows (with `chunk` <= 0 it returns a single range).
+    A remainder of <= 16 rows is merged into the previous range, because `torch._int_mm` needs more than 16 rows.
+    """
+    if chunk <= 0 or m <= chunk:
+        yield (0, m)
+        return
+
+    num_full_chunks, remainder = divmod(m, chunk)
+    if 0 < remainder <= 16:
+        num_full_chunks -= 1
+        remainder += chunk
+
+    yield from pairwise(i * chunk for i in range(num_full_chunks + 1))  # Include right bound (+1)
+
+    if remainder > 0:
+        yield (num_full_chunks * chunk, m)
+
+
 @triton.jit
 def _dequant_epilogue_kernel(
     acc_ptr,    # int32 [m, n] raw accumulator from torch._int_mm; rows are `stride_acc` apart, columns contiguous
@@ -221,30 +240,12 @@ def _dequant_epilogue(
     )
 
 
-def _chunk_bounds(m: int, chunk: int) -> Iterator[tuple[int, int]]:
-    """Row ranges of at most `chunk` rows; a tail of <= 16 rows is merged into the previous chunk (_int_mm needs > 16)."""
-    if chunk <= 0 or m <= chunk:
-        yield (0, m)
-        return
-
-    num_full_chunks, remainder = divmod(m, chunk)
-    if 0 < remainder <= 16:
-        num_full_chunks -= 1
-        remainder += chunk
-
-    yield from pairwise(i * chunk for i in range(num_full_chunks + 1))  # Include right bound (+1)
-
-    if remainder > 0:
-        yield (num_full_chunks * chunk, m)
-
-
 def int8_linear_cublas(
     x: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype = torch.bfloat16,
-    convrot: bool = False,
     convrot_groupsize: int = 256,
     chunk_size: int = 0,
 ) -> torch.Tensor:
@@ -255,20 +256,17 @@ def int8_linear_cublas(
     weight_scale:   per-channel [N] / [N, 1] or scalar [1].
     """
     orig_shape = x.shape
-    x_2d = x.reshape(-1, orig_shape[-1])
-    m, k = x_2d.shape
+    x_2d = x.reshape(-1, orig_shape[-1])  # [m, k]
+    m = x_2d.shape[0]
     n = weight.shape[0]
 
     if weight_scale.numel() not in (1, n):
         raise ValueError(f"weight_scale must be scalar or have {n} elements, got {tuple(weight_scale.shape)}")
 
-    if convrot:
-        h = K._build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
-        x_rotated = K._rotate_activation(x_2d, h, convrot_groupsize)
-        x_int8, x_scale = K.triton_quantize_rowwise(x_rotated)  # int8 [m, k], fp32 [m, 1]
-        del x_rotated  # free the transient tensor before the GEMM, 'h' is cached
-    else:
-        x_int8, x_scale = K.triton_quantize_rowwise(x_2d)
+    h = K._build_hadamard(convrot_groupsize, device=x.device, dtype=x.dtype)
+    x_rotated = K._rotate_activation(x_2d, h, convrot_groupsize)
+    x_int8, x_scale = K.triton_quantize_rowwise(x_rotated)  # int8 [m, k], fp32 [m, 1]
+    del x_rotated  # free the transient tensor before the GEMM, 'h' is cached
 
     is_per_channel = weight_scale.numel() > 1
     ws = weight_scale.reshape(-1).to(torch.float32).contiguous()
@@ -376,13 +374,13 @@ def int8_grad_input_rot_cublas(
     # Make a row-major [k, n] copy to make it contiguous over n, then view it transposed.
     # Passing 'weight' directly is accepted and gives the same result, but is 1.5-2.5x slower in the backward
     # (RTX 4090, 4352 tokens), so the copy (1 byte/param, transient, freed on return) is worth it.
-    wt = weight.t().contiguous().t()  # [n, k] view of the [k, n] copy: transposing twice is intended
+    wtt = weight.t().contiguous().t()  # [n, k] view of the [k, n] copy: transposing twice is intended
 
     g_int8, gs = _quantize_rowwise_colscale(g_2d, col_scale)
 
     out = torch.empty((m, k), device=g_2d.device, dtype=out_dtype)
     for r0, r1 in _chunk_bounds(m, chunk_size):
-        acc = torch._int_mm(g_int8[r0:r1], wt)  # int32 [rows, k]
+        acc = torch._int_mm(g_int8[r0:r1], wtt)  # int32 [rows, k]
         _dequant_epilogue(acc, gs[r0:r1], None, False, None, out[r0:r1])
         del acc  # free it explicitly so it's gone while the next _int_mm runs - don't wait for the assignment to free it
 

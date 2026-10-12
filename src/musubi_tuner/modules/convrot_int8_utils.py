@@ -346,7 +346,7 @@ class ConvRotInt8LinearFn(torch.autograd.Function):
                 bias = bias.to(cast_dtype)
         if HAS_TRITON and x.is_cuda:
             if cublas and cublas.supports_shape(x, wq):
-                out = cublas.int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize, cublas.chunk_size)
+                out = cublas.int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, groupsize, cublas.chunk_size)
             else:
                 out = int8_linear(x, wq, w_scale.reshape(-1), bias, x.dtype, True, groupsize)
         else:
