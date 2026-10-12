@@ -198,3 +198,45 @@ def test_lora_stream_offloader_streams_quantized_blocks_from_cpu_masters():
             _assert_block_matches(blocks[index], expected[index], "cuda")
             offloader.submit_move_blocks_forward(blocks, index)
     torch.cuda.synchronize()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for the copiers")
+@pytest.mark.parametrize("copier_name", ["_DirectCopier", "_StagedCopier"])
+def test_copier_buffer_is_not_released_under_its_in_flight_copy(copier_name):
+    # Regression: the device buffer is filled on the copier's private stream. If the allocator is not told,
+    # dropping the last reference while the H2D is still queued frees the block at once, and empty_cache()
+    # releases it under the running copy. With expandable segments the release unmaps the pages after
+    # synchronizing only the allocation stream -> copy-engine MMU fault ("unspecified launch failure").
+    # The default allocator's cudaFree synchronizes the whole device, which hides the bug, so the test
+    # runs with expandable segments.
+    from musubi_tuner.modules import custom_offloading_utils as offloading
+
+    device = torch.device("cuda")
+    nbytes = 64 << 20
+    src = torch.empty(nbytes, dtype=torch.uint8)
+    if copier_name == "_DirectCopier":
+        src = src.pin_memory()
+    copier = getattr(offloading, copier_name)(device)
+
+    # hold the copy back: it waits for an event that fires only after a long sleep on another stream
+    blocker = torch.cuda.Stream(device=device)
+    with torch.cuda.stream(blocker):
+        torch.cuda._sleep(2_000_000_000)
+        gate = blocker.record_event()
+
+    torch.cuda.empty_cache()
+    torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+    try:
+        dst = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        copier.submit("block", dst, src, gate_event=gate)
+        load_event = copier.wait("block")  # the staged copier enqueues from its worker thread
+        assert not load_event.query(), "the copy must still be pending for this test to mean anything"
+
+        # drop the last reference mid-copy, then release the cache: the allocator must wait for the copy
+        # before handing the memory back (it synchronizes on the recorded copy-stream use)
+        del dst
+        torch.cuda.empty_cache()
+        assert load_event.query(), "empty_cache() released the buffer while its copy was still in flight"
+        copier.sync()
+    finally:
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")

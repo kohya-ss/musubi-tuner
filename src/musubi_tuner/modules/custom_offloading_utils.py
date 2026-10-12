@@ -604,6 +604,21 @@ class ModelOffloader(Offloader):
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
 
 
+def _record_copy_stream_use(dst_flat: torch.Tensor, copy_stream: torch.cuda.Stream):
+    """
+    Tell the caching allocator that ``copy_stream`` writes into ``dst_flat``.
+
+    The device buffer is allocated on the compute stream but filled on the private copy stream. Without this,
+    the allocator considers it free as soon as its last reference is dropped -- e.g. when the model owning a
+    forward-only offloader is deleted right after a pass, while the wrap-around preload of the next pass is
+    still in flight -- and ``torch.cuda.empty_cache()`` can release the memory under the running DMA. With
+    ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` the release unmaps the pages after synchronizing
+    only the allocation stream, so the copy engine faults (``CUDA error: unspecified launch failure``,
+    Xid 31 MMU fault on a copy engine). Recording the use defers the release until the copy has completed.
+    """
+    dst_flat.record_stream(copy_stream)
+
+
 class _DirectCopier:
     """
     Transfer engine for ``LoRAStreamOffloader`` when the masters are *pinned*: copies a flat pinned host
@@ -633,6 +648,7 @@ class _DirectCopier:
                 ev_b = torch.cuda.Event(enable_timing=True)
                 ev_a.record(self.copy_stream)
             dst_flat.copy_(src_flat, non_blocking=True)  # src is pinned -> async H2D
+            _record_copy_stream_use(dst_flat, self.copy_stream)
             if self.debug:
                 ev_b.record(self.copy_stream)
                 self._xfer[key] = (ev_a, ev_b)
@@ -713,6 +729,7 @@ class _StagedCopier:
                 ev_b = torch.cuda.Event(enable_timing=True)
                 ev_a.record(self.copy_stream)
             dst_flat.copy_(staging, non_blocking=True)  # pinned -> device, async
+            _record_copy_stream_use(dst_flat, self.copy_stream)
             if self.debug:
                 ev_b.record(self.copy_stream)
             done = self.copy_stream.record_event()  # H2D complete == this staging buffer is free again
