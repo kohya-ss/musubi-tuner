@@ -21,6 +21,7 @@ from safetensors.torch import save_file
 from musubi_tuner.modules import convrot_int8_kernels as kernels
 from musubi_tuner.modules.convrot_int8_utils import (
     CONVROT_GROUPSIZE,
+    CublasCtx,
     ConvRotInt8LinearFn,
     ConvRotInt8Quantizer,
     apply_convrot_int8_monkey_patch,
@@ -82,7 +83,7 @@ def test_quantize_dequant_roundtrip_error_is_small():
 def test_forward_eager_cpu_matches_dequant_reference():
     wq, ws, w_deq, _ = _make_quantized_linear("cpu", torch.float32)
     x = torch.randn(M, K)
-    y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+    y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
     y_ref = F.linear(x, w_deq)
     # (x H) @ (W H^T)^T == x @ W^T exactly; only float32 rounding remains
     assert _relerr(y, y_ref) < 1e-5
@@ -91,7 +92,7 @@ def test_forward_eager_cpu_matches_dequant_reference():
 def test_forward_eager_cpu_with_bias():
     wq, ws, w_deq, b = _make_quantized_linear("cpu", torch.float32, bias=True)
     x = torch.randn(M, K)
-    y = ConvRotInt8LinearFn.apply(x, wq, ws, b, GS, "bf16")
+    y = ConvRotInt8LinearFn.apply(x, wq, ws, b, GS, "bf16", None)
     assert _relerr(y, F.linear(x, w_deq, b)) < 1e-5
 
 
@@ -100,7 +101,7 @@ def test_backward_eager_cpu_matches_dequant_reference():
     g = torch.randn(M, N)
 
     x = torch.randn(M, K, requires_grad=True)
-    ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16").backward(g)
+    ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None).backward(g)
 
     x_ref = x.detach().clone().requires_grad_(True)
     F.linear(x_ref, w_deq).backward(g)
@@ -115,7 +116,7 @@ def test_forward_autocast_casts_fp32_input_like_f_linear():
     wq, ws, w_deq, _ = _make_quantized_linear("cpu", torch.float32)
     x = torch.randn(M, K, dtype=torch.float32)
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+        y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
         y_ref = F.linear(x, w_deq)
     assert y.dtype == torch.bfloat16
     assert y_ref.dtype == torch.bfloat16
@@ -123,41 +124,77 @@ def test_forward_autocast_casts_fp32_input_like_f_linear():
 
 
 # ---------------------------------------------------------------------------
-# fused Triton path (CUDA)
+# fused Triton and cuBLAS paths (CUDA)
 # ---------------------------------------------------------------------------
+
+
+class RecordingCublasCtx(CublasCtx):
+    """A `CublasCtx` that records which cuBLAS entry points were called, as "fwd" / "bwd" in `calls`.
+
+    `ConvRotInt8LinearFn` silently falls back to the Triton path when the shapes are unsupported or no context is
+    given, so a numerical comparison alone passes even if cuBLAS never ran. The tests assert on `calls` to verify
+    that the cuBLAS path was really taken: forward once, and backward only in int8 mode.
+    """
+
+    def __init__(self):
+        super().__init__(0)
+        self.calls: list[str] = []
+
+        self.int8_linear = self._wrap_call("fwd", self.int8_linear)
+        self.int8_grad_input_rot = self._wrap_call("bwd", self.int8_grad_input_rot)
+
+    def _wrap_call(self, name: str, func):
+        def call(*args, **kwargs):
+            self.calls.append(name)
+            return func(*args, **kwargs)
+        return call
+
+
+@pytest.fixture(params=["triton", "cublas"])
+def cublas(request) -> RecordingCublasCtx | None:
+    try:
+        return RecordingCublasCtx() if request.param == "cublas" else None
+    except RuntimeError as e:  # ensure_available() failed on this GPU / torch
+        pytest.skip(str(e))
 
 
 @requires_cuda
 @requires_triton
-def test_forward_triton_matches_dequant_reference():
+def test_forward_cuda_matches_dequant_reference(cublas: RecordingCublasCtx | None):
     wq, ws, w_deq, _ = _make_quantized_linear("cuda", torch.bfloat16)
     x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
-    y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+    y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", cublas)
     y_ref = F.linear(x, w_deq)
     # differs from the reference only by dynamic activation quantization
     assert y.dtype == torch.bfloat16
     assert _relerr(y, y_ref) < 3e-2
 
+    if cublas:
+        assert cublas.calls == ["fwd"]
+
 
 @requires_cuda
 @requires_triton
 @pytest.mark.parametrize("bwd_mode,tol", [("bf16", 2e-2), ("int8", 5e-2)])
-def test_grad_x_matches_dequant_reference(bwd_mode, tol):
+def test_grad_x_matches_dequant_reference(bwd_mode, tol, cublas: RecordingCublasCtx | None):
     wq, ws, w_deq, _ = _make_quantized_linear("cuda", torch.bfloat16)
     g = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
 
     x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, bwd_mode).backward(g)
+    ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, bwd_mode, cublas).backward(g)
 
     x_ref = x.detach().clone().requires_grad_(True)
     F.linear(x_ref, w_deq).backward(g)
 
     assert _relerr(x.grad, x_ref.grad) < tol
 
+    if cublas:
+        assert cublas.calls == (["fwd", "bwd"] if bwd_mode == "int8" else ["fwd"])
+
 
 @requires_cuda
 @requires_triton
-def test_lora_branch_grads_match_dequant_reference():
+def test_lora_branch_grads_match_dequant_reference(cublas: RecordingCublasCtx | None):
     # LoRA A/B gradients do not depend on the base-branch numerics (the base is a
     # separate additive branch), so they must match the dequantized reference exactly.
     # B is random-init: with the standard B=0 init, grad_A would be mathematically 0.
@@ -167,8 +204,12 @@ def test_lora_branch_grads_match_dequant_reference():
     lora_a = nn.Linear(K, 8, bias=False, device="cuda", dtype=torch.bfloat16)
     lora_b = nn.Linear(8, N, bias=False, device="cuda", dtype=torch.bfloat16)
 
+    # int8 backward with cuBLAS: g is shared with the LoRA branch, so this also guards against the
+    # base backward modifying grad_out in place
+    bwd_mode = "bf16" if cublas is None else "int8"
+
     x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    (ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16") + lora_b(lora_a(x))).backward(g)
+    (ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, bwd_mode, cublas) + lora_b(lora_a(x))).backward(g)
     ga, gb = lora_a.weight.grad.clone(), lora_b.weight.grad.clone()
     lora_a.weight.grad = lora_b.weight.grad = None
 
@@ -177,6 +218,9 @@ def test_lora_branch_grads_match_dequant_reference():
 
     assert _relerr(ga, lora_a.weight.grad) < 1e-6
     assert _relerr(gb, lora_b.weight.grad) < 1e-6
+
+    if cublas:
+        assert cublas.calls == ["fwd", "bwd"]
 
 
 @requires_cuda
@@ -187,7 +231,7 @@ def test_forward_autocast_cuda_fp32_input_returns_bf16():
     x = torch.randn(M, K, device="cuda", dtype=torch.float32, requires_grad=True)
     g = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+        y = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
     assert y.dtype == torch.bfloat16
     y.backward(g)
     assert x.grad is not None and x.grad.isfinite().all()
@@ -205,11 +249,59 @@ def test_triton_and_eager_forward_parity(monkeypatch):
     wq, ws, w_deq, _ = _make_quantized_linear("cuda", torch.bfloat16)
     x = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
 
-    y_triton = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+    y_triton = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
     monkeypatch.setattr("musubi_tuner.modules.convrot_int8_utils.HAS_TRITON", False)
-    y_eager = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+    y_eager = ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
 
     assert _relerr(y_triton, y_eager) < 3e-2
+
+
+# ---------------------------------------------------------------------------
+# cuBLAS helpers - imports triton, so run conditionally
+# ---------------------------------------------------------------------------
+
+
+@requires_cuda
+@requires_triton
+def test_torch_int_mm_available():
+    # future torch versions might change the private API's torch._int_mm
+    import musubi_tuner.modules.convrot_int8_cublas as cublas
+    cublas.ensure_available()
+
+
+@requires_cuda
+@requires_triton
+def test_cublas_supports_shape():
+    cublas = CublasCtx(0)
+    assert cublas.supports_shape(torch.zeros((M, K)), torch.zeros((N, K)))  # forward
+    assert cublas.supports_shape(torch.zeros((M, N)), torch.zeros((N, K)))  # backward
+    assert cublas.supports_shape(torch.zeros((17, 8)), torch.zeros((8, 8))) # minimum
+
+    assert not cublas.supports_shape(torch.zeros((16, 8)), torch.zeros((8, 8)))
+    assert not cublas.supports_shape(torch.zeros((17, 8)), torch.zeros((8, 7)))
+    assert not cublas.supports_shape(torch.zeros((17, 8)), torch.zeros((9, 8)))
+
+
+@requires_triton
+def test_cublas_chunk_bounds():
+    # chunk size is validated to be 0 or >16 at startup - see test_trainer_chunk_size_range below
+    from musubi_tuner.modules.convrot_int8_cublas import _chunk_bounds
+    assert list(_chunk_bounds(0, 0)) == [(0, 0)]
+    assert list(_chunk_bounds(0, 20)) == [(0, 0)]
+
+    assert list(_chunk_bounds(1, 0)) == [(0, 1)]
+    assert list(_chunk_bounds(1000, 0)) == [(0, 1000)]
+    assert list(_chunk_bounds(1000, 1000)) == [(0, 1000)]
+    assert list(_chunk_bounds(1000, 2000)) == [(0, 1000)]
+
+    # min 17 rows per chunk
+    assert list(_chunk_bounds(36, 20)) == [(0, 36)]
+    assert list(_chunk_bounds(37, 20)) == [(0, 20), (20, 37)]
+    assert list(_chunk_bounds(56, 20)) == [(0, 20), (20, 56)]
+    assert list(_chunk_bounds(57, 20)) == [(0, 20), (20, 40), (40, 57)]
+
+    assert list(_chunk_bounds(16400, 8192)) == [(0, 8192), (8192, 16400)]
+    assert list(_chunk_bounds(16401, 8192)) == [(0, 8192), (8192, 16384), (16384, 16401)]
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +388,7 @@ def test_nonreentrant_checkpoint_backward():
     wq, ws, w_deq, _ = _make_quantized_linear("cpu", torch.float32)
 
     def fn(x):
-        return ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16")
+        return ConvRotInt8LinearFn.apply(x, wq, ws, None, GS, "bf16", None)
 
     g = torch.randn(M, N)
     x = torch.randn(M, K, requires_grad=True)
@@ -320,6 +412,8 @@ def _trainer_args(**overrides):
         fp8_scaled=False,
         convrot_int8=False,
         convrot_int8_bwd="bf16",
+        convrot_int8_backend="triton",
+        convrot_int8_chunk_size=0,
         turbo_dit=None,
         turbo_dit_cache=False,
         blocks_to_swap=0,
@@ -351,6 +445,26 @@ def test_trainer_rejects_int8_bwd_without_convrot():
         _handle_args(_trainer_args(convrot_int8_bwd="int8"))
 
 
-def test_trainer_accepts_convrot_alone():
+def test_trainer_rejects_backend_cublas_without_convrot():
+    with pytest.raises(ValueError, match="convrot_int8_backend"):
+        _handle_args(_trainer_args(convrot_int8_backend="cublas"))
+
+
+def test_trainer_rejects_chunk_size_without_convrot():
+    with pytest.raises(ValueError, match="convrot_int8_chunk_size"):
+        _handle_args(_trainer_args(convrot_int8_chunk_size=4096))
+
+
+def test_trainer_chunk_size_range():
+    _handle_args(_trainer_args(convrot_int8=True, convrot_int8_backend="cublas", convrot_int8_chunk_size=17))
+    with pytest.raises(ValueError, match="0 or greater than 16"):
+        _handle_args(_trainer_args(convrot_int8=True, convrot_int8_backend="cublas", convrot_int8_chunk_size=16))
+    with pytest.raises(ValueError, match="0 or greater than 16"):
+        _handle_args(_trainer_args(convrot_int8=True, convrot_int8_backend="cublas", convrot_int8_chunk_size=-1))
+
+
+def test_trainer_accepts_convrot():
     _handle_args(_trainer_args(convrot_int8=True))
     _handle_args(_trainer_args(convrot_int8=True, convrot_int8_bwd="int8", blocks_to_swap=16))
+    _handle_args(_trainer_args(convrot_int8=True, convrot_int8_backend="cublas"))
+    _handle_args(_trainer_args(convrot_int8=True, convrot_int8_bwd="int8", convrot_int8_backend="cublas", convrot_int8_chunk_size=4096))

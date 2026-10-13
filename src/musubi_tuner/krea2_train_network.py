@@ -84,8 +84,15 @@ class Krea2NetworkTrainer(NetworkTrainer):
         # stashes (load_krea2_dit_state_dict); not wired up yet.
         if args.convrot_int8 and args.turbo_dit:
             raise ValueError("--convrot_int8 is not supported together with --turbo_dit yet; omit one of them.")
-        if args.convrot_int8_bwd == "int8" and not args.convrot_int8:
-            raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+        if not args.convrot_int8:
+            if args.convrot_int8_bwd == "int8":
+                raise ValueError("--convrot_int8_bwd int8 requires --convrot_int8.")
+            if args.convrot_int8_backend == "cublas":
+                raise ValueError("--convrot_int8_backend cublas requires --convrot_int8.")
+            if args.convrot_int8_chunk_size != 0:
+                raise ValueError("--convrot_int8_chunk_size requires --convrot_int8.")
+        if args.convrot_int8_chunk_size != 0 and args.convrot_int8_chunk_size <= 16:
+            raise ValueError(f"--convrot_int8_chunk_size must be 0 or greater than 16. Got {args.convrot_int8_chunk_size}.")
         # RAW-train / Turbo-sample: the recommended K2 LoRA workflow is to train on the RAW
         # checkpoint and run inference on the distilled Turbo. --turbo_dit (a full separate
         # Turbo checkpoint) swaps the base weights to Turbo for sample generation (the trainee

@@ -48,6 +48,8 @@ def _trainer_args(**overrides):
         fp8_scaled=False,
         convrot_int8=False,
         convrot_int8_bwd="bf16",
+        convrot_int8_backend="triton",
+        convrot_int8_chunk_size=0,
         nvfp4=False,
         turbo_dit=None,
         turbo_dit_cache=False,

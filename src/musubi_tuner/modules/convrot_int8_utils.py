@@ -321,6 +321,8 @@ class CublasCtx:
         logger.info(f"Using cuBLASLt IMMA kernel for ConvRot INT8 {chunk_msg}")
         self.chunk_size = chunk_size
 
+        # Imported lazily because it requires triton (checked in _validate_convrot_args)
+        assert HAS_TRITON
         import musubi_tuner.modules.convrot_int8_cublas as cublas
         # Since torch._int_mm is a private function that could change,
         # verify its availability and accuracy with the current device.
@@ -421,11 +423,8 @@ def _validate_convrot_args(bwd_mode: str, backend: str, chunk_size: int) -> None
         raise ValueError("ConvRot INT8 backend 'cublas' requires triton. Install triton (triton-windows on Windows).")
 
     # chunk size
-    if chunk_size != 0:
-        if chunk_size <= 16:
-            raise ValueError(f"Invalid ConvRot INT8 chunk size: {chunk_size} (must be 0 or greater than 16)")
-        if backend != "cublas":
-            logger.warning("Ignoring ConvRot INT8 chunk size setting: It is only applicable with the ConvRot INT8 cuBLAS backend.")
+    if chunk_size != 0 and backend != "cublas":
+        logger.warning("Ignoring ConvRot INT8 chunk size setting: It is only applicable with the ConvRot INT8 cuBLAS backend.")
 
     if not HAS_TRITON:
         logger.warning(
