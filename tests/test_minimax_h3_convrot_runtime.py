@@ -144,6 +144,8 @@ def _trainer_args(**overrides):
     values = {
         "convrot_int8": False,
         "convrot_int8_bwd": "bf16",
+        "convrot_int8_backend": "triton",
+        "convrot_int8_chunk_size": 0,
         "base_weights": None,
         "base_weights_multiplier": None,
         "disable_numpy_memmap": False,

@@ -1102,6 +1102,8 @@ def _load_h3_transformer_convrot_int8(
     device: torch.device,
     quant_device: torch.device,
     bwd_mode: str,
+    backend: str = "triton",
+    chunk_size: int = 0,
     attn_mode: str,
     split_attn: bool,
     disable_numpy_memmap: bool,
@@ -1145,7 +1147,14 @@ def _load_h3_transformer_convrot_int8(
     )
     if prune_state is not None:
         sd.update(prune_state)
-    apply_convrot_int8_monkey_patch(model, sd, bwd_mode=bwd_mode, groupsize_map=quantizer.module_groupsizes)
+    apply_convrot_int8_monkey_patch(
+        model,
+        sd,
+        bwd_mode=bwd_mode,
+        groupsize_map=quantizer.module_groupsizes,
+        backend=backend,
+        chunk_size=chunk_size,
+    )
     # int8 tensors cannot require grad, and load_state_dict(assign=True) re-wraps incoming
     # tensors with the meta params' requires_grad (default True); the base is frozen anyway.
     model.requires_grad_(False)
@@ -1234,6 +1243,8 @@ def load_h3_transformer(
     disable_numpy_memmap: bool = False,
     convrot_int8: bool = False,
     convrot_int8_bwd: str = "bf16",
+    convrot_int8_backend: str = "triton",
+    convrot_int8_chunk_size: int = 0,
     quant_device: torch.device | str | None = None,
     lora_weights: list[dict] | None = None,
     lora_multipliers: list[float] | None = None,
@@ -1283,6 +1294,8 @@ def load_h3_transformer(
             lora_multipliers=lora_multipliers,
             prune_hooks=prune_hooks,
             prune_state=prune_state,
+            backend=convrot_int8_backend,
+            chunk_size=convrot_int8_chunk_size,
         )
     if lora_weights:
         raise ValueError("MiniMax-H3 load-time LoRA merge is only wired for the ConvRot INT8 path")

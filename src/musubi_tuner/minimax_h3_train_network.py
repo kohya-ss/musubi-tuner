@@ -1216,6 +1216,8 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             disable_numpy_memmap=args.disable_numpy_memmap,
             convrot_int8=args.convrot_int8,
             convrot_int8_bwd=args.convrot_int8_bwd,
+            convrot_int8_backend=args.convrot_int8_backend,
+            convrot_int8_chunk_size=args.convrot_int8_chunk_size,
             # quantization runs on the accelerator device even when the weights load to CPU
             # for block swap (cf. the Krea 2 calc-device fix in #1008)
             quant_device=accelerator.device,
@@ -1888,6 +1890,22 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         choices=["bf16", "int8"],
         help="backward mode for a ConvRot INT8 base. bf16 (default): transient dequantized matmul, most accurate. "
         "int8: reuse the fused int8 GEMM for grad_x (faster, quantizes gradients slightly, requires triton and CUDA).",
+    )
+    parser.add_argument(
+        "--convrot_int8_backend",
+        type=str,
+        default="triton",
+        choices=["triton", "cublas"],
+        help="backend for --convrot_int8 forward (and backward with --convrot_int8_bwd int8). triton (default): fused "
+        "int8 GEMM. cublas: cuBLASLt IMMA kernels via torch._int_mm; up to 20%% faster. Requires triton for quantization.",
+    )
+    parser.add_argument(
+        "--convrot_int8_chunk_size",
+        type=int,
+        default=0,
+        help="cublas backend only: Maximum number of rows (batch size x tokens) processed per cuBLASLt call, which affects the "
+        "size of the resulting int32 accumulator. Setting it to 8192/4096/2048 may cap peak VRAM usage with a hardware-dependent "
+        "performance penalty. 0 (default) disables chunking. Must be 0 or greater than 16.",
     )
     parser.add_argument(
         "--prune_adaln",
