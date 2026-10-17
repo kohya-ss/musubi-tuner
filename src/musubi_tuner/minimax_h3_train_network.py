@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+from musubi_tuner.modules.memory_manager import (
+    setup_memory_environment,
+    ensure_memory_headroom,
+    execute_with_retry,
+    flush_memory,
+)
+
+setup_memory_environment()
+
 import argparse
 import gc
 import logging
@@ -1067,23 +1076,26 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             unit="step",
             disable=not accelerator.is_local_main_process,
         ) as progress:
-            sample = sample_joint_av_latents(
-                transformer,
-                layout=layout,
-                # the base seeds the generator from the prompt's seed, or from a fresh random one
-                seed=generator.initial_seed(),
-                text_hidden_states=sample_parameter["h3_text_hidden_states"],
-                text_token_tags=sample_parameter["h3_text_token_tags"],
-                visual_conditions=sample_parameter["h3_visual_conditions"],
-                audio_conditions=sample_parameter["h3_audio_conditions"],
-                steps=request.steps,
-                video_shift=request.h3_shift_video,
-                audio_shift=request.h3_shift_audio,
-                visual_condition_clean=request.h3_visual_cond_clean,
-                audio_condition_clean=request.h3_audio_cond_clean,
-                device=device,
-                step_callback=lambda completed, total: progress.update(1),
-            )
+            def _sample_step():
+                return sample_joint_av_latents(
+                    transformer,
+                    layout=layout,
+                    seed=generator.initial_seed(),
+                    text_hidden_states=sample_parameter["h3_text_hidden_states"],
+                    text_token_tags=sample_parameter["h3_text_token_tags"],
+                    visual_conditions=sample_parameter["h3_visual_conditions"],
+                    audio_conditions=sample_parameter["h3_audio_conditions"],
+                    steps=request.steps,
+                    video_shift=request.h3_shift_video,
+                    audio_shift=request.h3_shift_audio,
+                    visual_condition_clean=request.h3_visual_cond_clean,
+                    audio_condition_clean=request.h3_audio_cond_clean,
+                    device=device,
+                    step_callback=lambda completed, total: progress.update(1),
+                )
+
+            ensure_memory_headroom(min_ram_gb=2.0, min_vram_gb=2.0, max_wait_sec=15.0)
+            sample = execute_with_retry(_sample_step, max_retries=2, backoff_sec=2.0)
         synchronize_device(device)
         clean_memory_on_device(device)
 
@@ -1601,29 +1613,32 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             audio_clean=args.h3_audio_cond_clean,
             device=device,
         )
-        output = self.call_dit(
-            args,
-            accelerator,
-            transformer,
-            latents,
-            batch,
-            noise,
-            noisy_video,
-            timesteps,
-            network_dtype,
-            audio_latents=audio_latents,
-            audio_noise=audio_noise,
-            noisy_audio_input=noisy_audio,
-            runtime=runtime,
-            model_t_video=1.0 - sigma_video,
-            model_t_audio=1.0 - sigma_audio,
-            visual_conditions=visual_conditions,
-            audio_conditions=audio_conditions,
-            audio_loss_weight=audio_loss_weight,
-            network=network,
-            teacher_visual_conditions=teacher_visual_conditions,
-            teacher_audio_conditions=teacher_audio_conditions,
-        )
+        def _forward_step():
+            return self.call_dit(
+                args,
+                accelerator,
+                transformer,
+                latents,
+                batch,
+                noise,
+                noisy_video,
+                timesteps,
+                network_dtype,
+                audio_latents=audio_latents,
+                audio_noise=audio_noise,
+                noisy_audio_input=noisy_audio,
+                runtime=runtime,
+                model_t_video=1.0 - sigma_video,
+                model_t_audio=1.0 - sigma_audio,
+                visual_conditions=visual_conditions,
+                audio_conditions=audio_conditions,
+                audio_loss_weight=audio_loss_weight,
+                network=network,
+                teacher_visual_conditions=teacher_visual_conditions,
+                teacher_audio_conditions=teacher_audio_conditions,
+            )
+
+        output = execute_with_retry(_forward_step, max_retries=2, backoff_sec=1.5)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
