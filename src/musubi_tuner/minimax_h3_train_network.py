@@ -7,8 +7,6 @@ from musubi_tuner.modules.memory_manager import (
     flush_memory,
 )
 
-setup_memory_environment()
-
 import argparse
 import gc
 import logging
@@ -1080,6 +1078,7 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
                 return sample_joint_av_latents(
                     transformer,
                     layout=layout,
+                    # the base seeds the generator from the prompt's seed, or from a fresh random one
                     seed=generator.initial_seed(),
                     text_hidden_states=sample_parameter["h3_text_hidden_states"],
                     text_token_tags=sample_parameter["h3_text_token_tags"],
@@ -1743,6 +1742,33 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         discrete_flow_shift=1.0,
         network_module="networks.lora_minimax_h3",
     )
+    parser.add_argument(
+        "--cuda_allocator",
+        type=str,
+        default="mmgp_spill_ram",
+        choices=["mmgp", "mmgp_ram", "mmgp_spill", "mmgp_spill_ram", "pytorch", "default"],
+        help="CUDA memory allocator backend. 'mmgp': MMGP VMM allocator; 'mmgp_ram': MMGP + RAM allocator; "
+             "'mmgp_spill' (default): MMGP with pinned RAM spilling; 'mmgp_spill_ram': spilling + RAM allocator; "
+             "'pytorch': native expandable segments; 'default': standard PyTorch allocator.",
+    )
+    parser.add_argument(
+        "--mmgp_vram_limit_gb",
+        type=float,
+        default=None,
+        help="Hard cap on VRAM in GB for MMGP (None or 0 = full GPU capacity).",
+    )
+    parser.add_argument(
+        "--mmgp_ram_cache_gb",
+        type=float,
+        default=2.0,
+        help="Maximum freed CPU RAM blocks to hold for zero-latency reuse in mmgp_ram (default: 2.0 GB).",
+    )
+    parser.add_argument(
+        "--mmgp_ram_pressure_gb",
+        type=float,
+        default=4.0,
+        help="Available host RAM threshold before MMGP CPU RAM allocator returns freed blocks to the OS (default: 4.0 GB).",
+    )
     parser.add_argument("--task", choices=H3_TASKS, default=None, help="MiniMax-H3 training task")
     parser.add_argument(
         "--one_frame",
@@ -1921,6 +1947,14 @@ def main() -> None:
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
     args.dit_dtype = "bfloat16" if args.dit_dtype is None else args.dit_dtype
+
+    setup_memory_environment(
+        allocator_type=getattr(args, "cuda_allocator", "mmgp_spill_ram"),
+        vram_limit_gb=getattr(args, "mmgp_vram_limit_gb", None),
+        ram_cache_gb=getattr(args, "mmgp_ram_cache_gb", 2.0),
+        ram_pressure_gb=getattr(args, "mmgp_ram_pressure_gb", 4.0),
+    )
+
     MiniMaxH3NetworkTrainer().train(args)
 
 
