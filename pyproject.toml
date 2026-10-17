@@ -51,6 +51,9 @@ gui = [
 hidream_o1 = [
     "sensecraft[dinov3]>=0.3.11",
 ]
+dinov3 = [
+    "sensecraft[dinov3]==0.3.11",  # NR's tested feature-extraction API
+]
 
 [tool.uv]
 conflicts = [

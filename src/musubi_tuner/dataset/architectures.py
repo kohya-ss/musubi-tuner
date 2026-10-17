@@ -33,6 +33,8 @@ ARCHITECTURE_KREA2 = "kr2"
 ARCHITECTURE_KREA2_FULL = "krea2"
 ARCHITECTURE_MINIMAX_H3 = "mmh3"
 ARCHITECTURE_MINIMAX_H3_FULL = "minimax_h3"
+ARCHITECTURE_DLSSNR = "nr"
+ARCHITECTURE_DLSSNR_FULL = "dlssnr"
 
 
 def round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride: int) -> int:

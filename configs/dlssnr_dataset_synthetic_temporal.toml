@@ -1,0 +1,22 @@
+# Dataset-only settings; generate clips online from paired still images.
+# Example CLI: --training_mode temporal --sequence_length 4 --burn_in 2
+#              --tbptt_length 2 --loss_temporal 0.1
+# These lengths/weights are examples, not changed trainer defaults.
+[general]
+resolution = [1024, 1024]
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+
+[[datasets]]
+image_directory = "../data/target"
+control_directory = "../data/input"
+nr_controls_mode = "fixed"
+nr_tone = 1.0
+nr_structure = 1.0
+synthetic_temporal = true
+synthetic_max_shift_px = 0.5
+# A single-frame train_manifest can replace the two directory fields.
+# validation_manifest = "../data/validation_single.jsonl"
+# sequence_manifest = "../data/validation_sequences.jsonl" # always real motion
+# --control_randomization can be enabled independently on the training CLI.
