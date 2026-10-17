@@ -540,6 +540,11 @@ class ModelOffloader(Offloader):
         if self.blocks_to_swap is None or self.blocks_to_swap == 0:
             return
 
+        # Previous forward passes may still be moving weights in the background.
+        # Finish those transfers before changing any block's device placement.
+        for block_idx in list(self.futures):
+            self._wait_blocks_move(block_idx)
+
         if self.debug:
             print(f"[{self.block_type}] Prepare block devices before forward")
 
