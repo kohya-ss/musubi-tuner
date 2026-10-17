@@ -80,21 +80,31 @@ def get_ram_info() -> dict[str, float]:
 # 3. Flushes & Headroom Checks (Wait-and-Clear)
 # ---------------------------------------------------------------------------
 
-def flush_memory(device: torch.device | str | int | None = None, deep: bool = True) -> None:
+def flush_memory(device: torch.device | str | int | None = None, deep: bool = False) -> None:
     """
     Synchronizes streams, runs Python cyclic GC, and purges PyTorch's cache.
+    If deep=False, it only flushes if VRAM reservation is above 90% to avoid driver stalls.
     """
     if torch.cuda.is_available():
-        try:
-            torch.cuda.synchronize(device)
-        except Exception:
-            pass
-        torch.cuda.empty_cache()
+        device = torch.device(device or torch.cuda.current_device())
+        
+        # If deep or if VRAM is running out of headroom, proactively empty cache
         if deep:
+            try:
+                torch.cuda.synchronize(device)
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
             try:
                 torch.cuda.ipc_collect()
             except Exception:
                 pass
+        else:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+            reserved_bytes = torch.cuda.memory_reserved(device)
+            # If driver has less than 1.5 GB free and PyTorch reserved over 85%, release unused blocks
+            if free_bytes < (1.5 * 1024**3) and (reserved_bytes / total_bytes) > 0.85:
+                torch.cuda.empty_cache()
 
     gc.collect()
 
