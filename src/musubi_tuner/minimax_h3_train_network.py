@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from musubi_tuner.modules.memory_manager import (
+    setup_memory_environment,
+    ensure_memory_headroom,
+    execute_with_retry,
+    flush_memory,
+)
+
 import argparse
 import gc
 import logging
@@ -1067,23 +1074,27 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             unit="step",
             disable=not accelerator.is_local_main_process,
         ) as progress:
-            sample = sample_joint_av_latents(
-                transformer,
-                layout=layout,
-                # the base seeds the generator from the prompt's seed, or from a fresh random one
-                seed=generator.initial_seed(),
-                text_hidden_states=sample_parameter["h3_text_hidden_states"],
-                text_token_tags=sample_parameter["h3_text_token_tags"],
-                visual_conditions=sample_parameter["h3_visual_conditions"],
-                audio_conditions=sample_parameter["h3_audio_conditions"],
-                steps=request.steps,
-                video_shift=request.h3_shift_video,
-                audio_shift=request.h3_shift_audio,
-                visual_condition_clean=request.h3_visual_cond_clean,
-                audio_condition_clean=request.h3_audio_cond_clean,
-                device=device,
-                step_callback=lambda completed, total: progress.update(1),
-            )
+            def _sample_step():
+                return sample_joint_av_latents(
+                    transformer,
+                    layout=layout,
+                    # the base seeds the generator from the prompt's seed, or from a fresh random one
+                    seed=generator.initial_seed(),
+                    text_hidden_states=sample_parameter["h3_text_hidden_states"],
+                    text_token_tags=sample_parameter["h3_text_token_tags"],
+                    visual_conditions=sample_parameter["h3_visual_conditions"],
+                    audio_conditions=sample_parameter["h3_audio_conditions"],
+                    steps=request.steps,
+                    video_shift=request.h3_shift_video,
+                    audio_shift=request.h3_shift_audio,
+                    visual_condition_clean=request.h3_visual_cond_clean,
+                    audio_condition_clean=request.h3_audio_cond_clean,
+                    device=device,
+                    step_callback=lambda completed, total: progress.update(1),
+                )
+
+            ensure_memory_headroom(min_ram_gb=2.0, min_vram_gb=2.0, max_wait_sec=15.0)
+            sample = execute_with_retry(_sample_step, max_retries=2, backoff_sec=2.0)
         synchronize_device(device)
         clean_memory_on_device(device)
 
@@ -1601,29 +1612,32 @@ class MiniMaxH3NetworkTrainer(NetworkTrainer):
             audio_clean=args.h3_audio_cond_clean,
             device=device,
         )
-        output = self.call_dit(
-            args,
-            accelerator,
-            transformer,
-            latents,
-            batch,
-            noise,
-            noisy_video,
-            timesteps,
-            network_dtype,
-            audio_latents=audio_latents,
-            audio_noise=audio_noise,
-            noisy_audio_input=noisy_audio,
-            runtime=runtime,
-            model_t_video=1.0 - sigma_video,
-            model_t_audio=1.0 - sigma_audio,
-            visual_conditions=visual_conditions,
-            audio_conditions=audio_conditions,
-            audio_loss_weight=audio_loss_weight,
-            network=network,
-            teacher_visual_conditions=teacher_visual_conditions,
-            teacher_audio_conditions=teacher_audio_conditions,
-        )
+        def _forward_step():
+            return self.call_dit(
+                args,
+                accelerator,
+                transformer,
+                latents,
+                batch,
+                noise,
+                noisy_video,
+                timesteps,
+                network_dtype,
+                audio_latents=audio_latents,
+                audio_noise=audio_noise,
+                noisy_audio_input=noisy_audio,
+                runtime=runtime,
+                model_t_video=1.0 - sigma_video,
+                model_t_audio=1.0 - sigma_audio,
+                visual_conditions=visual_conditions,
+                audio_conditions=audio_conditions,
+                audio_loss_weight=audio_loss_weight,
+                network=network,
+                teacher_visual_conditions=teacher_visual_conditions,
+                teacher_audio_conditions=teacher_audio_conditions,
+            )
+
+        output = execute_with_retry(_forward_step, max_retries=2, backoff_sec=1.5)
         return self.compute_loss(args, output, timesteps, noise_scheduler, dit_dtype, network_dtype, global_step)
 
     def get_noisy_model_input_and_timesteps(self, args, noise, latents, timesteps, noise_scheduler, device, dtype):
@@ -1727,6 +1741,33 @@ def minimax_h3_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argumen
         weighting_scheme="none",
         discrete_flow_shift=1.0,
         network_module="networks.lora_minimax_h3",
+    )
+    parser.add_argument(
+        "--cuda_allocator",
+        type=str,
+        default="mmgp_spill_ram",
+        choices=["mmgp", "mmgp_ram", "mmgp_spill", "mmgp_spill_ram", "pytorch", "default"],
+        help="CUDA memory allocator backend. 'mmgp': MMGP VMM allocator; 'mmgp_ram': MMGP + RAM allocator; "
+             "'mmgp_spill' (default): MMGP with pinned RAM spilling; 'mmgp_spill_ram': spilling + RAM allocator; "
+             "'pytorch': native expandable segments; 'default': standard PyTorch allocator.",
+    )
+    parser.add_argument(
+        "--mmgp_vram_limit_gb",
+        type=float,
+        default=None,
+        help="Hard cap on VRAM in GB for MMGP (None or 0 = full GPU capacity).",
+    )
+    parser.add_argument(
+        "--mmgp_ram_cache_gb",
+        type=float,
+        default=2.0,
+        help="Maximum freed CPU RAM blocks to hold for zero-latency reuse in mmgp_ram (default: 2.0 GB).",
+    )
+    parser.add_argument(
+        "--mmgp_ram_pressure_gb",
+        type=float,
+        default=4.0,
+        help="Available host RAM threshold before MMGP CPU RAM allocator returns freed blocks to the OS (default: 4.0 GB).",
     )
     parser.add_argument("--task", choices=H3_TASKS, default=None, help="MiniMax-H3 training task")
     parser.add_argument(
@@ -1906,6 +1947,14 @@ def main() -> None:
     args = parser.parse_args()
     args = read_config_from_file(args, parser)
     args.dit_dtype = "bfloat16" if args.dit_dtype is None else args.dit_dtype
+
+    setup_memory_environment(
+        allocator_type=getattr(args, "cuda_allocator", "mmgp_spill_ram"),
+        vram_limit_gb=getattr(args, "mmgp_vram_limit_gb", None),
+        ram_cache_gb=getattr(args, "mmgp_ram_cache_gb", 2.0),
+        ram_pressure_gb=getattr(args, "mmgp_ram_pressure_gb", 4.0),
+    )
+
     MiniMaxH3NetworkTrainer().train(args)
 
 
