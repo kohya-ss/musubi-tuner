@@ -1,0 +1,19 @@
+# Dataset-only configuration. Training and LoRA settings are CLI arguments.
+[general]
+resolution = [1024, 1024] # bucket area budget; exact size when enable_bucket = false
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+
+[[datasets]]
+image_directory = "../data/target"
+control_directory = "../data/input"
+nr_controls_mode = "fixed"
+nr_style = 0
+nr_tone = 1.0
+nr_structure = 1.0
+nr_skin = -1.0
+nr_auto_mask = true
+# Replace the directory fields with train_manifest for legacy/advanced JSONL data.
+# validation_manifest = "../data/validation_single.jsonl"
+# sequence_manifest = "../data/validation_sequences.jsonl"

@@ -167,6 +167,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [FLUX.2](./docs/flux_2.md)
 - [MiniMax-H3](./docs/minimax_h3.md)
 - [MiniMax-H3 (Single Frame)](./docs/minimax_h3_1f.md)
+- [DLSS-NR 310.8.0 (Experimental Supervised Training)](./docs/dlssnr.md)
 
 **Common Configuration & Usage:**
 - [Dataset Configuration](./docs/dataset_config.md)
@@ -341,5 +342,7 @@ Code under the `wan` directory is modified from [Wan2.1](https://github.com/Wan-
 Code under the `frame_pack` directory is modified from [FramePack](https://github.com/lllyasviel/FramePack). The license is under the Apache License 2.0.
 
 Code in `modules/convrot_int8_kernels.py` is modified from [comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen) (in turn derived from dxqb/OneTrainer and ComfyUI-Flux2-INT8). The license is under the Apache License 2.0.
+
+The DLSS-NR layout and numerical implementation in `dlssnr` is adapted from [OpenDLSS-NR](https://github.com/maanHimself/OpenDLSS-NR), licensed under the MIT License. See its [attribution notice](./src/musubi_tuner/dlssnr/NOTICE.md) and [retained license](./src/musubi_tuner/dlssnr/LICENSE.OpenDLSS-NR). No NVIDIA software or weights are distributed with this integration.
 
 Other code is under the Apache License 2.0. Some code is copied and modified from Diffusers.
