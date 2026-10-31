@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+import transformers
+from packaging.version import Version
 from PIL import Image
 from safetensors.torch import load_file, save_file
 from torch.nn import functional as F
@@ -362,6 +365,10 @@ class QwenImage21IntegrationTests(unittest.TestCase):
                 self.assertEqual(image.mode, "RGBA")
                 np.testing.assert_array_equal(np.asarray(image.getchannel("A")), (pixels[0, 3, 0].numpy() * 255).astype(np.uint8))
 
+    @unittest.skipIf(
+        Version(transformers.__version__) < Version("5"),
+        "Qwen2TokenizerFast cannot be built from an in-memory vocab before transformers 5",
+    )
     def test_real_qwen3vl_text_and_reference_encoding(self):
         from PIL import Image
         from tokenizers.pre_tokenizers import ByteLevel
@@ -824,21 +831,26 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
             save_text_encoder_output_cache_qwen_image_21(
                 item, torch.randn(3, 4096), torch.tensor([1]), torch.tensor([[2, 2]]), hashes
             )
+            # Without `accelerate launch`, prepare_accelerator on a multi-GPU host requests a process group that was never
+            # initialized. Train as a single-GPU process: hide the extra GPUs from the subprocess, or from device_count in-process.
             if block_swap:
-                import os
                 import subprocess
 
                 # Isolate Accelerate state and CUDA workers from the other training tests.
+                env = {**os.environ, "OMP_NUM_THREADS": "2", "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+                if torch.cuda.device_count() > 1:
+                    env["CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
                 result = subprocess.run(
                     [sys.executable, "-m", "musubi_tuner.qwen_image_21_train", *options],
-                    env={**os.environ, "OMP_NUM_THREADS": "2", "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+                    env=env,
                     capture_output=True,
                     text=True,
                     timeout=120,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             else:
-                train.QwenImage21Trainer().train(args)
+                with patch("torch.cuda.device_count", return_value=1):
+                    train.QwenImage21Trainer().train(args)
             checkpoint = path / "output" / "full.safetensors"
             result = load_file(str(checkpoint))
             self.assertEqual(set(result), set(original))
@@ -857,7 +869,8 @@ class QwenImage21LoadingAndTrainingTests(unittest.TestCase):
                 return
             args.resume = str(path / "output" / "full-state")
             args.output_name = "resumed"
-            train.QwenImage21Trainer().train(args)
+            with patch("torch.cuda.device_count", return_value=1):
+                train.QwenImage21Trainer().train(args)
             resumed = load_file(str(path / "output" / "resumed.safetensors"))
             self.assertFalse(torch.equal(result["proj_out.weight"], resumed["proj_out.weight"]))
 
