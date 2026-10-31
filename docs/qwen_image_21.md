@@ -276,6 +276,28 @@ python src/musubi_tuner/qwen_image_21_generate_image.py \
 
 </details>
 
+### Using the LoRA in ComfyUI / ComfyUIでの利用
+
+LoRA files are saved in the Musubi Tuner format (`lora_unet_*` keys). ComfyUI fuses `img_mlp.gate_layer` and `img_mlp.proj` into a single `gate_up` layer and currently does not map the Musubi Tuner keys for these two modules, so they are skipped with `lora key not loaded` warnings. Convert the LoRA to the Diffusers key format before loading it in ComfyUI:
+
+```bash
+python src/musubi_tuner/convert_lora.py \
+    --input path/to/lora.safetensors \
+    --output path/to/lora_comfyui.safetensors \
+    --target other --diffusers_prefix transformer
+```
+
+The converted file loads all modules in ComfyUI. The original file remains usable with the Musubi Tuner scripts.
+
+<details>
+<summary>日本語</summary>
+
+LoRAファイルはMusubi Tuner形式（`lora_unet_*`キー）で保存されます。ComfyUIは`img_mlp.gate_layer`と`img_mlp.proj`を`gate_up`という1つの層に結合しており、現時点ではこの2つのモジュールについてMusubi Tuner形式のキーを対応付けていないため、`lora key not loaded`の警告とともに読み飛ばされます。ComfyUIで使用する前に、上記のコマンドでDiffusersのキー形式に変換してください。
+
+変換後のファイルはComfyUIですべてのモジュールが読み込まれます。変換前のファイルはMusubi Tunerのスクリプトでそのまま使用できます。
+
+</details>
+
 ### Exporting a merged model / マージ済みモデルの出力
 
 Use `--save_merged_model path/to/merged.safetensors` with `--dit`, `--lora_weight`, and optional multipliers to export a merged DiT without generation. This mode does not require `--vae`, `--text_encoder`, `--prompt`, or `--save_path`. Include/exclude patterns and LyCORIS are supported. The model is saved in `--dtype` before FP8 quantization, with its configuration included in the checkpoint metadata.
