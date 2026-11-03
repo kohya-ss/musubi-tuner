@@ -387,11 +387,18 @@ class AdalnProj(nn.Module):
 
 
 def _apply_rope_split_half(hidden_states: torch.Tensor, rotation_table: torch.Tensor) -> torch.Tensor:
+    # The table holds one 2x2 rotation per (position, pair). Applying it with torch.matmul batches millions of 2x2 @ 2x1
+    # products, which cuBLAS runs as GEMV launches: memory-bound, not fusable by torch.compile, and the bulk of a
+    # training step's GPU time. The same rotation is two multiply-adds per element; computed in FP32 it matches the
+    # matmul result (bit-identical in BF16), and torch.compile fuses it into the surrounding elementwise kernels.
     pairs = rotation_table.shape[-3]
-    rotary = torch.stack((hidden_states[..., :pairs], hidden_states[..., pairs : 2 * pairs]), dim=-1)
-    rotary = torch.matmul(rotation_table, rotary.unsqueeze(-1)).squeeze(-1)
-    rotary = torch.cat((rotary[..., 0], rotary[..., 1]), dim=-1)
-    return torch.cat((rotary, hidden_states[..., 2 * pairs :]), dim=-1)
+    first = hidden_states[..., :pairs].float()
+    second = hidden_states[..., pairs : 2 * pairs].float()
+    table = rotation_table.float()
+    rotated_first = table[..., 0, 0] * first + table[..., 0, 1] * second
+    rotated_second = table[..., 1, 0] * first + table[..., 1, 1] * second
+    dtype = torch.result_type(rotation_table, hidden_states)
+    return torch.cat((rotated_first.to(dtype), rotated_second.to(dtype), hidden_states[..., 2 * pairs :].to(dtype)), dim=-1)
 
 
 def _element_extent(tensor: torch.Tensor) -> int:
