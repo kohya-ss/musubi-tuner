@@ -624,7 +624,8 @@ def prepare_text_inputs(
 
         conds_cache[cache_key] = (embed, mask)
 
-    negative_prompt = args.negative_prompt
+    # --negative_prompt defaults to None; fall back to " " as the sample-image path in qwen_image_train_network does
+    negative_prompt = args.negative_prompt if args.negative_prompt is not None else " "
     cache_key = (negative_prompt, tuple(args.control_image_path) if args.control_image_path is not None else None, (width, height))
     if cache_key in conds_cache:
         negative_embed, negative_mask = conds_cache[cache_key]
