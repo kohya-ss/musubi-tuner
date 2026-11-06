@@ -13,6 +13,7 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_HIDREAM_O1,
     ARCHITECTURE_IDEOGRAM4,
     ARCHITECTURE_QWEN_IMAGE,
+    ARCHITECTURE_QWEN_IMAGE_21,
     ARCHITECTURE_QWEN_IMAGE_EDIT,
     ARCHITECTURE_QWEN_IMAGE_LAYERED,
     ARCHITECTURE_WAN,
@@ -83,6 +84,7 @@ ARCH_FLUX_2_DEV = "Flux.2-dev"
 ARCH_FLUX_2_KLEIN_4B = "Flux.2-klein-4b"
 ARCH_FLUX_2_KLEIN_9B = "Flux.2-klein-9b"
 ARCH_QWEN_IMAGE = "Qwen-Image"
+ARCH_QWEN_IMAGE_21 = "Qwen-Image-2.1"
 ARCH_QWEN_IMAGE_EDIT = "Qwen-Image-Edit"
 ARCH_QWEN_IMAGE_EDIT_PLUS = "Qwen-Image-Edit-Plus"
 ARCH_QWEN_IMAGE_EDIT_2511 = "Qwen-Image-Edit-2511"
@@ -199,6 +201,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_QWEN_IMAGE:
         arch = ARCH_QWEN_IMAGE
         impl = IMPL_QWEN_IMAGE
+    elif architecture == ARCHITECTURE_QWEN_IMAGE_21:
+        arch = ARCH_QWEN_IMAGE_21
+        impl = IMPL_QWEN_IMAGE
     elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
         # We treat Qwen-Image-Edit and Qwen-Image-Edit-Plus the same for architecture and implementation
         # So we must distinguish them by custom_arch if needed
@@ -298,7 +303,7 @@ def build_metadata(
         # Use 1328x1328 for Qwen-Image, 1024x1024 for Qwen-Image-Edit and Z-Image, or 1280x720 for others (this is just a placeholder, actual resolution may vary)
         if architecture == ARCHITECTURE_QWEN_IMAGE:
             reso = (1328, 1328)
-        elif architecture == ARCHITECTURE_QWEN_IMAGE_EDIT:
+        elif architecture in (ARCHITECTURE_QWEN_IMAGE_EDIT, ARCHITECTURE_QWEN_IMAGE_21):
             reso = (1024, 1024)
         elif architecture == ARCHITECTURE_Z_IMAGE:
             reso = (1024, 1024)

@@ -160,6 +160,7 @@ For detailed information on specific architectures, configurations, and advanced
 - [FramePack (Single Frame)](./docs/framepack_1f.md)
 - [FLUX.1 Kontext](./docs/flux_kontext.md)
 - [Qwen-Image](./docs/qwen_image.md)
+- [Qwen-Image 2.1](./docs/qwen_image_21.md)
 - [Z-Image](./docs/zimage.md)
 - [HiDream-O1-Image](./docs/hidream_o1.md)
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)

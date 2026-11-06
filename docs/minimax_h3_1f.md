@@ -184,6 +184,21 @@ fp_1f_target_index = 24       # target position — REQUIRED when controls are p
 - The alpha channel of RGBA control images is ignored (dropped before both VAE and text-encoder processing) — unlike FramePack one-frame training, it does not act as a mask.
 - Time-order is unconstrained: an anchor **after** the target (`fp_1f_clean_indices = [120]`, `fp_1f_target_index = 24`) trains an L2VA-style LoRA (generate the image that precedes an end state). Generation fits condition images to the canvas the same way training fits controls to the bucket (scale to cover, center crop), so the LoRA sees its conditions preprocessed identically; the released Diffusers pipeline instead stretches its first picture onto the canvas.
 
+The same dataset as `image_jsonl_file`: the control image(s) go on each line (`control_path`, or `control_path_0`, `control_path_1`, ... for several), while the indices stay in the TOML and apply to every line:
+
+```toml
+[[datasets]]
+image_jsonl_file = "/data/h3/edit/items.jsonl"
+cache_directory = "/data/h3/cache-edit"
+fp_1f_clean_indices = [0]
+fp_1f_target_index = 24
+```
+
+```jsonl
+{"image_path": "/data/h3/edit/targets/001.png", "control_path": "/data/h3/edit/sources/001.png", "caption": "..."}
+{"image_path": "/data/h3/edit/targets/002.png", "control_path": "/data/h3/edit/sources/002.png", "caption": "..."}
+```
+
 ### Choosing indices
 
 The base model's strongest prior is **verbatim anchor copying at coinciding timestamps**: a control whose index equals the target index is reproduced almost exactly, so such a dataset trains head-on against copying — only do this when copy-at-the-anchor is the desired behavior. The recommended starting recipe for editing is `fp_1f_clean_indices = [0]`, `fp_1f_target_index = 24` (a one-second separation); inference must then use the same relative placement (`--one_frame_inference "target_index=24,control_index=0"`). For inbetween triplets extracted from real videos, use the real frame distances: (first@0, last@N, target@αN) → `fp_1f_clean_indices = [0, N]`, `fp_1f_target_index = round(αN)`. Since the indices live in the dataset config, one α per dataset block; several blocks can share a TOML.
