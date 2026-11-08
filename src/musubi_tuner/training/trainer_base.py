@@ -803,7 +803,8 @@ class NetworkTrainer:
             # indices = (u * noise_scheduler.config.num_train_timesteps).long()
             t_min = args.min_timestep if args.min_timestep is not None else 0
             t_max = args.max_timestep if args.max_timestep is not None else 1000
-            indices = (u * (t_max - t_min) + t_min).long()
+            # the table runs from noise to data: index i holds timestep 1000 - i
+            indices = (1000 - (u * (t_max - t_min) + t_min)).long().clamp(max=999)
 
             timesteps = noise_scheduler.timesteps[indices].to(device=device)  # 1 to 1000
 
