@@ -58,4 +58,10 @@ def detect_arch_config(unet):
 
         return HV_1_5_IMAGE_TARGET_REPLACE_MODULES, [r".*(_in).*"]
 
+    if "SingleStreamBlock" in module_class_names and "TextFusionBlock" in module_class_names:
+        # Krea 2: same targets as lora_krea2 (None = every Linear; modulation and RMSNorm are raw Parameters, never wrapped)
+        from .lora_krea2 import KREA2_TARGET_REPLACE_MODULES
+
+        return KREA2_TARGET_REPLACE_MODULES, []
+
     raise ValueError(f"Cannot auto-detect architecture. Module classes found: {sorted(module_class_names)}")
