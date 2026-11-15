@@ -53,6 +53,7 @@ LoHa and LoKr automatically detect the model architecture and apply appropriate 
 - FLUX.1 Kontext / FLUX.2
 - Qwen-Image series
 - Z-Image
+- Krea 2
 
 Kandinsky5 is **not supported** with LoHa/LoKr (it requires special handling that is incompatible with automatic architecture detection).
 
@@ -70,6 +71,7 @@ LoHaとLoKrは、モデルのアーキテクチャを自動で検出し、適切
 - FLUX.1 Kontext / FLUX.2
 - Qwen-Image系
 - Z-Image
+- Krea 2
 
 Kandinsky5はLoHa/LoKrに **対応していません**（自動アーキテクチャ検出と互換性のない特殊な処理が必要です）。
 
