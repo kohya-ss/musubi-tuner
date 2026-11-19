@@ -454,13 +454,15 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=None,
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,
         weight_path=None,
         fp8=False,
     ):
+        if device is None:
+            device = torch.cuda.current_device()
         self.text_len = text_len
         self.dtype = dtype if not fp8 else torch.float8_e4m3fn
         self.device = device
