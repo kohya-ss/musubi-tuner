@@ -2135,11 +2135,17 @@ class NetworkTrainer:
             self.on_before_sample_images(
                 accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
             )
+            # The LoRA modules are not submodules of the transformer, so putting the transformer in eval mode for
+            # sampling does not reach them. Put the network in eval mode as well, so that dropout is off while sampling.
+            unwrapped_network = accelerator.unwrap_model(network)
+            network_was_training = unwrapped_network.training
+            unwrapped_network.eval()
             try:
                 self.sample_images(
                     accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, sample_parameters, dit_dtype
                 )
             finally:
+                unwrapped_network.train(network_was_training)
                 self.on_after_sample_images(
                     accelerator, args, epoch_arg, steps_arg, sample_resources, transformer, network, sample_parameters, dit_dtype
                 )
